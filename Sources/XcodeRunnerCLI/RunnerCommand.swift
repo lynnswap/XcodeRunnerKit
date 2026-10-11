@@ -21,6 +21,10 @@ struct RunnerCommand: AsyncParsableCommand {
     @Option var outputDirectory = "XcodeRunnerOutput"
     @Option var derivedData: String?
     @Option var developerDirectory: String?
+    @Option(help: "Local directory shared by every repository runner on this Mac.")
+    var poolDirectory: String?
+    @Option(help: "Shared pool capacity. Required with --pool-directory.")
+    var maximumConcurrentJobs: Int?
     @Option(name: .customLong("setting"), help: "A build setting in NAME=VALUE form. May be repeated.")
     var settings: [String] = []
     @Option(name: .customLong("environment"), help: "A child environment value in NAME=VALUE form. May be repeated.")
@@ -48,16 +52,24 @@ struct RunnerCommand: AsyncParsableCommand {
         request.environment = try Self.assignments(environment)
         request.buildSettings = try Self.assignments(settings)
         request.arguments = additionalArguments
-        let runner = XcodeRunner(developerDirectory: developerDirectory.map(Self.url))
+        var runner = XcodeRunner(developerDirectory: developerDirectory.map(Self.url))
+        if let poolDirectory, let maximumConcurrentJobs {
+            runner.executionPool = try HostExecutionPool(
+                directory: Self.url(poolDirectory), maximumConcurrentJobs: maximumConcurrentJobs
+            )
+        } else if poolDirectory != nil || maximumConcurrentJobs != nil {
+            throw ValidationError("Specify both --pool-directory and --maximum-concurrent-jobs.")
+        }
+        let configuredRunner = runner
         let task = Task {
-            try await runner.run(action, request: request) { data in
+            try await configuredRunner.run(action, request: request) { data in
                 try FileHandle.standardOutput.write(contentsOf: data)
             }
         }
         let signals = [SIGINT, SIGTERM].map { number in
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
-            source.setEventHandler { task.cancel() }
+            source.setEventHandler { @Sendable in task.cancel() }
             source.resume()
             return source
         }
@@ -68,6 +80,8 @@ struct RunnerCommand: AsyncParsableCommand {
             let result = try await task.value
             print("Log: \(result.logURL.path(percentEncoded: false))")
             print("Result bundle: \(result.resultBundleURL.path(percentEncoded: false))")
+        } catch is CancellationError {
+            throw ExitCode(130)
         } catch let failure as XcodeBuildFailure {
             try? FileHandle.standardError.write(contentsOf: Data(("Log: " + failure.result.logURL.path(percentEncoded: false) + "\n").utf8))
             switch failure.result.status {

@@ -59,8 +59,10 @@ struct XcodeRunnerKitTests {
         let executable = try script("sleep 120 &\nchild=$!\nprintf '%s %s\\n' \"$$\" \"$child\" > \"$READY_PATH\"\nwait \"$child\"", at: root)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root)
         request.environment["READY_PATH"] = marker.path(percentEncoded: false)
-        let runner = XcodeRunner(executableURL: executable)
-        let task = Task { try await runner.run(.test, request: request) }
+        var runner = XcodeRunner(executableURL: executable)
+        runner.executionPool = try HostExecutionPool(directory: root.appending(path: "pool"), maximumConcurrentJobs: 1)
+        let configuredRunner = runner
+        let task = Task { try await configuredRunner.run(.test, request: request) }
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(10))
         while !FileManager.default.fileExists(atPath: marker.path(percentEncoded: false)) && clock.now < deadline {
@@ -81,12 +83,30 @@ struct XcodeRunnerKitTests {
         } catch let error as XcodeBuildFailure {
             #expect(error.result.status == .cancelled)
         }
+        let pool = try #require(configuredRunner.executionPool)
+        try await pool.withSlot {}
         for pid in pids {
             let reapingDeadline = clock.now.advanced(by: .seconds(10))
             while kill(pid, 0) == 0 && clock.now < reapingDeadline {
                 try await Task.sleep(for: .milliseconds(20))
             }
             #expect(kill(pid, 0) == -1, "Process \(pid) remained after cancellation.")
+        }
+    }
+
+    @Test func poolAcquisitionFailureDoesNotExecutePayload() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let blocked = root.appending(path: "pool")
+        try Data().write(to: blocked)
+        let marker = root.appending(path: "unexpected-payload")
+        let pool = try HostExecutionPool(directory: blocked, maximumConcurrentJobs: 2)
+        do {
+            try await pool.withSlot { try Data().write(to: marker) }
+            Issue.record("A pool I/O failure bypassed the limit.")
+        } catch {
+            #expect(!FileManager.default.fileExists(atPath: marker.path))
         }
     }
 
