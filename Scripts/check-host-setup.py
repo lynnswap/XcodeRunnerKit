@@ -60,6 +60,12 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit host setup ") as tempora
     finally:
         unwritable_cache.chmod(0o755)
 
+    nested = empty_host / "CompilationCache" / "nested"
+    expected_nested = nested.resolve()
+    subprocess.run(command[:-2] + [str(empty_host), str(nested)], env=environment, check=True, capture_output=True)
+    assert (empty_host / "CompilationCache").resolve() == expected_nested
+    assert expected_nested.is_dir()
+
     runner_temp = root / "work" / "_temp"
     runner_temp.mkdir(parents=True)
     package = runner_temp / "SourcePackages" / "checkout"
@@ -84,6 +90,13 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit host setup ") as tempora
     failure = subprocess.run(["bash", str(scripts / "cleanup-runner-temp.sh")], env={**environment, "RUNNER_TEMP": str(outside)}, capture_output=True)
     assert failure.returncode != 0
     assert (outside / "retained").read_text() == "outside data"
+    (outside / "outside-link").symlink_to("retained")
+    linked_root = root / "linked-root" / "_temp"
+    linked_root.parent.mkdir()
+    linked_root.symlink_to(outside, target_is_directory=True)
+    failure = subprocess.run(["bash", str(scripts / "cleanup-runner-temp.sh")], env={**environment, "RUNNER_TEMP": str(linked_root)}, capture_output=True)
+    assert failure.returncode != 0
+    assert (outside / "outside-link").is_symlink()
     unreadable = runner_temp / "unreadable"
     unreadable.mkdir()
     unreadable.chmod(0)

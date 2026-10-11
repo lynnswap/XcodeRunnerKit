@@ -20,6 +20,7 @@ if relocating and (cache.is_symlink() or cache.exists()):
     if not cache.is_dir() or any(cache.iterdir()):
         raise RuntimeError(f"Preserve or move the existing cache at {cache} before changing its location")
 destination.mkdir(parents=True, exist_ok=True)
+destination = destination.resolve()
 with tempfile.TemporaryFile(dir=destination):
     pass
 if relocating:
