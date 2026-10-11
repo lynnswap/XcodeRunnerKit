@@ -160,6 +160,8 @@ group if the host crashes. GUI login remains required; a shared app identity doe
 isolate repositories or credentials from other jobs running as the same user.
 The host also cleans up a service's group if its helper crashes, before reaping
 the helper so its group identifier cannot be reused during cleanup.
+The ownership lock is inherited by the service processes. A replacement host
+waits for old services to finish shutting down before starting new listeners.
 
 To return a runner to the individual mode, remove its `.xcode-runner-host`
 marker, wait for its common-host service to stop, then run `./svc.sh install`

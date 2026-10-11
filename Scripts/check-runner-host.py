@@ -37,12 +37,15 @@ def fixture(root, name):
     (directory / '.xcode-runner-host').touch()
     (directory / 'worker.py').write_text('''import json, os, signal, time
 from pathlib import Path
-Path('pid.json').write_text(json.dumps({'pid':os.getpid(), 'group':os.getpgrp()}))
 def stop(*args):
+    Path('stopping').touch()
+    delay = Path('stop-delay')
+    if delay.exists(): time.sleep(float(delay.read_text()))
     Path('stopped').touch()
     raise SystemExit(0)
 signal.signal(signal.SIGINT, stop)
 signal.signal(signal.SIGTERM, stop)
+Path('pid.json').write_text(json.dumps({'pid':os.getpid(), 'group':os.getpgrp()}))
 while True: time.sleep(1)
 ''')
     (directory / 'runsvc.sh').write_text('''#!/bin/bash
@@ -112,11 +115,12 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
         assert 'service ended: Error' not in host_log
 
     launched = fixture(runners, 'launchd')
+    (launched/'stop-delay').write_text('8')
     label = f'dev.lynnswap.XcodeRunnerHost.test.{os.getpid()}'
     target = f'gui/{os.getuid()}/{label}'
     plist = root/'service.plist'
     plist.write_bytes(plistlib.dumps({
-        'Label':label, 'ProgramArguments':arguments, 'RunAtLoad':True,
+        'Label':label, 'ProgramArguments':arguments, 'RunAtLoad':True, 'ThrottleInterval':1,
         'StandardOutPath':str(root/'launchd.stdout'),
         'StandardErrorPath':str(root/'launchd.stderr'),
     }))
@@ -125,6 +129,13 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
         wait_for(lambda:(launched/'pid.json').exists(), 'LaunchAgent runner did not start')
         process = json.loads((launched/'pid.json').read_text())
         subprocess.run(['launchctl','kill','SIGKILL',target],check=True)
+        wait_for(lambda:(launched/'stopping').exists(), 'Old service did not start shutdown')
+        # The old helper still owns the lock during this delayed shutdown.
+        assert alive(process['pid'])
+        failed_start = subprocess.run(arguments, capture_output=True, timeout=10)
+        assert failed_start.returncode != 0 and b'Another runner host' in failed_start.stderr
+        assert json.loads((launched/'pid.json').read_text())['pid'] == process['pid']
+        subprocess.run(['launchctl','kickstart',target],check=True)
         wait_for(lambda:not alive(process['pid']), 'Runner helper left a runner alive after host crash')
         (launched/'pid.json').unlink()
         subprocess.run(['launchctl','kickstart',target],check=True)
@@ -134,5 +145,17 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     finally:
         subprocess.run(['launchctl','bootout',target],check=True)
     wait_for(lambda:not alive(restarted['pid']), 'Runner survived service removal')
+
+    scripts = Path(__file__).resolve().parent
+    subprocess.run(['bash',str(scripts/'build-runner-host.sh'),'-',str(root/'packaging'),executable],check=True,capture_output=True)
+    tools = root/'tools'
+    tools.mkdir()
+    fake_launchctl = tools/'launchctl'
+    fake_launchctl.write_text('#!/bin/bash\nexit 0\n')
+    fake_launchctl.chmod(0o755)
+    environment = {**os.environ, 'HOME':str(root/'home'), 'PATH':str(tools)+os.pathsep+os.environ['PATH']}
+    rejected = subprocess.run(['bash',str(scripts/'install-runner-host.sh'),str(root/'packaging/XcodeRunnerHost.app')],env=environment,capture_output=True)
+    assert rejected.returncode != 0 and b'certificate signing identity' in rejected.stderr
+    assert not (root/'home/Applications').exists()
 
 print('PASS: multiple runners, separate service groups, discovery, individual-service exclusion, singleton, graceful shutdown, host/helper crash cleanup, immediate service exit, and restart')

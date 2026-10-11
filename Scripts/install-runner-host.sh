@@ -8,7 +8,8 @@ host_root=${3:-"$HOME/Library/Application Support/XcodeRunnerKit"}
 applications=${4:-"$HOME/Applications"}
 identifier=dev.lynnswap.XcodeRunnerHost
 codesign --verify --strict "$source_app"
-if codesign -dv "$source_app" 2>&1 | grep -q 'Signature=adhoc'; then
+signature=$(codesign -dv "$source_app" 2>&1)
+if [[ "$signature" == *Signature=adhoc* ]]; then
     echo "Use a certificate signing identity for persistent macOS privacy permissions." >&2
     exit 1
 fi

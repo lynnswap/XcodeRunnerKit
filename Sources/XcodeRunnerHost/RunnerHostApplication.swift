@@ -15,6 +15,7 @@ private struct HostOptions: ParsableCommand {
 
     @Option(help: .hidden) var serviceDirectory: String?
     @Option(help: .hidden) var parentProcessID: Int32?
+    @Option(help: .hidden) var ownershipDescriptor: Int32?
 
     @Option(help: "Directory for runner service logs.")
     var logsDirectory = URL.homeDirectory.appending(path: "Library/Application Support/XcodeRunnerKit/logs/runners").path(percentEncoded: false)
@@ -26,10 +27,14 @@ private enum RunnerHostApplication {
         do {
             let options = try HostOptions.parse()
             if let directory = options.serviceDirectory {
-                guard let parent = options.parentProcessID, getpgrp() == getpid() else {
-                    throw ValidationError("Service helpers require a parent PID and their own process group.")
+                guard let parent = options.parentProcessID, let ownership = options.ownershipDescriptor,
+                      getpgrp() == getpid() else {
+                    throw ValidationError("Service helpers require a parent PID, an ownership descriptor, and their own process group.")
                 }
-                let service = RunnerService(directory: URL(filePath: directory), parent: parent)
+                guard fcntl(ownership, F_GETFD) >= 0 else {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+                let service = RunnerService(directory: URL(filePath: directory), parent: parent, ownership: ownership)
                 service.start()
                 withExtendedLifetime(service) { dispatchMain() }
             }
@@ -47,17 +52,28 @@ private enum RunnerHostApplication {
     }
 }
 
+private extension Subprocess.PlatformOptions {
+    mutating func inheritOwnership(_ descriptor: Int32) {
+        preSpawnProcessConfigurator = { _, actions in
+            let code = posix_spawn_file_actions_addinherit_np(&actions, descriptor)
+            if code != 0 { throw NSError(domain: NSPOSIXErrorDomain, code: Int(code)) }
+        }
+    }
+}
+
 @MainActor
 private final class RunnerService {
     private let directory: URL
     private let parent: Int32
+    private let ownership: Int32
     private var task: Task<Void, Never>?
     private var parentExit: (any DispatchSourceProcess)?
     private var signals: [any DispatchSourceSignal] = []
 
-    init(directory: URL, parent: Int32) {
+    init(directory: URL, parent: Int32, ownership: Int32) {
         self.directory = directory
         self.parent = parent
+        self.ownership = ownership
     }
 
     func start() {
@@ -76,6 +92,7 @@ private final class RunnerService {
             do {
                 try Task.checkCancellation()
                 var options = Subprocess.PlatformOptions()
+                options.inheritOwnership(ownership)
                 options.teardownSequence = [.gracefulShutDown(allowedDurationToNextStep: .seconds(35))]
                 let result = try await Subprocess.run(
                     .path("/bin/bash"),
@@ -276,6 +293,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         var options = Subprocess.PlatformOptions()
         // The official updater searches for its Node process by the service's process group.
         options.processGroupID = 0
+        // Helpers retain this same open-file lock until their services finish shutting down.
+        options.inheritOwnership(lockDescriptor)
         options.teardownSequence = [.gracefulShutDown(allowedDurationToNextStep: .seconds(50))]
         do {
             print("Starting \(name); service log: \(log.path(percentEncoded: false)).")
@@ -284,6 +303,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 arguments: .init([
                     "--service-directory", directory.path(percentEncoded: false),
                     "--parent-process-id", String(getpid()),
+                    "--ownership-descriptor", String(lockDescriptor),
                 ]),
                 environment: .inherit,
                 workingDirectory: .init(directory.path(percentEncoded: false)),
