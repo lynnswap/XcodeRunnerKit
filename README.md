@@ -231,10 +231,15 @@ and SIGTERM through the same cancellation path.
 
 ## GitHub Actions
 
-[Set up a native host](Documentation/NativeHost.md) for repository runners,
-private dependency authentication, service operation, and cache retention.
-The native workflow runs trusted main pushes and manual dispatches on the
-`xcode-runnerkit` host label, covering macOS tests and the iOS consumer fixture.
+This package's own CI runs pull requests, main pushes, and manual dispatches
+on fresh GitHub-hosted macOS runners. Each job builds the CLI from its checkout
+and uses temporary pool, cache, and output directories. The workflow covers
+macOS tests, separate-process capacity, and the iOS consumer fixture.
+
+[Set up a native host](Documentation/NativeHost.md) to run trusted consumer
+repositories on an owned Mac, including private dependency authentication,
+service operation, and cache retention. Public contribution workflows belong
+on isolated hosted runners rather than a Mac that holds private credentials.
 
 ## Development
 
