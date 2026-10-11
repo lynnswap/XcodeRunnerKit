@@ -132,6 +132,55 @@ DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer \
 python3 Scripts/check-simulators.py /absolute/path/to/xcode-runner
 ```
 
+
+## Shared compilation cache
+
+Set `request.compilationCache = CompilationCache(directory: cacheURL)`, or add
+`--compilation-cache <shared-CAS-directory>` to the CLI. Each operation keeps its
+own DerivedData, build database, intermediate products, and result bundle.
+
+The cache configuration enables Swift and Clang compilation caching and maps
+the source root and DerivedData to stable compiler-visible prefixes. Cached
+operations use canonical physical paths, including /private for /var and /tmp.
+Additional
+locations outside the source root can be mapped with `prefixMappings` in Swift
+or repeated `--prefix-mapping /physical/path=/canonical-prefix` options.
+Use physical paths and distinct replacement prefixes for extra mappings.
+The fixture uses a relative Clang module map so its contents stay unchanged
+when relocated. Generated module maps that embed absolute paths can miss
+because their contents are different compiler inputs.
+Raw `buildSettings` or `--setting` values take precedence over cache defaults.
+
+Keep the package checkout basename consistent across jobs: SwiftPM's package
+identity is a compiler input. Changes to source, compiler flags, toolchains,
+SDKs, dependencies, or macro behavior can legitimately cause misses.
+Prefix mapping changes paths recorded in compiler outputs, including debug and
+coverage data. Use unmapped builds when a consumer needs original physical paths.
+
+Add `--cache-diagnostics` to inspect replay hit/miss notes. The reproducible
+check uses paths containing spaces, relocated checkouts, concurrent builds,
+and a changed Clang input:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer \
+python3 Scripts/check-compilation-cache.py /absolute/path/to/xcode-runner
+```
+
+Measured on an M1 Pro (32 GB, macOS 27.2, Xcode 27.1), this small fixture took
+6.17 seconds cold and 3.76 seconds after relocation. Both concurrent relocated
+builds took about 4 seconds. Relocated runs emitted 41 replay-hit notes and no
+replay-miss notes; Xcode can repeat notes, so these are not compiler-task counts.
+Changing the C implementation and its test expectation produced misses and
+passed the tests with the changed result. These timings describe this fixture.
+
+The fixture exercises the SDK's Observation macro. Its result does not establish
+cache reuse for every third-party macro or build-tool plugin. Those consumers
+need their own build verification. Keep shared CAS directories separate from
+job artifact retention, and remove a CAS only while its users are stopped.
+
+Xcode settings: [Apple build settings reference](https://developer.apple.com/documentation/xcode/build-settings-reference).
+The path-mapping approach also follows [this worktree cache investigation](https://zenn.dev/sryu/articles/worktree-compilation-cache).
+
 ## Shared host capacity
 
 Configure the same pool directory and capacity in every repository runner:

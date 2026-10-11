@@ -13,6 +13,14 @@ public enum XcodeBuildSource: Sendable, Equatable {
         }
     }
 
+    func canonicalized() throws -> Self {
+        switch self {
+        case .workspace(let url): .workspace(try url.compilerCanonicalURL())
+        case .project(let url): .project(try url.compilerCanonicalURL())
+        case .package(let url): .package(try url.compilerCanonicalURL())
+        }
+    }
+
     var arguments: [String] {
         switch self {
         case .workspace(let url): ["-workspace", url.path(percentEncoded: false)]
@@ -39,6 +47,7 @@ public struct XcodeBuildRequest: Sendable {
     public var outputDirectory: URL
     /// An existing or reusable DerivedData location. Defaults to the job directory.
     public var derivedDataDirectory: URL?
+    public var compilationCache: CompilationCache?
     /// Creates a job-owned Simulator and overrides destination with its UDID.
     public var simulator: SimulatorConfiguration?
     public var environment: [String: String] = [:]

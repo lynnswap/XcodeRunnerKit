@@ -21,6 +21,12 @@ struct RunnerCommand: AsyncParsableCommand {
     @Option var outputDirectory = "XcodeRunnerOutput"
     @Option var derivedData: String?
     @Option var developerDirectory: String?
+    @Option(help: "Shared compiler CAS directory; DerivedData remains isolated.")
+    var compilationCache: String?
+    @Flag(help: "Emit compilation cache diagnostic remarks.")
+    var cacheDiagnostics = false
+    @Option(name: .customLong("prefix-mapping"), help: "Extra physical-path=canonical-prefix mapping. May be repeated.")
+    var prefixMappings: [String] = []
     @Option(help: "Runtime identifier for a new, job-owned iOS Simulator.")
     var simulatorRuntime: String?
     @Option(help: "Device type supported by --simulator-runtime.")
@@ -53,6 +59,19 @@ struct RunnerCommand: AsyncParsableCommand {
             outputDirectory: Self.url(outputDirectory)
         )
         request.derivedDataDirectory = derivedData.map(Self.url)
+        if let compilationCache {
+            var cache = CompilationCache(directory: Self.url(compilationCache))
+            cache.enablesDiagnosticRemarks = cacheDiagnostics
+            cache.prefixMappings = try Self.assignments(prefixMappings).sorted(by: { $0.key < $1.key }).map {
+                CompilationCache.PrefixMapping(
+                    source: URL(filePath: $0.key, relativeTo: URL.currentDirectory()).absoluteURL,
+                    replacement: $0.value
+                )
+            }
+            request.compilationCache = cache
+        } else if cacheDiagnostics || !prefixMappings.isEmpty {
+            throw ValidationError("Specify --compilation-cache with cache diagnostics or prefix mappings.")
+        }
         if let simulatorRuntime, let simulatorDeviceType {
             request.simulator = SimulatorConfiguration(
                 runtimeIdentifier: simulatorRuntime, deviceTypeIdentifier: simulatorDeviceType
