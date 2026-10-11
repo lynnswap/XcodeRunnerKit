@@ -244,3 +244,7 @@ xcodebuild test \
   -scheme XcodeRunnerKit-Package \
   -destination 'platform=macOS,arch=arm64'
 ```
+
+## License
+
+MIT License. See [LICENSE](LICENSE).
