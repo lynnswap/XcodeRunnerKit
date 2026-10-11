@@ -195,6 +195,62 @@ struct XcodeRunnerKitTests {
         #expect(!FileManager.default.fileExists(atPath: request.outputDirectory.path))
     }
 
+    @Test(arguments: [Int32(0), Int32(7)])
+    func cancellationDuringDeletionPreservesDiagnostics(exitCode: Int32) async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let identifier = UUID().uuidString
+        let ready = root.appending(path: "deleting")
+        let finish = root.appending(path: "finish")
+        let deleted = root.appending(path: "deleted")
+        let simulator = root.appending(path: "simctl")
+        try """
+            #!/bin/sh
+            case "$2" in
+            create) echo \(identifier);;
+            delete)
+                touch \(ready.path)
+                while [ ! -e \(finish.path) ]; do sleep 0.02; done
+                touch \(deleted.path);;
+            esac
+            """.write(to: simulator, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: simulator.path)
+        let executable = try script("printf 'completed payload\\n'; exit \(exitCode)", at: root)
+        var runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
+        runner.executionPool = try HostExecutionPool(directory: root.appending(path: "pool"), maximumConcurrentJobs: 1)
+        var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
+        request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
+        let configuredRunner = runner
+        let configuredRequest = request
+        let task = Task { try await configuredRunner.run(.test, request: configuredRequest) }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(10))
+        while !FileManager.default.fileExists(atPath: ready.path), clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        guard FileManager.default.fileExists(atPath: ready.path) else {
+            task.cancel()
+            try Data().write(to: finish)
+            _ = try? await task.value
+            Issue.record("Simulator deletion did not become ready.")
+            return
+        }
+        task.cancel()
+        try Data().write(to: finish)
+        do {
+            _ = try await task.value
+            Issue.record("Cancellation during Simulator deletion returned successfully.")
+        } catch let failure as XcodeBuildFailure {
+            #expect(failure.result.status == (exitCode == 0 ? .cancelled : .exited(exitCode)))
+            #expect(failure.result.simulatorIdentifier == identifier)
+            #expect(try String(contentsOf: failure.result.logURL, encoding: .utf8).contains("completed payload"))
+        }
+        #expect(FileManager.default.fileExists(atPath: deleted.path))
+        let pool = try #require(configuredRunner.executionPool)
+        try await pool.withSlot {}
+    }
+
     private func script(_ body: String, at root: URL) throws -> URL {
         let url = root.appending(path: "tool")
         try ("#!/bin/sh\n" + body + "\n").write(to: url, atomically: true, encoding: .utf8)

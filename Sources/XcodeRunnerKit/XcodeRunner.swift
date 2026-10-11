@@ -76,7 +76,18 @@ public struct XcodeRunner: Sendable {
                 result: completed, cleanupError: error
             )
         }
-        return try outcome.get()
+        let result = try outcome.get()
+        if Task.isCancelled {
+            throw XcodeBuildFailure(
+                result: XcodeBuildResult(
+                    status: .cancelled, outputDirectory: result.outputDirectory,
+                    derivedDataDirectory: result.derivedDataDirectory, logURL: result.logURL,
+                    resultBundleURL: result.resultBundleURL, simulatorIdentifier: result.simulatorIdentifier
+                ),
+                underlyingError: CancellationError(), cleanupError: nil
+            )
+        }
+        return result
     }
 
     private func runUnrestricted(
