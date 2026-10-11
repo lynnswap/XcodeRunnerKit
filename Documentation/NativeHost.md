@@ -154,8 +154,9 @@ launchctl kickstart -k "gui/$(id -u)/dev.lynnswap.XcodeRunnerHost"
 ```
 
 Stopping the host forwards cancellation to the service wrappers and waits for
-them. Its children retain its process group so launchd also cleans them up if
-the host crashes. GUI login remains required; a shared app identity does not
+them. Each service has its own process group, as required by GitHub's macOS
+updater. A helper watches the host's process exit and cleans up that service's
+group if the host crashes. GUI login remains required; a shared app identity does not
 isolate repositories or credentials from other jobs running as the same user.
 
 To return a runner to the individual mode, remove its `.xcode-runner-host`

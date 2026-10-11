@@ -75,6 +75,9 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
             second = fixture(runners, 'second')
             wait_for(lambda:(second/'pid.json').exists(), 'New runner was not discovered')
             second_pid = json.loads((second/'pid.json').read_text())['pid']
+            first_group = json.loads((first/'pid.json').read_text())['group']
+            second_group = json.loads((second/'pid.json').read_text())['group']
+            assert first_group != second_group
             (first/'.xcode-runner-host').unlink()
             wait_for(lambda:(first/'stopped').exists() and not alive(first_pid), 'Removed runner did not stop')
             host.send_signal(signal.SIGTERM)
@@ -108,7 +111,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
         wait_for(lambda:(launched/'pid.json').exists(), 'LaunchAgent runner did not start')
         process = json.loads((launched/'pid.json').read_text())
         subprocess.run(['launchctl','kill','SIGKILL',target],check=True)
-        wait_for(lambda:not alive(process['pid']), 'launchd left a runner alive after host crash')
+        wait_for(lambda:not alive(process['pid']), 'Runner helper left a runner alive after host crash')
         (launched/'pid.json').unlink()
         subprocess.run(['launchctl','kickstart',target],check=True)
         wait_for(lambda:(launched/'pid.json').exists(), 'LaunchAgent did not restart')
@@ -118,4 +121,4 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
         subprocess.run(['launchctl','bootout',target],check=True)
     wait_for(lambda:not alive(restarted['pid']), 'Runner survived service removal')
 
-print('PASS: multiple runners, discovery, individual-service exclusion, singleton, graceful shutdown, crash cleanup, and service restart')
+print('PASS: multiple runners, separate service groups, discovery, individual-service exclusion, singleton, graceful shutdown, crash cleanup, and service restart')

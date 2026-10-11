@@ -13,6 +13,9 @@ private struct HostOptions: ParsableCommand {
     @Option(help: "Directory containing runner installations.")
     var runnersRoot = URL.homeDirectory.appending(path: "Library/XcodeRunnerKit/runners").path(percentEncoded: false)
 
+    @Option(help: .hidden) var serviceDirectory: String?
+    @Option(help: .hidden) var parentProcessID: Int32?
+
     @Option(help: "Directory for runner service logs.")
     var logsDirectory = URL.homeDirectory.appending(path: "Library/Application Support/XcodeRunnerKit/logs/runners").path(percentEncoded: false)
 }
@@ -22,6 +25,14 @@ private enum RunnerHostApplication {
     @MainActor static func main() {
         do {
             let options = try HostOptions.parse()
+            if let directory = options.serviceDirectory {
+                guard let parent = options.parentProcessID, getpgrp() == getpid() else {
+                    throw ValidationError("Service helpers require a parent PID and their own process group.")
+                }
+                let service = RunnerService(directory: URL(filePath: directory), parent: parent)
+                service.start()
+                withExtendedLifetime(service) { dispatchMain() }
+            }
             let host = try RunnerHost(
                 root: URL(filePath: options.runnersRoot, directoryHint: .isDirectory),
                 logs: URL(filePath: options.logsDirectory, directoryHint: .isDirectory)
@@ -33,6 +44,59 @@ private enum RunnerHostApplication {
         } catch {
             HostOptions.exit(withError: error)
         }
+    }
+}
+
+@MainActor
+private final class RunnerService {
+    private let directory: URL
+    private let parent: Int32
+    private var task: Task<Void, Never>?
+    private var parentExit: (any DispatchSourceProcess)?
+    private var signals: [any DispatchSourceSignal] = []
+
+    init(directory: URL, parent: Int32) {
+        self.directory = directory
+        self.parent = parent
+    }
+
+    func start() {
+        for number in [SIGTERM, SIGINT] {
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+            source.setEventHandler { self.task?.cancel() }
+            source.resume()
+            signals.append(source)
+        }
+        let source = DispatchSource.makeProcessSource(identifier: parent, eventMask: .exit, queue: .main)
+        source.setEventHandler { self.task?.cancel() }
+        source.resume()
+        parentExit = source
+        task = Task {
+            do {
+                try Task.checkCancellation()
+                var options = Subprocess.PlatformOptions()
+                options.teardownSequence = [.gracefulShutDown(allowedDurationToNextStep: .seconds(35))]
+                let result = try await Subprocess.run(
+                    .path("/bin/bash"),
+                    arguments: .init([directory.appending(path: "runsvc.sh").path(percentEncoded: false)]),
+                    environment: .inherit.updating(["ACTIONS_RUNNER_SVC": "1"]),
+                    workingDirectory: .init(directory.path(percentEncoded: false)),
+                    platformOptions: options,
+                    output: .currentStandardOutput,
+                    error: .currentStandardError
+                )
+                print("Official runner service ended with \(result.terminationStatus).")
+            } catch {
+                print("Official runner service ended: \(error)")
+            }
+            // This helper owns its group; remove any descendants left by the service wrapper.
+            fflush(nil)
+            kill(-getpgrp(), SIGKILL)
+            Darwin.exit(EXIT_FAILURE)
+        }
+        // Cover the interval between spawning this helper and registering the exit notification.
+        if getppid() != parent { task?.cancel() }
     }
 }
 
@@ -154,20 +218,28 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         }
         defer { close(descriptor) }
         var options = Subprocess.PlatformOptions()
-        // Retain the host's process group so launchd also cleans up children if the host crashes.
-        options.teardownSequence = [.gracefulShutDown(allowedDurationToNextStep: .seconds(40))]
+        // The official updater searches for its Node process by the service's process group.
+        options.processGroupID = 0
+        options.teardownSequence = [.gracefulShutDown(allowedDurationToNextStep: .seconds(50))]
         do {
             print("Starting \(name); service log: \(log.path(percentEncoded: false)).")
-            let result = try await Subprocess.run(
-                .path("/bin/bash"),
-                arguments: .init([directory.appending(path: "runsvc.sh").path(percentEncoded: false)]),
-                environment: .inherit.updating(["ACTIONS_RUNNER_SVC": "1"]),
+            _ = try await Subprocess.run(
+                .path(.init(URL(filePath: CommandLine.arguments[0]).path(percentEncoded: false))),
+                arguments: .init([
+                    "--service-directory", directory.path(percentEncoded: false),
+                    "--parent-process-id", String(getpid()),
+                ]),
+                environment: .inherit,
                 workingDirectory: .init(directory.path(percentEncoded: false)),
                 platformOptions: options,
                 output: .fileDescriptor(.init(rawValue: descriptor), closeAfterSpawningProcess: false),
                 error: .fileDescriptor(.init(rawValue: descriptor), closeAfterSpawningProcess: false)
             )
-            print("\(name) service stopped with \(result.terminationStatus). Restart the host after resolving service errors.")
+            if Task.isCancelled {
+                print("\(name) service stopped.")
+            } else {
+                print("\(name) service stopped. Inspect its service log before restarting the host.")
+            }
         } catch {
             print("\(name) service ended: \(error)")
         }
