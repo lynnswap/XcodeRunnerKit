@@ -27,6 +27,10 @@ struct RunnerCommand: AsyncParsableCommand {
     var cacheDiagnostics = false
     @Option(name: .customLong("prefix-mapping"), help: "Extra physical-path=canonical-prefix mapping. May be repeated.")
     var prefixMappings: [String] = []
+    @Option(help: "Runtime identifier for a new, job-owned iOS Simulator.")
+    var simulatorRuntime: String?
+    @Option(help: "Device type supported by --simulator-runtime.")
+    var simulatorDeviceType: String?
     @Option(help: "Local directory shared by every repository runner on this Mac.")
     var poolDirectory: String?
     @Option(help: "Shared pool capacity. Required with --pool-directory.")
@@ -64,6 +68,13 @@ struct RunnerCommand: AsyncParsableCommand {
             request.compilationCache = cache
         } else if cacheDiagnostics || !prefixMappings.isEmpty {
             throw ValidationError("Specify --compilation-cache with cache diagnostics or prefix mappings.")
+        }
+        if let simulatorRuntime, let simulatorDeviceType {
+            request.simulator = SimulatorConfiguration(
+                runtimeIdentifier: simulatorRuntime, deviceTypeIdentifier: simulatorDeviceType
+            )
+        } else if simulatorRuntime != nil || simulatorDeviceType != nil {
+            throw ValidationError("Specify both --simulator-runtime and --simulator-device-type.")
         }
         request.environment = try Self.assignments(environment)
         request.buildSettings = try Self.assignments(settings)
