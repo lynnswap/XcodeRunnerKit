@@ -346,7 +346,8 @@ launchctl kickstart -k "gui/$(id -u)/$label"
 
 Stop accepting jobs and let active operations finish before changing capacity,
 pruning caches, or updating host tools. Remove the pool directory only after
-all its users have stopped. Keep the same capacity in every workflow.
+all its users have stopped. The first operation initializes the pool capacity;
+later workflows use that saved capacity even if their specified value differs.
 For cache retention, inspect disk usage and remove an old CAS while its users
 are stopped; DerivedData and result retention are separate.
 

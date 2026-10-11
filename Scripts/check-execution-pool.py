@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Verify production pool locks using separate operating-system processes."""
-import os
 from pathlib import Path
 import signal
 import subprocess
@@ -29,20 +28,26 @@ def main():
             "-o", str(executable),
         ], check=True)
         jobs = {}
+        roots = {}
         logs = []
 
-        def start(name, capacity=2):
+        def start(name, capacity=2, job_root=root):
+            roots[name] = job_root
             log = open(root / (name + ".log"), "wb")
             logs.append(log)
             jobs[name] = subprocess.Popen(
-                [str(executable), str(root), name, str(capacity)],
+                [str(executable), str(job_root), name, str(capacity)],
                 stdout=log, stderr=subprocess.STDOUT,
             )
-            wait_for(lambda: (root / (name + ".ready")).exists() or jobs[name].poll() is not None)
+            wait_for(lambda: (job_root / (name + ".ready")).exists() or jobs[name].poll() is not None)
             return jobs[name]
 
         def started(name):
-            return (root / (name + ".started")).exists()
+            return (roots[name] / (name + ".started")).exists()
+
+        def release(name):
+            (roots[name] / (name + ".release")).touch()
+            assert jobs[name].wait(timeout=10) == 0, (name, (root / (name + ".log")).read_text())
 
         def cancel(name):
             jobs[name].send_signal(signal.SIGTERM)
@@ -66,18 +71,48 @@ def main():
             wait_for(lambda: started("d"))
             assert jobs["b"].poll() is None
 
-            conflict = start("conflict", 3)
-            assert conflict.wait(timeout=10) != 0
-            assert not started("conflict"), "Conflicting capacity executed a payload"
+            start("overflow", 4)
+            time.sleep(0.3)
+            assert jobs["overflow"].poll() is None, "Larger caller capacity was rejected"
+            assert not started("overflow"), "Larger caller capacity bypassed the two-slot pool"
+            release("b")
+            wait_for(lambda: started("overflow"))
+            assert (root / "pool/capacity.lock").read_text() == "2"
 
-            for name in ("b", "d"):
-                (root / (name + ".release")).touch()
-                assert jobs[name].wait(timeout=10) == 0
+            for name in ("overflow", "d"):
+                release(name)
             start("e")
             wait_for(lambda: started("e"))
-            (root / "e.release").touch()
-            assert jobs["e"].wait(timeout=10) == 0
-            print("PASS: two slots, third waiter, waiting/running cancellation, reuse, capacity conflict")
+            release("e")
+
+            larger = root / "larger"
+            larger.mkdir()
+            start("large-a", 4, larger)
+            wait_for(lambda: started("large-a"))
+            for name in ("large-b", "large-c", "large-d"):
+                start(name, 2, larger)
+            wait_for(lambda: all(started(name) for name in ("large-b", "large-c", "large-d")))
+            start("large-waiter", 2, larger)
+            time.sleep(0.3)
+            assert jobs["large-waiter"].poll() is None
+            assert not started("large-waiter"), "Fifth process bypassed the four-slot pool"
+            release("large-a")
+            wait_for(lambda: started("large-waiter"))
+            assert (larger / "pool/capacity.lock").read_text() == "4"
+            for name in ("large-b", "large-c", "large-d", "large-waiter"):
+                release(name)
+
+            for index, value in enumerate(("0", "invalid")):
+                invalid = root / f"invalid-{index}"
+                (invalid / "pool").mkdir(parents=True)
+                (invalid / "pool/capacity.lock").write_text(value)
+                name = f"invalid-{index}"
+                job = start(name, 2, invalid)
+                assert job.wait(timeout=10) != 0
+                assert not started(name), "Invalid saved capacity executed a payload"
+                assert "invalidStoredCapacity" in (root / (name + ".log")).read_text()
+
+            print("PASS: stored capacities 2/4, differing callers 4/2, queueing, cancellation, reuse, invalid configuration")
         finally:
             for job in jobs.values():
                 if job.poll() is None:

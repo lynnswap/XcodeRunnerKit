@@ -188,7 +188,7 @@ The path-mapping approach also follows [this worktree cache investigation](https
 
 ## Shared host capacity
 
-Configure the same pool directory and capacity in every repository runner:
+Configure the same pool directory in every repository runner:
 
 ```swift
 var runner = XcodeRunner()
@@ -199,13 +199,19 @@ runner.executionPool = try HostExecutionPool(
 ```
 
 Add `--pool-directory <path> --maximum-concurrent-jobs 2` to CLI operations.
+The first operation initializes an empty pool with the specified capacity.
+Later operations use the pool's saved capacity, even when the workflow specifies
+a different value. A workflow specifying four against a two-slot pool waits
+when both slots are occupied. A workflow specifying two against a four-slot
+pool can use any available slot.
+
 The kernel holds each slot through execution and log cleanup. Waiting jobs can
-be cancelled. A conflicting capacity or lock I/O failure stops the operation.
+be cancelled. Invalid saved configuration or lock I/O failures stop the operation.
 
 Use a local filesystem and the same macOS user for all cooperating runners.
 Keep lock files in place while jobs run. To change capacity, stop all runners,
-wait for their managed jobs to finish, remove the pool directory, then restart
-every runner with the new capacity. Locks coordinate XcodeRunnerKit operations;
+wait for their managed jobs to finish, remove the pool directory, then initialize
+the new pool with the desired capacity. Locks coordinate XcodeRunnerKit operations;
 unmanaged commands do not participate. Force-killing the wrapper does not
 provide cleanup guarantees for its subprocesses; use Task, SIGINT, or SIGTERM
 cancellation for managed teardown.
