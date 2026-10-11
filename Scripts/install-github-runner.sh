@@ -2,10 +2,10 @@
 set -euo pipefail
 umask 077
 
-repository=${1:?Usage: install-github-runner.sh OWNER/REPO NAME ARCHIVE [HOST_ROOT]; registration token on stdin}
+repository=${1:?Usage: install-github-runner.sh OWNER/REPO NAME ARCHIVE [RUNNERS_ROOT]; registration token on stdin}
 runner_name=${2:?Specify a unique runner name}
 archive=${3:?Specify actions-runner-osx-arm64-2.338.0.tar.gz}
-host_root=${4:-"$HOME/Library/Application Support/XcodeRunnerKit"}
+runners_root=${4:-"$HOME/Library/XcodeRunnerKit/runners"}
 case "$runner_name" in ""|"."|".."|*/*) echo "Runner name must be one path component." >&2; exit 1;; esac
 
 # Verified against the official actions/runner v2.338.0 release asset digest.
@@ -16,7 +16,9 @@ if [[ "$actual" != "$expected" ]]; then
     echo "Runner archive checksum does not match the pinned release." >&2
     exit 1
 fi
-directory="$host_root/runners/$runner_name"
+directory="$runners_root/$runner_name"
+# The official runner's default shell template does not quote its script path.
+case "$directory" in *[[:space:]]*) echo "Runner installation and work paths must not contain whitespace." >&2; exit 1;; esac
 if [[ -f "$directory/.runner" ]]; then
     echo "Runner already configured at $directory; use its service commands or remove its registration before reinstalling." >&2
     exit 1

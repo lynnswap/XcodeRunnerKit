@@ -61,8 +61,11 @@ ssh CI_HOST 'bash "$HOME/Library/Caches/install-github-runner.sh" OWNER/REPO run
 
 The controller's GitHub credential stays on the controller. The host keeps the
 official runner's generated registration credentials. Each runner is installed
-under `<host-root>/runners/<runner-name>`, with its own `_work` directory and an
-official service plist in `~/Library/LaunchAgents`. Installation starts the
+under `~/Library/XcodeRunnerKit/runners/<runner-name>`, with its own `_work` directory and an
+official service plist in `~/Library/LaunchAgents`. Runner installation and work
+paths must contain no whitespace: the default shell template does not quote
+its temporary script path. Toolkit tools, keys, and CAS can remain in the
+Application Support path. Installation starts the
 service in `gui/<CI-user-uid>`. If startup fails, the installer reports the
 registered runner and installed plist so they can be started after GUI login.
 
@@ -87,13 +90,17 @@ Mac. Run setup serially before starting consumers.
 Pass these values to the child Xcode operation:
 
 ```sh
---environment "GIT_CONFIG_GLOBAL=$ci_root/gitconfig" \
---environment "GIT_SSH=$ci_root/bin/git-ssh" \
+--environment "SWIFTPM_MIRROR_CONFIG=$ci_root/mirrors.json" \
+--environment "GIT_SSH_COMMAND='$ci_root/bin/git-ssh'" \
 --environment "GIT_TERMINAL_PROMPT=0"
 ```
 
-This configuration rewrites dependency HTTPS URLs to their repository-specific
-SSH aliases. Public dependencies use their usual anonymous HTTPS path.
+The SwiftPM mirror file matches complete dependency URLs and maps them to
+repository-specific SSH aliases. Invoke the helper with the spelling used in
+the dependency URL; it retains both that spelling and GitHub's canonical name,
+with and without .git. Unmapped dependencies keep their usual HTTPS path.
+GIT_SSH_COMMAND must quote the wrapper path: SwiftPM's default for that variable
+takes precedence over GIT_SSH.
 A workflow's `GITHUB_TOKEN` handles checkout of that workflow's own repository;
 it does not grant access to other private dependency repositories. Add a deploy
 key mapping before introducing a new private dependency.
