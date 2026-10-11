@@ -59,7 +59,7 @@ jobs:
           "$ci_root/bin/xcode-runner" build \
             --package "$GITHUB_WORKSPACE" --scheme XcodeRunnerKit-Package \
             --destination 'platform=macOS,arch=arm64' \
-            --derived-data-directory "$cli_derived" \
+            --derived-data "$cli_derived" \
             --pool-directory "$ci_root/Pool" --maximum-concurrent-jobs 2 \
             --compilation-cache "$ci_root/CompilationCache" \
             --output-directory "$RUNNER_TEMP/XcodeRunnerKit-ios" \
