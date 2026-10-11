@@ -2,13 +2,18 @@
 set -euo pipefail
 umask 077
 
-repository=${1:?Usage: install-github-runner.sh OWNER/REPO NAME ARCHIVE [RUNNERS_ROOT] [WORK_DIRECTORY] [LABELS]; registration token on stdin}
+repository=${1:?Usage: install-github-runner.sh OWNER/REPO NAME ARCHIVE [RUNNERS_ROOT] [WORK_DIRECTORY] [LABELS] [SERVICE_MODE]; registration token on stdin}
 runner_name=${2:?Specify a unique runner name}
 archive=${3:?Specify actions-runner-osx-arm64-2.338.0.tar.gz}
 runners_root=${4:-"$HOME/Library/XcodeRunnerKit/runners"}
 work_directory=${5:-_work}
 labels=${6:-xcode-runnerkit}
+service_mode=${7:-individual}
 script_directory="$(cd "$(dirname "$0")" && pwd)"
+case "$service_mode" in individual|host) ;; *) echo "SERVICE_MODE must be individual or host." >&2; exit 1;; esac
+if [[ "$service_mode" == host ]]; then
+    test -r "$script_directory/enable-hosted-runner.sh"
+fi
 case "$runner_name" in ""|"."|".."|*/*) echo "Runner name must be one path component." >&2; exit 1;; esac
 
 # Verified against the official actions/runner v2.338.0 release asset digest.
@@ -48,6 +53,11 @@ cd "$directory"
     --name "$runner_name" --labels "$labels" --work "$work_directory"
 unset registration_token
 printf 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=%s/cleanup-runner-temp.sh\n' "$hooks_directory" >> .env
+if [[ "$service_mode" == host ]]; then
+    bash "$script_directory/enable-hosted-runner.sh" "$directory"
+    printf 'Registered %s for %s with the common host.\n' "$runner_name" "$repository"
+    exit 0
+fi
 ./svc.sh install
 plist=$(cat .service)
 if ! launchctl bootstrap "gui/$(id -u)" "$plist"; then

@@ -7,6 +7,10 @@ Run Xcode builds and tests on a macOS host from Swift or the `xcode-runner` CLI.
 Each operation preserves a combined output log and reserves its own result-bundle
 location. Task cancellation tears down the launched process group.
 
+For trusted self-hosted GitHub Actions jobs, an optional windowless
+[signed host app](Documentation/NativeHost.md#common-host-app) starts multiple
+repository runners under one macOS privacy identity.
+
 ## Requirements
 
 - macOS 26 or later

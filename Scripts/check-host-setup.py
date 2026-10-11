@@ -130,7 +130,7 @@ Path('.runner').write_text(json.dumps({'workFolder':a[a.index('--work')+1], 'lab
 Path('.env').write_text('')
 """
     with tarfile.open(archive, "w:gz") as target:
-        for name, content in {"config.sh": config, "svc.sh": "#!/bin/bash\nprintf '%s\\n' fixture.plist > .service\n"}.items():
+        for name, content in {"config.sh": config, "svc.sh": "#!/bin/bash\nprintf '%s\\n' fixture.plist > .service\n", "bin/runsvc.sh": "#!/bin/bash\nexit 0\n"}.items():
             data = content.encode()
             info = tarfile.TarInfo(name)
             info.size = len(data)
@@ -164,6 +164,25 @@ Path('.env').write_text('')
     subprocess.run(["bash", str(hook)], env={**environment, "RUNNER_TEMP": str(temporary_data)}, check=True)
     assert not (temporary_data / "dangling").is_symlink()
 
+    hosted = installer[:3] + ["hosted"] + installer[4:6] + [str(physical_work / "hosted"), "xcode-runnerkit", "host"]
+    subprocess.run(hosted, input="fixture-token\n", text=True, env=environment, check=True, capture_output=True)
+    hosted_directory = installation_root / "hosted"
+    assert (hosted_directory / ".xcode-runner-host").exists()
+    assert not (hosted_directory / ".service").exists()
+    assert (hosted_directory / "runsvc.sh").is_file()
+    assert (hosted_directory / ".runner").is_file()
+
+    service_plist = root / "individual.plist"
+    import plistlib
+    service_plist.write_bytes(plistlib.dumps({"Label": "fixture-individual"}))
+    (installation / ".service").write_text(str(service_plist) + "\n")
+    subprocess.run(["bash", str(scripts / "enable-hosted-runner.sh"), str(installation)], env=environment, check=True, capture_output=True)
+    assert (installation / ".xcode-runner-host").exists()
+    assert not (installation / ".service").exists()
+    assert (installation / ".service.before-host").read_text().strip() == str(service_plist)
+    assert service_plist.with_suffix(".plist.before-host").exists()
+    assert json.loads((installation / ".runner").read_text()) == received
+
     broken = root / "unavailable"
     broken.symlink_to(root / "missing-volume", target_is_directory=True)
     failure = subprocess.run(installer[:3] + ["unavailable"] + installer[4:6] + [str(broken / "work")], input="fixture-token\n", text=True, env=environment, capture_output=True)
@@ -179,4 +198,38 @@ Path('.env').write_text('')
     finally:
         readonly.chmod(0o755)
 
-print("PASS: cache relocation and data preservation; temporary links and failure propagation; runner work paths, custom labels, stable hooks, unavailable and unwritable storage")
+with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
+    import plistlib
+    root = Path(temporary)
+    home = root / "home"
+    home.mkdir()
+    tools = root / "tools"
+    tools.mkdir()
+    for name, body in {"codesign": "exit 0", "launchctl": "[[ \"$1\" != print ]]"}.items():
+        tool = tools / name
+        tool.write_text("#!/bin/bash\n" + body + "\n")
+        tool.chmod(0o755)
+    app = root / "input" / "XcodeRunnerHost.app"
+    (app / "Contents/MacOS").mkdir(parents=True)
+    (app / "Contents/MacOS/xcode-runner-host").write_text("first executable")
+    (app / "Contents/Info.plist").write_bytes(plistlib.dumps({
+        "CFBundleIdentifier": "dev.lynnswap.XcodeRunnerHost",
+        "CFBundleExecutable": "xcode-runner-host",
+    }))
+    env = {**os.environ, "HOME": str(home), "PATH": str(tools) + os.pathsep + os.environ["PATH"]}
+    runners, host, applications = root / "runner installations", root / "host data", root / "applications"
+    command = ["bash", str(scripts / "install-runner-host.sh"), str(app), str(runners), str(host), str(applications)]
+    subprocess.run(command, env=env, check=True, capture_output=True)
+    plist = plistlib.loads((home / "Library/LaunchAgents/dev.lynnswap.XcodeRunnerHost.plist").read_bytes())
+    assert plist["AssociatedBundleIdentifiers"] == ["dev.lynnswap.XcodeRunnerHost"]
+    assert plist["ProgramArguments"] == [str(applications.resolve() / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host"), "--runners-root", str(runners.resolve()), "--logs-directory", str(host.resolve() / "logs/runners")]
+    (app / "Contents/MacOS/xcode-runner-host").write_text("updated executable")
+    subprocess.run(command, env=env, check=True, capture_output=True)
+    assert (applications / "XcodeRunnerHost.previous.app/Contents/MacOS/xcode-runner-host").read_text() == "first executable"
+    assert (applications / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host").read_text() == "updated executable"
+    (tools / "codesign").write_text("#!/bin/bash\nif [[ \"$1\" == -dv ]]; then echo Signature=adhoc >&2; fi\n")
+    failure = subprocess.run(command, env=env, capture_output=True)
+    assert failure.returncode != 0 and b"certificate signing identity" in failure.stderr
+    assert (applications / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host").read_text() == "updated executable"
+
+print("PASS: cache relocation, cleanup, runner storage, common-host opt-in and migration, app installation, update preservation, and signature requirements")

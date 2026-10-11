@@ -44,6 +44,8 @@ jobs:
             --compilation-cache "$RUNNER_TEMP/CompilationCache" \
             --output-directory "$RUNNER_TEMP/XcodeRunnerKit-macos" \
             -- -parallel-testing-enabled NO -jobs 3
+      - name: Check common runner host processes
+        run: python3 Scripts/check-runner-host.py "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner-host"
       - name: Check separate-process capacity
         run: python3 Scripts/check-execution-pool.py
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

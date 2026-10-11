@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Check the actual host process against service fixtures and a launchd job."""
+import json
+import os
+from pathlib import Path
+import plistlib
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+executable = str(Path(sys.argv[1]).resolve())
+
+
+def wait_for(predicate, description, seconds=15):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.1)
+    raise AssertionError(description)
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def fixture(root, name):
+    directory = root / name
+    directory.mkdir()
+    (directory / '.runner').write_text('{}')
+    (directory / '.xcode-runner-host').touch()
+    (directory / 'worker.py').write_text('''import json, os, signal, time
+from pathlib import Path
+Path('pid.json').write_text(json.dumps({'pid':os.getpid(), 'group':os.getpgrp()}))
+def stop(*args):
+    Path('stopped').touch()
+    raise SystemExit(0)
+signal.signal(signal.SIGINT, stop)
+signal.signal(signal.SIGTERM, stop)
+while True: time.sleep(1)
+''')
+    (directory / 'runsvc.sh').write_text('''#!/bin/bash
+trap 'kill -INT "$PID"' TERM INT
+python3 worker.py &
+PID=$!
+wait "$PID"
+trap - TERM INT
+wait "$PID"
+''')
+    return directory
+
+
+with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as temporary:
+    root = Path(temporary)
+    runners = root / 'runners'
+    runners.mkdir()
+    first = fixture(runners, 'first')
+    excluded = fixture(runners, 'individual')
+    (excluded / '.service').touch()
+    arguments = [executable, '--runners-root', str(runners), '--logs-directory', str(root/'logs')]
+    with (root/'host.log').open('w') as log:
+        host = subprocess.Popen(arguments, stdout=log, stderr=log)
+        try:
+            wait_for(lambda:(first/'pid.json').exists(), 'First runner did not start')
+            first_pid = json.loads((first/'pid.json').read_text())['pid']
+            assert not (excluded/'pid.json').exists()
+            duplicate = subprocess.run(arguments, capture_output=True, timeout=10)
+            assert duplicate.returncode != 0 and b'Another runner host' in duplicate.stderr
+            second = fixture(runners, 'second')
+            wait_for(lambda:(second/'pid.json').exists(), 'New runner was not discovered')
+            second_pid = json.loads((second/'pid.json').read_text())['pid']
+            (first/'.xcode-runner-host').unlink()
+            wait_for(lambda:(first/'stopped').exists() and not alive(first_pid), 'Removed runner did not stop')
+            host.send_signal(signal.SIGTERM)
+            assert host.wait(timeout=15) == 0
+            assert (second/'stopped').exists() and not alive(second_pid)
+        finally:
+            if host.poll() is None:
+                host.send_signal(signal.SIGTERM)
+                try:
+                    host.wait(timeout=45)
+                except subprocess.TimeoutExpired:
+                    host.kill()
+                    host.wait()
+                    for directory in runners.iterdir():
+                        if (directory/'pid.json').exists():
+                            pid = json.loads((directory/'pid.json').read_text())['pid']
+                            if alive(pid): os.kill(pid, signal.SIGTERM)
+        print((root/'host.log').read_text())
+
+    launched = fixture(runners, 'launchd')
+    label = f'dev.lynnswap.XcodeRunnerHost.test.{os.getpid()}'
+    target = f'gui/{os.getuid()}/{label}'
+    plist = root/'service.plist'
+    plist.write_bytes(plistlib.dumps({
+        'Label':label, 'ProgramArguments':arguments, 'RunAtLoad':True,
+        'StandardOutPath':str(root/'launchd.stdout'),
+        'StandardErrorPath':str(root/'launchd.stderr'),
+    }))
+    subprocess.run(['launchctl','bootstrap',f'gui/{os.getuid()}',str(plist)],check=True)
+    try:
+        wait_for(lambda:(launched/'pid.json').exists(), 'LaunchAgent runner did not start')
+        process = json.loads((launched/'pid.json').read_text())
+        subprocess.run(['launchctl','kill','SIGKILL',target],check=True)
+        wait_for(lambda:not alive(process['pid']), 'launchd left a runner alive after host crash')
+        (launched/'pid.json').unlink()
+        subprocess.run(['launchctl','kickstart',target],check=True)
+        wait_for(lambda:(launched/'pid.json').exists(), 'LaunchAgent did not restart')
+        restarted = json.loads((launched/'pid.json').read_text())
+        assert restarted['pid'] != process['pid']
+    finally:
+        subprocess.run(['launchctl','bootout',target],check=True)
+    wait_for(lambda:not alive(restarted['pid']), 'Runner survived service removal')
+
+print('PASS: multiple runners, discovery, individual-service exclusion, singleton, graceful shutdown, crash cleanup, and service restart')

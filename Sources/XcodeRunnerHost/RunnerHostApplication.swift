@@ -1,0 +1,175 @@
+import AppKit
+import ArgumentParser
+import Darwin
+import Foundation
+import Subprocess
+
+private struct HostOptions: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "xcode-runner-host",
+        abstract: "Host opted-in GitHub Actions runners in a windowless macOS app."
+    )
+
+    @Option(help: "Directory containing runner installations.")
+    var runnersRoot = URL.homeDirectory.appending(path: "Library/XcodeRunnerKit/runners").path(percentEncoded: false)
+
+    @Option(help: "Directory for runner service logs.")
+    var logsDirectory = URL.homeDirectory.appending(path: "Library/Application Support/XcodeRunnerKit/logs/runners").path(percentEncoded: false)
+}
+
+@main
+private enum RunnerHostApplication {
+    @MainActor static func main() {
+        do {
+            let options = try HostOptions.parse()
+            let host = try RunnerHost(
+                root: URL(filePath: options.runnersRoot, directoryHint: .isDirectory),
+                logs: URL(filePath: options.logsDirectory, directoryHint: .isDirectory)
+            )
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            application.delegate = host
+            withExtendedLifetime(host) { application.run() }
+        } catch {
+            HostOptions.exit(withError: error)
+        }
+    }
+}
+
+@MainActor
+private final class RunnerHost: NSObject, NSApplicationDelegate {
+    private let root: URL
+    private let logs: URL
+    private let lockDescriptor: Int32
+    private var runners: [URL: Task<Void, Never>] = [:]
+    private var monitoring: Task<Void, Never>?
+    private var signals: [any DispatchSourceSignal] = []
+    private var stopping = false
+    private var stopped = false
+    private var terminationReplyPending = false
+
+    init(root: URL, logs: URL) throws {
+        self.root = root.resolvingSymlinksInPath()
+        self.logs = logs
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        lockDescriptor = open(root.appending(path: ".xcode-runner-host.lock").path(percentEncoded: false),
+                              O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard lockDescriptor >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        guard flock(lockDescriptor, LOCK_EX | LOCK_NB) == 0 else {
+            let code = errno
+            close(lockDescriptor)
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [
+                NSLocalizedDescriptionKey: "Another runner host already manages \(root.path(percentEncoded: false))."
+            ])
+        }
+        super.init()
+    }
+
+    deinit { close(lockDescriptor) }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        for number in [SIGTERM, SIGINT] {
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+            source.setEventHandler { self.beginShutdown() }
+            source.resume()
+            signals.append(source)
+        }
+        monitoring = Task {
+            while !Task.isCancelled {
+                do {
+                    try await reconcile()
+                    try await Task.sleep(for: .seconds(2))
+                } catch is CancellationError {
+                    break
+                } catch {
+                    print("Runner host scan failed: \(error)")
+                    do { try await Task.sleep(for: .seconds(2)) }
+                    catch { break }
+                }
+            }
+        }
+        print("Runner host started for \(root.path(percentEncoded: false)).")
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if stopped { return .terminateNow }
+        terminationReplyPending = true
+        beginShutdown()
+        return .terminateLater
+    }
+
+    private func beginShutdown() {
+        guard !stopping else { return }
+        stopping = true
+        monitoring?.cancel()
+        Task {
+            for task in runners.values { task.cancel() }
+            await monitoring?.value
+            for task in runners.values { await task.value }
+            stopped = true
+            print("Runner host stopped.")
+            if terminationReplyPending {
+                NSApplication.shared.reply(toApplicationShouldTerminate: true)
+            } else {
+                NSApplication.shared.terminate(nil)
+            }
+        }
+    }
+
+    private func reconcile() async throws {
+        let directories = try FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+        )
+        let requested = try Set(directories.filter {
+            try $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
+                && FileManager.default.fileExists(atPath: $0.appending(path: ".xcode-runner-host").path(percentEncoded: false))
+                && FileManager.default.fileExists(atPath: $0.appending(path: ".runner").path(percentEncoded: false))
+        })
+        for directory in runners.keys.filter({ !requested.contains($0) }) {
+            let task = runners.removeValue(forKey: directory)
+            task?.cancel()
+            await task?.value
+        }
+        try Task.checkCancellation()
+        for directory in requested where runners[directory] == nil {
+            if FileManager.default.fileExists(atPath: directory.appending(path: ".service").path(percentEncoded: false)) {
+                print("Skipped \(directory.lastPathComponent): uninstall its individual service before opting in.")
+                continue
+            }
+            runners[directory] = Task { await serve(directory) }
+        }
+    }
+
+    private func serve(_ directory: URL) async {
+        let name = directory.lastPathComponent
+        let log = logs.appending(path: name + ".log")
+        let descriptor = open(log.path(percentEncoded: false), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else {
+            print("Could not open log for \(name): \(NSError(domain: NSPOSIXErrorDomain, code: Int(errno))).")
+            return
+        }
+        defer { close(descriptor) }
+        var options = Subprocess.PlatformOptions()
+        // Retain the host's process group so launchd also cleans up children if the host crashes.
+        options.teardownSequence = [.gracefulShutDown(allowedDurationToNextStep: .seconds(40))]
+        do {
+            print("Starting \(name); service log: \(log.path(percentEncoded: false)).")
+            let result = try await Subprocess.run(
+                .path("/bin/bash"),
+                arguments: .init([directory.appending(path: "runsvc.sh").path(percentEncoded: false)]),
+                environment: .inherit.updating(["ACTIONS_RUNNER_SVC": "1"]),
+                workingDirectory: .init(directory.path(percentEncoded: false)),
+                platformOptions: options,
+                output: .fileDescriptor(.init(rawValue: descriptor), closeAfterSpawningProcess: false),
+                error: .fileDescriptor(.init(rawValue: descriptor), closeAfterSpawningProcess: false)
+            )
+            print("\(name) service stopped with \(result.terminationStatus). Restart the host after resolving service errors.")
+        } catch {
+            print("\(name) service ended: \(error)")
+        }
+    }
+}
