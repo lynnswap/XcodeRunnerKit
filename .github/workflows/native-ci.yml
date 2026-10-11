@@ -29,15 +29,15 @@ jobs:
         run: python3 Scripts/check-host-setup.py
       - name: Build the checkout CLI
         run: |
-          xcodebuild build \
+          exec xcodebuild build \
             -scheme XcodeRunnerKit-Package \
             -destination 'platform=macOS,arch=arm64' \
             -configuration Release \
             -derivedDataPath "$RUNNER_TEMP/XcodeRunnerKit-cli" \
-            -jobs 3 | tee "$RUNNER_TEMP/XcodeRunnerKit-bootstrap.log"
+            -jobs 3
       - name: Test macOS library and CLI
         run: |
-          "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner" test \
+          exec "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner" test \
             --package "$GITHUB_WORKSPACE" --scheme XcodeRunnerKit-Package \
             --destination 'platform=macOS,arch=arm64' \
             --pool-directory "$RUNNER_TEMP/Pool" --maximum-concurrent-jobs 2 \
@@ -48,12 +48,13 @@ jobs:
         run: python3 Scripts/check-runner-host.py "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner-host"
       - name: Check separate-process capacity
         run: python3 Scripts/check-execution-pool.py
+      - name: Check cancellation through shell wrappers
+        run: python3 Scripts/check-cancellation.py "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: macos-results
           path: |
-            ${{ runner.temp }}/XcodeRunnerKit-bootstrap.log
             ${{ runner.temp }}/XcodeRunnerKit-macos/*/xcodebuild.log
             ${{ runner.temp }}/XcodeRunnerKit-macos/*/Results.xcresult
           retention-days: 1
@@ -71,15 +72,15 @@ jobs:
           persist-credentials: false
       - name: Build the checkout CLI
         run: |
-          xcodebuild build \
+          exec xcodebuild build \
             -scheme XcodeRunnerKit-Package \
             -destination 'platform=macOS,arch=arm64' \
             -configuration Release \
             -derivedDataPath "$RUNNER_TEMP/XcodeRunnerKit-cli" \
-            -jobs 3 | tee "$RUNNER_TEMP/XcodeRunnerKit-bootstrap.log"
+            -jobs 3
       - name: Test the iOS consumer fixture
         run: |
-          "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner" test \
+          exec "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner" test \
             --package "$GITHUB_WORKSPACE/Tests/Fixtures/BuildProbe" --scheme BuildProbe \
             --simulator-runtime com.apple.CoreSimulator.SimRuntime.iOS-27-0 \
             --simulator-device-type com.apple.CoreSimulator.SimDeviceType.iPhone-17 \
@@ -92,7 +93,6 @@ jobs:
         with:
           name: ios-results
           path: |
-            ${{ runner.temp }}/XcodeRunnerKit-bootstrap.log
             ${{ runner.temp }}/XcodeRunnerKit-ios/*/xcodebuild.log
             ${{ runner.temp }}/XcodeRunnerKit-ios/*/Results.xcresult
           retention-days: 1
