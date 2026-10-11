@@ -11,21 +11,24 @@ cache_directory=${4:-"$host_root/CompilationCache"}
 python3 - "$host_root" "$cache_directory" <<'PY'
 from pathlib import Path
 import sys
+import tempfile
 
 cache = Path(sys.argv[1]) / "CompilationCache"
 destination = Path(sys.argv[2]).expanduser().absolute()
-if cache.resolve() != destination.resolve():
-    if cache.is_symlink() or cache.exists():
-        if not cache.is_dir() or any(cache.iterdir()):
-            raise RuntimeError(f"Preserve or move the existing cache at {cache} before changing its location")
-        if cache.is_symlink():
-            cache.unlink()
-        else:
+relocating = cache.resolve() != destination.resolve()
+if relocating and (cache.is_symlink() or cache.exists()):
+    if not cache.is_dir() or any(cache.iterdir()):
+        raise RuntimeError(f"Preserve or move the existing cache at {cache} before changing its location")
+destination.mkdir(parents=True, exist_ok=True)
+with tempfile.TemporaryFile(dir=destination):
+    pass
+if relocating:
+    with tempfile.TemporaryDirectory(prefix=".cache-link-", dir=cache.parent) as staging:
+        link = Path(staging) / "CompilationCache"
+        link.symlink_to(destination, target_is_directory=True)
+        if cache.exists() and not cache.is_symlink():
             cache.rmdir()
-    destination.mkdir(parents=True, exist_ok=True)
-    cache.symlink_to(destination, target_is_directory=True)
-else:
-    cache.mkdir(parents=True, exist_ok=True)
+        link.replace(cache)
 PY
 mkdir -p "$host_root/bin" "$host_root/Pool" "$host_root/logs" "$HOME/Library/LaunchAgents"
 if [[ -f "$host_root/bin/xcode-runner" ]]; then

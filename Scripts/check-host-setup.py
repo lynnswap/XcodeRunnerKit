@@ -45,6 +45,20 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit host setup ") as tempora
     subprocess.run(command[:-2] + [str(empty_host), str(moved_empty)], env=environment, check=True, capture_output=True)
     assert (empty_host / "CompilationCache").resolve() == moved_empty.resolve()
     assert empty_cache.is_dir() and not any(empty_cache.iterdir())
+    absent_volume = root / "Absent volume"
+    absent_volume.symlink_to(root / "missing-volume", target_is_directory=True)
+    failure = subprocess.run(command[:-2] + [str(empty_host), str(absent_volume / "Cache")], env=environment, capture_output=True)
+    assert failure.returncode != 0
+    assert (empty_host / "CompilationCache").resolve() == moved_empty.resolve()
+    unwritable_cache = root / "Unwritable cache"
+    unwritable_cache.mkdir()
+    unwritable_cache.chmod(0o555)
+    try:
+        failure = subprocess.run(command[:-2] + [str(empty_host), str(unwritable_cache)], env=environment, capture_output=True)
+        assert failure.returncode != 0
+        assert (empty_host / "CompilationCache").resolve() == moved_empty.resolve()
+    finally:
+        unwritable_cache.chmod(0o755)
 
     runner_temp = root / "work" / "_temp"
     runner_temp.mkdir(parents=True)
