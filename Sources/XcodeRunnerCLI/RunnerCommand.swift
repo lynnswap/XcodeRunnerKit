@@ -21,6 +21,10 @@ struct RunnerCommand: AsyncParsableCommand {
     @Option var outputDirectory = "XcodeRunnerOutput"
     @Option var derivedData: String?
     @Option var developerDirectory: String?
+    @Option(help: "Runtime identifier for a new, job-owned iOS Simulator.")
+    var simulatorRuntime: String?
+    @Option(help: "Device type supported by --simulator-runtime.")
+    var simulatorDeviceType: String?
     @Option(help: "Local directory shared by every repository runner on this Mac.")
     var poolDirectory: String?
     @Option(help: "Shared pool capacity. Required with --pool-directory.")
@@ -49,6 +53,13 @@ struct RunnerCommand: AsyncParsableCommand {
             outputDirectory: Self.url(outputDirectory)
         )
         request.derivedDataDirectory = derivedData.map(Self.url)
+        if let simulatorRuntime, let simulatorDeviceType {
+            request.simulator = SimulatorConfiguration(
+                runtimeIdentifier: simulatorRuntime, deviceTypeIdentifier: simulatorDeviceType
+            )
+        } else if simulatorRuntime != nil || simulatorDeviceType != nil {
+            throw ValidationError("Specify both --simulator-runtime and --simulator-device-type.")
+        }
         request.environment = try Self.assignments(environment)
         request.buildSettings = try Self.assignments(settings)
         request.arguments = additionalArguments

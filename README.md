@@ -88,6 +88,50 @@ Repeat `--setting NAME=VALUE` for build settings and
 `--developer-directory` selects Xcode without changing the host's
 `xcode-select` setting.
 
+## Job-owned iOS Simulators
+
+Select an available iOS runtime and a device type from that runtime's
+`supportedDeviceTypes` metadata:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer xcrun simctl list runtimes --json
+```
+
+Pass both identifiers to the CLI:
+
+```sh
+xcode-runner test --workspace /path/to/App.xcworkspace --scheme App \
+  --simulator-runtime com.apple.CoreSimulator.SimRuntime.iOS-27-0 \
+  --simulator-device-type com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro \
+  --pool-directory /path/to/shared-pool --maximum-concurrent-jobs 2
+```
+
+In Swift, set `request.simulator = SimulatorConfiguration(runtimeIdentifier:
+deviceTypeIdentifier:)`. The runner creates a fresh device, replaces the test
+destination with its UDID, and deletes that exact device after success, failure,
+or managed cancellation. Creation and deletion remain inside the execution
+slot. Existing devices are never selected for deletion.
+
+Parallel test workers are disabled by default for owned devices. Keep this
+setting to prevent Xcode from creating additional worker clones; explicitly
+forwarded Xcode options can override it. Direct macOS destinations and existing
+Simulator destinations remain available when `simulator` is nil.
+
+Creation finishes before cancellation cleanup begins so the device identifier
+is known. A stuck simctl create or delete therefore delays completion.
+`SimulatorCleanupFailure` preserves the original operation error, any completed
+build result, the owned UDID, and the deletion error. If deletion fails, use
+`xcrun simctl delete <reported-UDID>` after resolving the reported cause.
+Force-killing the wrapper can leave a device behind.
+
+The public fixture contains Swift, Clang, and the SDK's Observation macro.
+Validate concurrent devices, test-failure cleanup, and cancellation cleanup:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer \
+python3 Scripts/check-simulators.py /absolute/path/to/xcode-runner
+```
+
 ## Shared host capacity
 
 Configure the same pool directory and capacity in every repository runner:

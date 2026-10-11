@@ -6,15 +6,17 @@ public struct XcodeRunner: Sendable {
     public var developerDirectory: URL?
     public var executionPool: HostExecutionPool?
     private let executableURL: URL
+    private var simulatorExecutableURL = URL(filePath: "/usr/bin/xcrun")
 
     public init(developerDirectory: URL? = nil) {
         self.developerDirectory = developerDirectory
         self.executableURL = URL(filePath: "/usr/bin/xcodebuild")
     }
 
-    init(executableURL: URL, developerDirectory: URL? = nil) {
+    init(executableURL: URL, developerDirectory: URL? = nil, simulatorExecutableURL: URL = URL(filePath: "/usr/bin/xcrun")) {
         self.executableURL = executableURL
         self.developerDirectory = developerDirectory
+        self.simulatorExecutableURL = simulatorExecutableURL
     }
 
     /// Runs an operation and waits for execution and log cleanup.
@@ -28,15 +30,59 @@ public struct XcodeRunner: Sendable {
     ) async throws -> XcodeBuildResult {
         if let executionPool {
             return try await executionPool.withSlot {
-                try await runUnrestricted(action, request: request, onOutput: onOutput)
+                try await runManaged(action, request: request, onOutput: onOutput)
             }
         }
-        return try await runUnrestricted(action, request: request, onOutput: onOutput)
+        return try await runManaged(action, request: request, onOutput: onOutput)
+    }
+
+    private func runManaged(
+        _ action: XcodeBuildAction,
+        request: XcodeBuildRequest,
+        onOutput: (@Sendable (Data) throws -> Void)?
+    ) async throws -> XcodeBuildResult {
+        guard let configuration = request.simulator else {
+            return try await runUnrestricted(action, request: request, onOutput: onOutput)
+        }
+        try Task.checkCancellation()
+        let selectedXcode = developerDirectory ?? request.environment["DEVELOPER_DIR"].map { URL(filePath: $0) }
+        let tool = SimulatorTool(executableURL: simulatorExecutableURL, developerDirectory: selectedXcode)
+        // Finish creation even if the caller cancels, so the owned UDID is known.
+        let identifier = try await Task.detached { try await tool.create(configuration) }.value
+        let outcome: Result<XcodeBuildResult, any Error>
+        do {
+            try Task.checkCancellation()
+            var simulatorRequest = request
+            simulatorRequest.destination = "platform=iOS Simulator,id=" + identifier
+            if !request.arguments.contains("-parallel-testing-enabled") {
+                simulatorRequest.arguments = ["-parallel-testing-enabled", "NO"] + request.arguments
+            }
+            outcome = .success(try await runUnrestricted(
+                action, request: simulatorRequest, simulatorIdentifier: identifier, onOutput: onOutput
+            ))
+        } catch { outcome = .failure(error) }
+
+        // Cleanup must run after cancellation, and remains inside the host slot.
+        do { try await Task.detached { try await tool.delete(identifier) }.value }
+        catch {
+            let operationError: (any Error)?
+            let completed: XcodeBuildResult?
+            switch outcome {
+            case .success(let result): operationError = nil; completed = result
+            case .failure(let error): operationError = error; completed = nil
+            }
+            throw SimulatorCleanupFailure(
+                simulatorIdentifier: identifier, operationError: operationError,
+                result: completed, cleanupError: error
+            )
+        }
+        return try outcome.get()
     }
 
     private func runUnrestricted(
         _ action: XcodeBuildAction,
         request: XcodeBuildRequest,
+        simulatorIdentifier: String? = nil,
         onOutput: (@Sendable (Data) throws -> Void)?
     ) async throws -> XcodeBuildResult {
         let directory = request.outputDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
@@ -104,7 +150,8 @@ public struct XcodeRunner: Sendable {
             outputDirectory: directory,
             derivedDataDirectory: derived,
             logURL: logURL,
-            resultBundleURL: bundleURL
+            resultBundleURL: bundleURL,
+            simulatorIdentifier: simulatorIdentifier
         )
         guard result.succeeded, cleanupError == nil else {
             throw XcodeBuildFailure(result: result, underlyingError: executionError, cleanupError: cleanupError)

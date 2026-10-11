@@ -110,6 +110,91 @@ struct XcodeRunnerKitTests {
         }
     }
 
+    @Test(arguments: [Int32(0), Int32(7)])
+    func simulatorIsDeletedAfterSuccessOrFailure(exitCode: Int32) async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let identifier = UUID().uuidString
+        let simulator = root.appending(path: "simctl")
+        let deleted = root.appending(path: "deleted")
+        let selectedXcode = root.appending(path: "selected-xcode")
+        try ("#!/bin/sh\ncase \"$2\" in\ncreate) echo " + identifier + "; printf '%s' \"$DEVELOPER_DIR\" > " + selectedXcode.path + ";;\ndelete) printf '%s' \"$3\" > " + deleted.path + ";;\nesac\n")
+            .write(to: simulator, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: simulator.path)
+        let executable = try script("printf '%s\\n' \"$@\"; exit \(exitCode)", at: root)
+        var runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
+        runner.executionPool = try HostExecutionPool(directory: root.appending(path: "pool"), maximumConcurrentJobs: 1)
+        var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
+        request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
+        request.arguments = ["-parallel-testing-enabled", "NO"]
+        request.environment["DEVELOPER_DIR"] = root.appending(path: "SelectedXcode").path
+        let result: XcodeBuildResult
+        do { result = try await runner.run(.test, request: request) }
+        catch let failure as XcodeBuildFailure { result = failure.result }
+        #expect(result.status == .exited(exitCode))
+        #expect(result.simulatorIdentifier == identifier)
+        #expect(try String(contentsOf: deleted, encoding: .utf8) == identifier)
+        let log = try String(contentsOf: result.logURL, encoding: .utf8)
+        #expect(log.contains("platform=iOS Simulator,id=" + identifier))
+        #expect(log.components(separatedBy: "-parallel-testing-enabled").count == 2)
+        #expect(try String(contentsOf: selectedXcode, encoding: .utf8) == request.environment["DEVELOPER_DIR"])
+    }
+
+    @Test func simulatorCleanupFailurePreservesBuildFailure() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let identifier = UUID().uuidString
+        let simulator = root.appending(path: "simctl")
+        try ("#!/bin/sh\ncase \"$2\" in\ncreate) echo " + identifier + ";;\ndelete) echo deletion-failed >&2; exit 9;;\nesac\n")
+            .write(to: simulator, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: simulator.path)
+        let executable = try script("exit 7", at: root)
+        let runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
+        var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root)
+        request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
+        do {
+            _ = try await runner.run(.test, request: request)
+            Issue.record("Cleanup failure returned successfully.")
+        } catch let failure as SimulatorCleanupFailure {
+            #expect(failure.simulatorIdentifier == identifier)
+            #expect((failure.operationError as? XcodeBuildFailure)?.result.status == .exited(7))
+            #expect(failure.cleanupError.localizedDescription.contains("deletion-failed"))
+        }
+    }
+
+    @Test func cancellationDuringCreationStillDeletesTheOwnedDevice() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let identifier = UUID().uuidString
+        let ready = root.appending(path: "creating")
+        let deleted = root.appending(path: "deleted")
+        let simulator = root.appending(path: "simctl")
+        try ("#!/bin/sh\ncase \"$2\" in\ncreate) touch " + ready.path + "; sleep 1; echo " + identifier + ";;\ndelete) touch " + deleted.path + ";;\nesac\n")
+            .write(to: simulator, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: simulator.path)
+        let runner = XcodeRunner(executableURL: root.appending(path: "must-not-start"), simulatorExecutableURL: simulator)
+        var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
+        request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
+        let configured = request
+        let task = Task { try await runner.run(.test, request: configured) }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(10))
+        while !FileManager.default.fileExists(atPath: ready.path), clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(FileManager.default.fileExists(atPath: ready.path))
+        task.cancel()
+        do {
+            _ = try await task.value
+            Issue.record("Cancelled Simulator creation returned successfully.")
+        } catch is CancellationError {}
+        #expect(FileManager.default.fileExists(atPath: deleted.path))
+        #expect(!FileManager.default.fileExists(atPath: request.outputDirectory.path))
+    }
+
     private func script(_ body: String, at root: URL) throws -> URL {
         let url = root.appending(path: "tool")
         try ("#!/bin/sh\n" + body + "\n").write(to: url, atomically: true, encoding: .utf8)
