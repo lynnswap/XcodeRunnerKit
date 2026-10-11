@@ -306,7 +306,7 @@ All repositories use:
 
 ```sh
 ci_root="$HOME/Library/Application Support/XcodeRunnerKit"
-"$ci_root/bin/xcode-runner" test \
+exec "$ci_root/bin/xcode-runner" test \
   --package "$GITHUB_WORKSPACE" --scheme PackageName \
   --destination 'platform=macOS,arch=arm64' \
   --pool-directory "$ci_root/Pool" --maximum-concurrent-jobs 2 \
@@ -320,6 +320,12 @@ a macOS destination. Creation, execution, and device deletion hold one slot.
 For apps, use the application's workspace and scheme. Consumer-owned plugin
 environment values and package paths belong in that consumer's workflow.
 Keep mutable SwiftPM checkouts separate between concurrent jobs.
+
+Connect each shell wrapper with `exec` so GitHub sends cancellation signals
+directly to the CLI. For example, a workflow calling the script above uses
+`run: exec bash .github/scripts/run-tests.sh`. The CLI cancels its Xcode process
+group and then deletes its owned Simulator before releasing the pool slot.
+Waiting shells do not automatically forward signals to their child commands.
 
 Consumer workflows should upload logs and result bundles with short retention.
 GitHub runner temporary directories are cleaned after jobs; download needed
