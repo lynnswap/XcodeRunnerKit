@@ -39,6 +39,7 @@ public struct XcodeBuildRequest: Sendable {
     public var outputDirectory: URL
     /// An existing or reusable DerivedData location. Defaults to the job directory.
     public var derivedDataDirectory: URL?
+    public var compilationCache: CompilationCache?
     public var environment: [String: String] = [:]
     public var buildSettings: [String: String] = [:]
     /// Additional xcodebuild arguments, including test filters and plugin options.

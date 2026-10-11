@@ -59,12 +59,18 @@ public struct XcodeRunner: Sendable {
             if let developerDirectory {
                 environment["DEVELOPER_DIR"] = developerDirectory.path(percentEncoded: false)
             }
+            var buildSettings = request.buildSettings
+            if let cache = request.compilationCache {
+                try FileManager.default.createDirectory(at: cache.directory, withIntermediateDirectories: true)
+                buildSettings = cache.buildSettings(sourceDirectory: request.source.workingDirectory, derivedDataDirectory: derived)
+                    .merging(buildSettings) { _, caller in caller }
+            }
             let arguments = [action.rawValue] + request.source.arguments + [
                 "-scheme", request.scheme,
                 "-destination", request.destination,
                 "-derivedDataPath", derived.path(percentEncoded: false),
                 "-resultBundlePath", bundleURL.path(percentEncoded: false),
-            ] + request.arguments + request.buildSettings.sorted(by: { $0.key < $1.key }).map { "\($0.key)=\($0.value)" }
+            ] + request.arguments + buildSettings.sorted(by: { $0.key < $1.key }).map { "\($0.key)=\($0.value)" }
 
             var options = PlatformOptions()
             options.createSession = true
