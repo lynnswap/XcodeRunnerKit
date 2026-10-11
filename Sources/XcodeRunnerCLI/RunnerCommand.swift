@@ -33,7 +33,7 @@ struct RunnerCommand: AsyncParsableCommand {
     var simulatorDeviceType: String?
     @Option(help: "Local directory shared by every repository runner on this Mac.")
     var poolDirectory: String?
-    @Option(help: "Shared pool capacity. Required with --pool-directory.")
+    @Option(help: "Capacity for a new shared pool. Existing pools use their saved capacity. Required with --pool-directory.")
     var maximumConcurrentJobs: Int?
     @Option(name: .customLong("setting"), help: "A build setting in NAME=VALUE form. May be repeated.")
     var settings: [String] = []

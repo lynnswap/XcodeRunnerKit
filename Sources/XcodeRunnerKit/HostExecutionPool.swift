@@ -3,10 +3,12 @@ import Foundation
 
 /// Shares an execution limit between cooperating processes on one Mac.
 ///
-/// All repository runners must use the same local directory and capacity.
+/// Repository runners share one local directory. Its saved capacity controls
+/// all operations; a caller's capacity initializes an empty pool.
 /// Do not remove the directory or its lock files while jobs are running.
 public struct HostExecutionPool: Sendable {
     public let directory: URL
+    /// The capacity used when the pool has no saved configuration.
     public let maximumConcurrentJobs: Int
 
     public init(directory: URL, maximumConcurrentJobs: Int) throws {
@@ -27,20 +29,24 @@ public struct HostExecutionPool: Sendable {
         try Task.checkCancellation()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let configuration = try Self.open(directory.appending(path: "capacity.lock"))
-        try await Self.withHandle(configuration) {
+        let capacity = try await Self.withHandle(configuration) {
             try await Self.lock(configuration)
             let stored = try configuration.readToEnd() ?? Data()
             if stored.isEmpty {
                 try configuration.write(contentsOf: Data(String(maximumConcurrentJobs).utf8))
                 try configuration.synchronize()
-            } else if String(data: stored, encoding: .utf8) != String(maximumConcurrentJobs) {
-                throw ConfigurationError.capacityMismatch(directory: directory, requested: maximumConcurrentJobs)
+                return maximumConcurrentJobs
             }
+            guard let value = String(data: stored, encoding: .utf8),
+                  let capacity = Int(value), capacity > 0 else {
+                throw ConfigurationError.invalidStoredCapacity(directory: directory)
+            }
+            return capacity
         }
 
         while true {
             try Task.checkCancellation()
-            for index in 0..<maximumConcurrentJobs {
+            for index in 0..<capacity {
                 let handle = try Self.open(directory.appending(path: "slot-\(index).lock"))
                 let locked: Bool
                 do {
@@ -62,14 +68,14 @@ public struct HostExecutionPool: Sendable {
 
     public enum ConfigurationError: Error, LocalizedError {
         case invalidCapacity
-        case capacityMismatch(directory: URL, requested: Int)
+        case invalidStoredCapacity(directory: URL)
 
         public var errorDescription: String? {
             switch self {
             case .invalidCapacity:
                 return "The maximum concurrent job count must be positive."
-            case .capacityMismatch(let directory, let requested):
-                return "The pool at \(directory.path(percentEncoded: false)) has a different capacity than \(requested). Stop all jobs before reconfiguring the pool."
+            case .invalidStoredCapacity(let directory):
+                return "The pool at \(directory.path(percentEncoded: false)) has an invalid saved capacity. Expected a positive integer."
             }
         }
     }
