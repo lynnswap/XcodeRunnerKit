@@ -1,2 +1,5 @@
+# Official GitHub-hosted preview image; actionlint 1.7.12 lacks this label.
+# https://github.blog/changelog/2026-07-16-xcode-27-runner-image-now-in-public-preview/
+# This section is actionlint's extra-label allowlist, not Actions runner routing.
 self-hosted-runner:
-  labels: [xcode-runnerkit, m1pro]
+  labels: [xcode-27]

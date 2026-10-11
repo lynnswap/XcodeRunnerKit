@@ -107,9 +107,14 @@ key mapping before introducing a new private dependency.
 
 ## Run workflows
 
-The native workflow runs trusted `main` pushes and authorized manual dispatches.
-Keep public-fork pull-request execution off these runners. Jobs under the same
-macOS user share filesystem and credential access.
+Native consumer workflows execute code trusted by the host owner. Jobs under
+the same macOS user share filesystem and credential access; per-job directories,
+owned Simulators, and the pool do not isolate malicious code.
+
+XcodeRunnerKit's own public CI uses GitHub-hosted macOS runners for pull requests,
+main pushes, and manual dispatches. Do not register this public package on a Mac
+that holds private credentials. Use isolated runners for untrusted contribution
+workflows; reviewing or merging code does not make the native host a sandbox.
 
 All repositories use:
 
@@ -130,10 +135,11 @@ For apps, use the application's workspace and scheme. Consumer-owned plugin
 environment values and package paths belong in that consumer's workflow.
 Keep mutable SwiftPM checkouts separate between concurrent jobs.
 
-The supplied workflow uploads logs and result bundles with one-day retention. GitHub runner
-temporary directories are cleaned after jobs; download needed artifacts before
-they expire. Shared CAS files stay under the host root, outside job temporary
-directories.
+Consumer workflows should upload logs and result bundles with short retention.
+GitHub runner temporary directories are cleaned after jobs; download needed
+artifacts before they expire. Native-host CAS files stay under the host root,
+outside job temporary directories. The package's hosted CI uses job-local CAS
+and one-day artifact retention.
 
 ## Service operations and recovery
 
