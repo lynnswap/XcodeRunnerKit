@@ -32,10 +32,10 @@ plist.write_bytes(plistlib.dumps({
 os.chmod(plist, 0o600)
 PY
 
-service="gui/$(id -u)/dev.lynnswap.XcodeRunnerKit.awake"
+domain="gui/$(id -u)"
+service="$domain/dev.lynnswap.XcodeRunnerKit.awake"
 if launchctl print "$service" >/dev/null 2>&1; then
-    launchctl kickstart -k "$service"
-else
-    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/dev.lynnswap.XcodeRunnerKit.awake.plist"
+    launchctl bootout "$service"
 fi
+launchctl bootstrap "$domain" "$HOME/Library/LaunchAgents/dev.lynnswap.XcodeRunnerKit.awake.plist"
 printf 'Installed tools at %s (source %s)\n' "$host_root" "$source_commit"

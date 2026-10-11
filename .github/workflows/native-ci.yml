@@ -55,7 +55,16 @@ jobs:
       - name: Test the iOS consumer fixture
         run: |
           ci_root="$HOME/Library/Application Support/XcodeRunnerKit"
-          "$ci_root/bin/xcode-runner" test \
+          cli_derived="$RUNNER_TEMP/XcodeRunnerKit-cli-derived"
+          "$ci_root/bin/xcode-runner" build \
+            --package "$GITHUB_WORKSPACE" --scheme XcodeRunnerKit-Package \
+            --destination 'platform=macOS,arch=arm64' \
+            --derived-data-directory "$cli_derived" \
+            --pool-directory "$ci_root/Pool" --maximum-concurrent-jobs 2 \
+            --compilation-cache "$ci_root/CompilationCache" \
+            --output-directory "$RUNNER_TEMP/XcodeRunnerKit-ios" \
+            -- -configuration Release -jobs 4
+          "$cli_derived/Build/Products/Release/xcode-runner" test \
             --package "$GITHUB_WORKSPACE/Tests/Fixtures/BuildProbe" --scheme BuildProbe \
             --simulator-runtime com.apple.CoreSimulator.SimRuntime.iOS-27-0 \
             --simulator-device-type com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro \
