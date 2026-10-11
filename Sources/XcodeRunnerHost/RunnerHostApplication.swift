@@ -122,6 +122,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private let root: URL
     private let logs: URL
     private let lockDescriptor: Int32
+    private let executable: URL
     private var runners: [URL: Task<Void, Never>] = [:]
     private var monitoring: Task<Void, Never>?
     private var signals: [any DispatchSourceSignal] = []
@@ -132,6 +133,10 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     init(root: URL, logs: URL) throws {
         self.root = root.resolvingSymlinksInPath()
         self.logs = logs
+        guard let executable = Bundle.main.executableURL else {
+            throw ValidationError("Cannot locate the runner host executable.")
+        }
+        self.executable = executable
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
         lockDescriptor = open(root.appending(path: ".xcode-runner-host.lock").path(percentEncoded: false),
@@ -299,7 +304,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         do {
             print("Starting \(name); service log: \(log.path(percentEncoded: false)).")
             _ = try await Subprocess.run(
-                .path(.init(URL(filePath: CommandLine.arguments[0]).path(percentEncoded: false))),
+                .path(.init(executable.path(percentEncoded: false))),
                 arguments: .init([
                     "--service-directory", directory.path(percentEncoded: false),
                     "--parent-process-id", String(getpid()),

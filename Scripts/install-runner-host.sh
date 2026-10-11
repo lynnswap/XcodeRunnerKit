@@ -7,6 +7,7 @@ runners_root=${2:-"$HOME/Library/XcodeRunnerKit/runners"}
 host_root=${3:-"$HOME/Library/Application Support/XcodeRunnerKit"}
 applications=${4:-"$HOME/Applications"}
 identifier=dev.lynnswap.XcodeRunnerHost
+script_directory="$(cd "$(dirname "$0")" && pwd)"
 codesign --verify --strict "$source_app"
 signature=$(codesign -dv "$source_app" 2>&1)
 if [[ "$signature" == *Signature=adhoc* ]]; then
@@ -32,7 +33,15 @@ trap 'rm -rf "$staging"' EXIT
 ditto "$source_app" "$staging/XcodeRunnerHost.app"
 codesign --verify --strict "$staging/XcodeRunnerHost.app"
 if launchctl print "$domain/$identifier" >/dev/null 2>&1; then
-    launchctl bootout "$domain/$identifier"
+    old_lock=$(python3 - "$HOME/Library/LaunchAgents/$identifier.plist" <<'PY'
+from pathlib import Path
+import plistlib, sys
+with open(sys.argv[1], 'rb') as f:
+    args=plistlib.load(f)['ProgramArguments']
+print(Path(args[args.index('--runners-root')+1])/'.xcode-runner-host.lock')
+PY
+)
+    python3 "$script_directory/stop-runner-service.py" "$domain/$identifier" --ownership-lock "$old_lock"
     reloaded=1
 fi
 if [[ -d "$app" ]]; then

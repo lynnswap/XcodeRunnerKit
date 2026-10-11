@@ -11,6 +11,7 @@ import tempfile
 import time
 
 executable = str(Path(sys.argv[1]).resolve())
+scripts = Path(__file__).resolve().parent
 
 
 def wait_for(predicate, description, seconds=15):
@@ -68,7 +69,9 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     (excluded / '.service').touch()
     arguments = [executable, '--runners-root', str(runners), '--logs-directory', str(root/'logs')]
     with (root/'host.log').open('w') as log:
-        host = subprocess.Popen(arguments, stdout=log, stderr=log)
+        host = subprocess.Popen([Path(executable).name]+arguments[1:], cwd=root,
+                                env={**os.environ, 'PATH':str(Path(executable).parent)+os.pathsep+os.environ['PATH']},
+                                stdout=log, stderr=log)
         try:
             wait_for(lambda:(first/'pid.json').exists(), 'First runner did not start')
             first_pid = json.loads((first/'pid.json').read_text())['pid']
@@ -81,6 +84,31 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
             first_group = json.loads((first/'pid.json').read_text())['group']
             second_group = json.loads((second/'pid.json').read_text())['group']
             assert first_group != second_group
+            legacy = fixture(runners, 'legacy-migration')
+            (legacy/'.xcode-runner-host').unlink()
+            (legacy/'stop-delay').write_text('8')
+            (legacy/'bin').mkdir()
+            (legacy/'bin/runsvc.sh').write_text((legacy/'runsvc.sh').read_text())
+            legacy_label = f'dev.lynnswap.XcodeRunnerHost.legacy.{os.getpid()}'
+            legacy_target = f'gui/{os.getuid()}/{legacy_label}'
+            legacy_plist = root/'legacy.plist'
+            legacy_plist.write_bytes(plistlib.dumps({
+                'Label':legacy_label, 'ProgramArguments':['/bin/bash',str(legacy/'runsvc.sh')],
+                'WorkingDirectory':str(legacy), 'RunAtLoad':True,
+            }))
+            (legacy/'.service').write_text(str(legacy_plist)+'\n')
+            subprocess.run(['launchctl','bootstrap',f'gui/{os.getuid()}',str(legacy_plist)],check=True)
+            try:
+                wait_for(lambda:(legacy/'pid.json').exists(), 'Individual service did not start')
+                legacy_pid = json.loads((legacy/'pid.json').read_text())['pid']
+                migration = subprocess.Popen(['bash',str(scripts/'enable-hosted-runner.sh'),str(legacy)],stdout=log,stderr=log)
+                wait_for(lambda:(legacy/'stopping').exists(), 'Individual service did not start shutdown')
+                assert alive(legacy_pid) and not (legacy/'.xcode-runner-host').exists()
+                assert migration.wait(timeout=20) == 0
+                assert not alive(legacy_pid)
+                wait_for(lambda:json.loads((legacy/'pid.json').read_text())['pid']!=legacy_pid, 'Migrated service did not start')
+            finally:
+                subprocess.run(['launchctl','bootout',legacy_target],capture_output=True)
             crashed = fixture(runners, 'crashed-helper')
             wait_for(lambda:(crashed/'pid.json').exists(), 'Helper-crash fixture did not start')
             crash_process = json.loads((crashed/'pid.json').read_text())
@@ -146,7 +174,6 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
         subprocess.run(['launchctl','bootout',target],check=True)
     wait_for(lambda:not alive(restarted['pid']), 'Runner survived service removal')
 
-    scripts = Path(__file__).resolve().parent
     subprocess.run(['bash',str(scripts/'build-runner-host.sh'),'-',str(root/'packaging'),executable],check=True,capture_output=True)
     tools = root/'tools'
     tools.mkdir()

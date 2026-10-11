@@ -136,6 +136,9 @@ and registration credentials, and creates `.xcode-runner-host` as the opt-in
 marker. It backs up the service path and plist with a `.before-host` suffix.
 The host discovers changes within two seconds. A runner with an individual
 `.service` is excluded to avoid starting duplicate listeners.
+Setup waits for the previous service's processes to exit before enabling host
+discovery. Keep `stop-runner-service.py` beside the setup scripts when copying
+them to another Mac.
 
 For removable work storage, allow the initial **XcodeRunnerHost** prompt in the
 CI user's GUI session. The LaunchAgent associates its process tree with that
