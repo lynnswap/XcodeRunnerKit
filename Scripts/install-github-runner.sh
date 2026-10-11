@@ -19,10 +19,10 @@ if [[ "$actual" != "$expected" ]]; then
     echo "Runner archive checksum does not match the pinned release." >&2
     exit 1
 fi
-runners_root="$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$runners_root")"
+runners_root="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$runners_root")"
 directory="$runners_root/$runner_name"
 # The official runner's default shell template does not quote its script path.
-case "$directory$work_directory" in *[[:space:]]*) echo "Runner installation and work paths must not contain whitespace." >&2; exit 1;; esac
+case "$directory" in *[[:space:]]*) echo "Runner installation paths must not contain whitespace." >&2; exit 1;; esac
 if [[ -f "$directory/.runner" ]]; then
     echo "Runner already configured at $directory; use its service commands or remove its registration before reinstalling." >&2
     exit 1
@@ -32,7 +32,8 @@ case "$work_directory" in
     *) work_path="$directory/$work_directory";;
 esac
 mkdir -p "$work_path"
-probe=$(mktemp "$work_path/.xcode-runnerkit-setup.XXXXXX")
+work_directory="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$work_path")"
+probe=$(mktemp "$work_directory/.xcode-runnerkit-setup.XXXXXX")
 rm "$probe"
 hooks_directory="$HOME/Library/XcodeRunnerKit/hooks/$runner_name"
 case "$hooks_directory" in *[[:space:]]*) echo "Hook paths must not contain whitespace." >&2; exit 1;; esac

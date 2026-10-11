@@ -63,9 +63,10 @@ ssh CI_HOST 'bash "$HOME/Library/Caches/install-github-runner.sh" OWNER/REPO run
 The controller's GitHub credential stays on the controller. The host keeps the
 official runner's generated registration credentials. Each runner is installed
 under `~/Library/XcodeRunnerKit/runners/<runner-name>`, with its own `_work` directory and an
-official service plist in `~/Library/LaunchAgents`. Runner installation and work
-paths must contain no whitespace: the default shell template does not quote
-its temporary script path. Toolkit tools, keys, and CAS can remain in the
+official service plist in `~/Library/LaunchAgents`. Runner installation and hook
+paths must contain no whitespace. Work directories use physical absolute paths;
+if they contain spaces, quote the script placeholder in every consumer workflow
+as shown below. Toolkit tools, keys, and CAS can remain in the
 Application Support path. Installation starts the
 service in `gui/<CI-user-uid>`. If startup fails, the installer reports the
 registered runner and installed plist so they can be started after GUI login.
@@ -86,32 +87,32 @@ DerivedData, the result bundle, and the log. Dependency checkouts in
 Keep the runner installation, tools, credentials, and host pool on the internal
 disk. To place job data and the shared CAS on another disk:
 
-1. Create a CI directory on the mounted disk. If its path contains spaces,
-   create a stable symlink with a space-free name, such as `$HOME/CIStorage`.
-   Keep that disk mounted while the services run. In the CI user's GUI session,
+1. Create a CI directory on the mounted disk and keep that disk mounted while
+   the services run. Use physical work paths: conditional Git credential
+   includes used by checkout actions do not reliably match symlink aliases. In the CI user's GUI session,
    allow macOS's removable-volume access prompt for the runner or its shell.
    A service can wait for this prompt during work-directory validation; confirm
    each configured service connects after permission is granted.
 2. Pass a separate work directory for each runner as the installer's fifth
-   argument. It is relative to the runner installation unless absolute.
-   Setup creates the work directory and confirms it is writable before registration.
-   Installation and work paths must contain no whitespace; a space-free symlink
-   lets the physical volume name contain spaces.
+   argument. Relative input is based on the runner installation. Setup creates
+   the directory, confirms it is writable, and stores its physical absolute path
+   before registration. A work path containing spaces requires a quoted workflow
+   shell template.
 3. Pass the shared CAS directory as the host-tool installer's fourth argument.
    It keeps `<host-root>/CompilationCache` as a symlink to that directory, so
    existing consumer workflows keep using the same path.
 
-For example, after creating `$HOME/CIStorage`:
+For example, with a mounted CI storage directory:
 
 ```sh
 ci_root="$HOME/Library/Application Support/XcodeRunnerKit"
 bash Scripts/install-host-tools.sh .build/release/xcode-runner \
-  "$(git rev-parse HEAD)" "$ci_root" "$HOME/CIStorage/CompilationCache"
+  "$(git rev-parse HEAD)" "$ci_root" "/Volumes/BuildStorage/CI/CompilationCache"
 
 # Send the registration token on stdin as in the registration example.
 bash Scripts/install-github-runner.sh OWNER/REPO runner-name \
   /path/to/actions-runner-osx-arm64-2.338.0.tar.gz \
-  "$HOME/Library/XcodeRunnerKit/runners" "$HOME/CIStorage/Work/runner-name"
+  "$HOME/Library/XcodeRunnerKit/runners" "/Volumes/BuildStorage/CI/Work/runner-name"
 ```
 
 The cache installer preserves an existing cache. If its location changes and
@@ -122,9 +123,22 @@ runners at the same work directory or DerivedData directory.
 
 For an existing runner, stop its service before copying the work directory.
 Back up its `.runner` file and update only `workFolder` to the new absolute,
-space-free path; retain the registration and credentials. Verify the new
+physical path; retain the registration and credentials. Verify the new
 physical storage and native jobs before removing the old copy. Rollback restores
 the saved `.runner` and cache location while all users are stopped.
+
+The default Actions bash template does not quote its script placeholder.
+For work paths containing spaces, each consumer workflow must select:
+
+```yaml
+defaults:
+  run:
+    shell: 'bash --noprofile --norc -e -o pipefail "{0}"'
+```
+
+Keep the physical work path even when using a space-free alias for other host
+data. Choosing a symlink alias to avoid shell quoting can break private-repository
+checkout authentication.
 
 ## Temporary-directory cleanup
 

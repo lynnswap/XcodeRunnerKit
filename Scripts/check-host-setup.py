@@ -125,13 +125,24 @@ Path('.env').write_text('')
             target.addfile(info, io.BytesIO(data))
     environment = {**os.environ, "HOME": str(root), "PATH": str(tools) + os.pathsep + os.environ["PATH"]}
     installation_root = root / "runners"
-    work = root / "external-work"
+    physical_work = root / "External work data"
+    physical_work.mkdir()
+    work_alias = root / "work-alias"
+    work_alias.symlink_to(physical_work, target_is_directory=True)
+    work = work_alias / "fixture"
     installer = ["bash", str(scripts / "install-github-runner.sh"), "OWNER/REPO", "fixture", str(archive), str(installation_root), str(work), "xcode-runnerkit,custom-host"]
     subprocess.run(installer, input="fixture-token\n", text=True, env=environment, check=True, capture_output=True)
     installation = installation_root / "fixture"
     received = json.loads((installation / ".runner").read_text())
-    assert received == {"workFolder": str(work), "labels": "xcode-runnerkit,custom-host"}
+    assert received == {"workFolder": str(work.resolve()), "labels": "xcode-runnerkit,custom-host"}
     assert work.is_dir()
+    credential_fixture = root / "credential-fixture.config"
+    credential_fixture.write_text("[fixture]\n    marker = present\n")
+    git = ["git", "-C", received["workFolder"]]
+    subprocess.run(git + ["init", "-q"], env=environment, check=True)
+    subprocess.run(git + ["config", "--local", f'includeIf.gitdir:{received["workFolder"]}/.git.path', str(credential_fixture)], env=environment, check=True)
+    marker = subprocess.check_output(git + ["config", "--get", "fixture.marker"], env=environment, text=True)
+    assert marker.strip() == "present"
     hook = Path((installation / ".env").read_text().strip().split("=", 1)[1])
     assert hook.is_absolute() and installation not in hook.parents
     temporary_data = work / "_temp"
