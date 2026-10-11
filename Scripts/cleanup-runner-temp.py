@@ -7,6 +7,10 @@ temporary = Path(os.environ["RUNNER_TEMP"])
 if not temporary.is_absolute() or temporary.name != "_temp":
     raise ValueError("RUNNER_TEMP must name the official runner's absolute _temp directory")
 
+if temporary.is_symlink():
+    raise ValueError("RUNNER_TEMP itself must not be a symbolic link")
+
+
 def traversal_failed(error):
     raise error
 
