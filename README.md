@@ -229,6 +229,13 @@ Cancel the calling Swift task to forcefully terminate the process group with
 SIGKILL. A cancelled result bundle may be incomplete. The CLI handles SIGINT
 and SIGTERM through the same cancellation path.
 
+## GitHub Actions
+
+[Set up a native host](Documentation/NativeHost.md) for repository runners,
+private dependency authentication, service operation, and cache retention.
+The native workflow runs trusted main pushes and manual dispatches on the
+`xcode-runnerkit` host label, covering macOS tests and the iOS consumer fixture.
+
 ## Development
 
 ```sh

@@ -1,0 +1,2 @@
+self-hosted-runner:
+  labels: [xcode-runnerkit, m1pro]
