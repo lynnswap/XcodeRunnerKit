@@ -34,8 +34,21 @@ PY
 
 domain="gui/$(id -u)"
 service="$domain/dev.lynnswap.XcodeRunnerKit.awake"
+reloaded=0
 if launchctl print "$service" >/dev/null 2>&1; then
     launchctl bootout "$service"
+    reloaded=1
 fi
-launchctl bootstrap "$domain" "$HOME/Library/LaunchAgents/dev.lynnswap.XcodeRunnerKit.awake.plist"
+plist="$HOME/Library/LaunchAgents/dev.lynnswap.XcodeRunnerKit.awake.plist"
+if launchctl bootstrap "$domain" "$plist"; then
+    :
+else
+    status=$?
+    if [[ "$reloaded" -ne 1 || "$status" -ne 5 ]]; then
+        exit "$status"
+    fi
+    # launchd can briefly return EIO after removing an active service.
+    sleep 1
+    launchctl bootstrap "$domain" "$plist"
+fi
 printf 'Installed tools at %s (source %s)\n' "$host_root" "$source_commit"
