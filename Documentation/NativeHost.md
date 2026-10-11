@@ -88,9 +88,13 @@ disk. To place job data and the shared CAS on another disk:
 
 1. Create a CI directory on the mounted disk. If its path contains spaces,
    create a stable symlink with a space-free name, such as `$HOME/CIStorage`.
-   Keep that disk mounted while the services run.
+   Keep that disk mounted while the services run. In the CI user's GUI session,
+   allow macOS's removable-volume access prompt for the runner or its shell.
+   A service can wait for this prompt during work-directory validation; confirm
+   each configured service connects after permission is granted.
 2. Pass a separate work directory for each runner as the installer's fifth
    argument. It is relative to the runner installation unless absolute.
+   Setup creates the work directory and confirms it is writable before registration.
    Installation and work paths must contain no whitespace; a space-free symlink
    lets the physical volume name contain spaces.
 3. Pass the shared CAS directory as the host-tool installer's fourth argument.
@@ -125,14 +129,15 @@ the saved `.runner` and cache location while all users are stopped.
 ## Temporary-directory cleanup
 
 The runner installer copies the two `cleanup-runner-temp` scripts into its
-internal `hooks` directory and sets `ACTIONS_RUNNER_HOOK_JOB_COMPLETED` in
+host-managed `~/Library/XcodeRunnerKit/hooks/<runner-name>` directory and sets `ACTIONS_RUNNER_HOOK_JOB_COMPLETED` in
 `.env`. The completed hook removes symbolic links inside `RUNNER_TEMP` without
 following directory links or removing their targets. This prevents the
 official runner's parallel deletion from leaving a link behind after its target
 has been deleted. Regular files and runner metadata remain for the official
 cleanup; the shared CAS is outside `RUNNER_TEMP`.
 
-For an existing runner, copy those scripts to its internal `hooks` directory,
+For an existing runner, copy those scripts to its host-managed hooks directory outside the
+runner installation,
 set the completed-hook variable to the absolute `.sh` path in `.env`, and
 restart the service. Preserve and compose an existing custom completed hook
 rather than replacing it. Artifact upload steps run before this hook, including

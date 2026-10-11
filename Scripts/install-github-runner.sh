@@ -27,6 +27,18 @@ if [[ -f "$directory/.runner" ]]; then
     echo "Runner already configured at $directory; use its service commands or remove its registration before reinstalling." >&2
     exit 1
 fi
+case "$work_directory" in
+    /*) work_path="$work_directory";;
+    *) work_path="$directory/$work_directory";;
+esac
+mkdir -p "$work_path"
+probe=$(mktemp "$work_path/.xcode-runnerkit-setup.XXXXXX")
+rm "$probe"
+hooks_directory="$HOME/Library/XcodeRunnerKit/hooks/$runner_name"
+case "$hooks_directory" in *[[:space:]]*) echo "Hook paths must not contain whitespace." >&2; exit 1;; esac
+mkdir -p "$hooks_directory"
+install -m 755 "$script_directory/cleanup-runner-temp.sh" "$hooks_directory/cleanup-runner-temp.sh"
+install -m 644 "$script_directory/cleanup-runner-temp.py" "$hooks_directory/cleanup-runner-temp.py"
 IFS= read -r registration_token
 mkdir -p "$directory"
 tar -xzf "$archive" -C "$directory"
@@ -34,10 +46,7 @@ cd "$directory"
 ./config.sh --unattended --url "https://github.com/$repository" --token "$registration_token" \
     --name "$runner_name" --labels "$labels" --work "$work_directory"
 unset registration_token
-mkdir -p hooks
-install -m 755 "$script_directory/cleanup-runner-temp.sh" hooks/cleanup-runner-temp.sh
-install -m 644 "$script_directory/cleanup-runner-temp.py" hooks/cleanup-runner-temp.py
-printf 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=%s/hooks/cleanup-runner-temp.sh\n' "$directory" >> .env
+printf 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=%s/cleanup-runner-temp.sh\n' "$hooks_directory" >> .env
 ./svc.sh install
 plist=$(cat .service)
 if ! launchctl bootstrap "gui/$(id -u)" "$plist"; then

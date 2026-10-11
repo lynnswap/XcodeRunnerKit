@@ -16,9 +16,12 @@ cache = Path(sys.argv[1]) / "CompilationCache"
 destination = Path(sys.argv[2]).expanduser().absolute()
 if cache.resolve() != destination.resolve():
     if cache.is_symlink() or cache.exists():
-        if cache.is_symlink() or any(cache.iterdir()):
+        if not cache.is_dir() or any(cache.iterdir()):
             raise RuntimeError(f"Preserve or move the existing cache at {cache} before changing its location")
-        cache.rmdir()
+        if cache.is_symlink():
+            cache.unlink()
+        else:
+            cache.rmdir()
     destination.mkdir(parents=True, exist_ok=True)
     cache.symlink_to(destination, target_is_directory=True)
 else:
