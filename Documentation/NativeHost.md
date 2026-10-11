@@ -160,8 +160,12 @@ are stopped; DerivedData and result retention are separate.
 
 The official GitHub runner retains its normal automatic-update behavior.
 Update Xcode and the toolkit during a maintenance window, verify the configured
-runtime/device pairing, then run the consumer workflows again. Restore
-`bin/xcode-runner.previous` if a toolkit update needs rollback.
+runtime/device pairing, then run the consumer workflows again. For rollback,
+restore both `bin/xcode-runner.previous` and `bin/xcode-runner.commit.previous`
+to `bin/xcode-runner` and `bin/xcode-runner.commit` while the runners are stopped.
+If the previous executable had no commit marker, the installer leaves no backup
+marker; remove the current marker when restoring that executable so diagnostics
+do not report the newer revision.
 
 After a host reboot, authenticate FileVault and restore the CI user's GUI
 session; user LaunchAgents then start the installed services. On Apple silicon
