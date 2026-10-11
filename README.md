@@ -1,5 +1,8 @@
 # XcodeRunnerKit
 
+> [!NOTE]
+> Work in progress. APIs, command-line options, and behavior may change.
+
 Run Xcode builds and tests on a macOS host from Swift or the `xcode-runner` CLI.
 Each operation preserves a combined output log and reserves its own result-bundle
 location. Task cancellation tears down the launched process group.
