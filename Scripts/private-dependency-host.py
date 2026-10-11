@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 configuration = json.load(sys.stdin)
-root = Path(configuration["root"]).expanduser() if configuration["root"] else Path.home() / "Library/Application Support/XcodeRunnerKit"
+root = (Path(configuration["root"]).expanduser() if configuration["root"] else Path.home() / "Library/Application Support/XcodeRunnerKit").resolve()
 keys = root / "keys"
 keys.mkdir(parents=True, exist_ok=True, mode=0o700)
 (root / "bin").mkdir(parents=True, exist_ok=True)

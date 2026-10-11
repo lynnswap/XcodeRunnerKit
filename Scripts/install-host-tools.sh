@@ -5,6 +5,8 @@ umask 077
 executable=${1:?Usage: install-host-tools.sh EXECUTABLE SOURCE_COMMIT [HOST_ROOT]}
 source_commit=${2:?Specify the verified XcodeRunnerKit source commit}
 host_root=${3:-"$HOME/Library/Application Support/XcodeRunnerKit"}
+mkdir -p "$host_root"
+host_root="$(cd "$host_root" && pwd -P)"
 mkdir -p "$host_root/bin" "$host_root/Pool" "$host_root/CompilationCache" "$host_root/logs" "$HOME/Library/LaunchAgents"
 if [[ -f "$host_root/bin/xcode-runner" ]]; then
     cp -p "$host_root/bin/xcode-runner" "$host_root/bin/xcode-runner.previous"
