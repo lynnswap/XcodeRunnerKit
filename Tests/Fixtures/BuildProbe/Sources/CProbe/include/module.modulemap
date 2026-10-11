@@ -1,0 +1,4 @@
+module CProbe {
+    header "CProbe.h"
+    export *
+}

@@ -1,5 +1,15 @@
 import Foundation
 
+extension URL {
+    func compilerCanonicalURL() throws -> URL {
+        // resolvingSymlinksInPath removes /private, unlike compiler filesystem paths.
+        guard let path = try resourceValues(forKeys: [.canonicalPathKey]).canonicalPath else {
+            throw CocoaError(.fileReadUnknown, userInfo: [NSURLErrorKey: self])
+        }
+        return URL(filePath: path)
+    }
+}
+
 /// Shares compiler outputs while keeping each job's build database isolated.
 public struct CompilationCache: Sendable {
     public var directory: URL
@@ -29,7 +39,7 @@ public struct CompilationCache: Sendable {
             PrefixMapping(source: sourceDirectory, replacement: "/^xcodeRunnerSource"),
         ]
         let values = mappings.map { mapping in
-            Self.quotedListElement(mapping.source.resolvingSymlinksInPath().path(percentEncoded: false) + "=" + mapping.replacement)
+            Self.quotedListElement(mapping.source.path(percentEncoded: false) + "=" + mapping.replacement)
         }.joined(separator: " ")
         return [
             "COMPILATION_CACHE_ENABLE_CACHING": "YES",

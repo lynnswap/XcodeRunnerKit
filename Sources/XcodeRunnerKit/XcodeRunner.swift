@@ -106,15 +106,20 @@ public struct XcodeRunner: Sendable {
                 environment["DEVELOPER_DIR"] = developerDirectory.path(percentEncoded: false)
             }
             var buildSettings = request.buildSettings
+            var commandSource = request.source
+            var commandDerivedData = derived
             if let cache = request.compilationCache {
                 try FileManager.default.createDirectory(at: cache.directory, withIntermediateDirectories: true)
-                buildSettings = cache.buildSettings(sourceDirectory: request.source.workingDirectory, derivedDataDirectory: derived)
+                try FileManager.default.createDirectory(at: derived, withIntermediateDirectories: true)
+                commandSource = try request.source.canonicalized()
+                commandDerivedData = try derived.compilerCanonicalURL()
+                buildSettings = cache.buildSettings(sourceDirectory: commandSource.workingDirectory, derivedDataDirectory: commandDerivedData)
                     .merging(buildSettings) { _, caller in caller }
             }
-            let arguments = [action.rawValue] + request.source.arguments + [
+            let arguments = [action.rawValue] + commandSource.arguments + [
                 "-scheme", request.scheme,
                 "-destination", request.destination,
-                "-derivedDataPath", derived.path(percentEncoded: false),
+                "-derivedDataPath", commandDerivedData.path(percentEncoded: false),
                 "-resultBundlePath", bundleURL.path(percentEncoded: false),
             ] + request.arguments + buildSettings.sorted(by: { $0.key < $1.key }).map { "\($0.key)=\($0.value)" }
 
@@ -128,7 +133,7 @@ public struct XcodeRunner: Sendable {
                 .path(.init(executableURL.path(percentEncoded: false))),
                 arguments: .init(arguments),
                 environment: .inherit.updating(Dictionary(uniqueKeysWithValues: environment.map { (Environment.Key(stringLiteral: $0.key), Optional($0.value)) })),
-                workingDirectory: .init(request.source.workingDirectory.path(percentEncoded: false)),
+                workingDirectory: .init(commandSource.workingDirectory.path(percentEncoded: false)),
                 platformOptions: options,
                 input: .none,
                 output: .sequence,

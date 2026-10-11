@@ -63,7 +63,10 @@ struct RunnerCommand: AsyncParsableCommand {
             var cache = CompilationCache(directory: Self.url(compilationCache))
             cache.enablesDiagnosticRemarks = cacheDiagnostics
             cache.prefixMappings = try Self.assignments(prefixMappings).sorted(by: { $0.key < $1.key }).map {
-                CompilationCache.PrefixMapping(source: Self.url($0.key), replacement: $0.value)
+                CompilationCache.PrefixMapping(
+                    source: URL(filePath: $0.key, relativeTo: URL.currentDirectory()).absoluteURL,
+                    replacement: $0.value
+                )
             }
             request.compilationCache = cache
         } else if cacheDiagnostics || !prefixMappings.isEmpty {

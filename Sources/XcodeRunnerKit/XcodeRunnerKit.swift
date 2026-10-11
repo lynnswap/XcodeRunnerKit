@@ -13,6 +13,14 @@ public enum XcodeBuildSource: Sendable, Equatable {
         }
     }
 
+    func canonicalized() throws -> Self {
+        switch self {
+        case .workspace(let url): .workspace(try url.compilerCanonicalURL())
+        case .project(let url): .project(try url.compilerCanonicalURL())
+        case .package(let url): .package(try url.compilerCanonicalURL())
+        }
+    }
+
     var arguments: [String] {
         switch self {
         case .workspace(let url): ["-workspace", url.path(percentEncoded: false)]

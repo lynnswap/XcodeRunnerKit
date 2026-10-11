@@ -26,18 +26,21 @@ def main():
             if changed:
                 source = package / "Sources/CProbe/CProbe.c"
                 source.write_text(source.read_text().replace("value * 2", "value * 3"))
+                test = package / "Tests/BuildProbeTests/BuildProbeTests.swift"
+                test.write_text(test.read_text().replace("doubled(4) == 8", "doubled(4) == 12"))
             output = root / name / "output"
             log = root / (name + ".log")
             start = time.monotonic()
             with log.open("w") as handle:
                 result = subprocess.run([
-                    str(args.executable.resolve()), "build-for-testing",
+                    str(args.executable.resolve()), "test" if changed else "build-for-testing",
                     "--package", str(package), "--scheme", "BuildProbe",
                     "--destination", "platform=macOS,arch=arm64",
                     "--output-directory", str(output),
                     "--pool-directory", str(root / "pool"), "--maximum-concurrent-jobs", "2",
                     "--compilation-cache", str(root / "cas"), "--cache-diagnostics",
-                    "--", "-jobs", "4",
+                    "--prefix-mapping", str((package / "Sources").resolve()) + "=/^xcodeRunnerFixtureSources",
+                    "--", "-parallel-testing-enabled", "NO", "-jobs", "4",
                 ], stdout=handle, stderr=subprocess.STDOUT, timeout=600)
             text = log.read_text().lower()
             errors = [line for line in log.read_text().splitlines() if "error:" in line.lower()]
@@ -52,11 +55,11 @@ def main():
         relocated = run("relocated")
         assert relocated["hitNotes"] > 0 and relocated["missNotes"] == 0, relocated
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            concurrent = list(pool.map(run, ["parallel-a", "parallel-b"]))
-        assert all(r["hitNotes"] > 0 and r["missNotes"] == 0 for r in concurrent), concurrent
+            parallel = list(pool.map(run, ["parallel-a", "parallel-b"]))
+        assert all(r["hitNotes"] > 0 and r["missNotes"] == 0 for r in parallel), parallel
         changed = run("changed", changed=True)
         assert changed["missNotes"] > 0, "Changed compiler input incorrectly produced only cache hits"
-        print(json.dumps({"passed": True, "runs": [cold, relocated, *concurrent, changed],
+        print(json.dumps({"passed": True, "runs": [cold, relocated, *parallel, changed],
                           "fixture": "Swift, Clang, SDK Observation macro; stable BuildProbe package identity"}))
 
 
