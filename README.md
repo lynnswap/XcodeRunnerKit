@@ -210,8 +210,8 @@ be cancelled. Invalid saved configuration or lock I/O failures stop the operatio
 
 Use a local filesystem and the same macOS user for all cooperating runners.
 Keep lock files in place while jobs run. To change capacity, stop all runners,
-wait for their managed jobs to finish, remove the pool directory, then restart
-every runner with the new capacity. Locks coordinate XcodeRunnerKit operations;
+wait for their managed jobs to finish, remove the pool directory, then initialize
+the new pool with the desired capacity. Locks coordinate XcodeRunnerKit operations;
 unmanaged commands do not participate. Force-killing the wrapper does not
 provide cleanup guarantees for its subprocesses; use Task, SIGINT, or SIGTERM
 cancellation for managed teardown.
