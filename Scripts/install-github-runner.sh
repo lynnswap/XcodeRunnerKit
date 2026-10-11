@@ -2,11 +2,12 @@
 set -euo pipefail
 umask 077
 
-repository=${1:?Usage: install-github-runner.sh OWNER/REPO NAME ARCHIVE [RUNNERS_ROOT] [WORK_DIRECTORY]; registration token on stdin}
+repository=${1:?Usage: install-github-runner.sh OWNER/REPO NAME ARCHIVE [RUNNERS_ROOT] [WORK_DIRECTORY] [LABELS]; registration token on stdin}
 runner_name=${2:?Specify a unique runner name}
 archive=${3:?Specify actions-runner-osx-arm64-2.338.0.tar.gz}
 runners_root=${4:-"$HOME/Library/XcodeRunnerKit/runners"}
 work_directory=${5:-_work}
+labels=${6:-xcode-runnerkit}
 script_directory="$(cd "$(dirname "$0")" && pwd)"
 case "$runner_name" in ""|"."|".."|*/*) echo "Runner name must be one path component." >&2; exit 1;; esac
 
@@ -31,7 +32,7 @@ mkdir -p "$directory"
 tar -xzf "$archive" -C "$directory"
 cd "$directory"
 ./config.sh --unattended --url "https://github.com/$repository" --token "$registration_token" \
-    --name "$runner_name" --labels "xcode-runnerkit,m1pro" --work "$work_directory"
+    --name "$runner_name" --labels "$labels" --work "$work_directory"
 unset registration_token
 mkdir -p hooks
 install -m 755 "$script_directory/cleanup-runner-temp.sh" hooks/cleanup-runner-temp.sh

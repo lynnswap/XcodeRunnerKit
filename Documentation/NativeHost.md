@@ -70,9 +70,10 @@ Application Support path. Installation starts the
 service in `gui/<CI-user-uid>`. If startup fails, the installer reports the
 registered runner and installed plist so they can be started after GUI login.
 
-The labels include `self-hosted`, `macOS`, `ARM64`, `xcode-runnerkit`, and
-`m1pro`. The provided workflow selects the first four. Change the custom labels
-for other hardware and keep the workflow plus actionlint configuration aligned.
+The default labels include `self-hosted`, `macOS`, `ARM64`, and
+`xcode-runnerkit`. The optional sixth argument selects comma-separated custom
+labels. Keep the labels selected by consumer workflows in that list; hardware
+or host-specific labels belong in the installation configuration.
 
 ## Storage locations
 
