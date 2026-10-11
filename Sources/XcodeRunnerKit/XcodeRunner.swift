@@ -4,6 +4,7 @@ import Subprocess
 /// Runs native Xcode operations with per-operation logs and result bundles.
 public struct XcodeRunner: Sendable {
     public var developerDirectory: URL?
+    public var executionPool: HostExecutionPool?
     private let executableURL: URL
 
     public init(developerDirectory: URL? = nil) {
@@ -24,6 +25,19 @@ public struct XcodeRunner: Sendable {
         _ action: XcodeBuildAction,
         request: XcodeBuildRequest,
         onOutput: (@Sendable (Data) throws -> Void)? = nil
+    ) async throws -> XcodeBuildResult {
+        if let executionPool {
+            return try await executionPool.withSlot {
+                try await runUnrestricted(action, request: request, onOutput: onOutput)
+            }
+        }
+        return try await runUnrestricted(action, request: request, onOutput: onOutput)
+    }
+
+    private func runUnrestricted(
+        _ action: XcodeBuildAction,
+        request: XcodeBuildRequest,
+        onOutput: (@Sendable (Data) throws -> Void)?
     ) async throws -> XcodeBuildResult {
         let directory = request.outputDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
         let derived = request.derivedDataDirectory ?? directory.appending(path: "DerivedData", directoryHint: .isDirectory)

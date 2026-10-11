@@ -88,6 +88,37 @@ Repeat `--setting NAME=VALUE` for build settings and
 `--developer-directory` selects Xcode without changing the host's
 `xcode-select` setting.
 
+## Shared host capacity
+
+Configure the same pool directory and capacity in every repository runner:
+
+```swift
+var runner = XcodeRunner()
+runner.executionPool = try HostExecutionPool(
+    directory: URL(filePath: "/Users/ci/Library/Application Support/XcodeRunnerKit/Pool"),
+    maximumConcurrentJobs: 2
+)
+```
+
+Add `--pool-directory <path> --maximum-concurrent-jobs 2` to CLI operations.
+The kernel holds each slot through execution and log cleanup. Waiting jobs can
+be cancelled. A conflicting capacity or lock I/O failure stops the operation.
+
+Use a local filesystem and the same macOS user for all cooperating runners.
+Keep lock files in place while jobs run. To change capacity, stop all runners,
+wait for their managed jobs to finish, remove the pool directory, then restart
+every runner with the new capacity. Locks coordinate XcodeRunnerKit operations;
+unmanaged commands do not participate. Force-killing the wrapper does not
+provide cleanup guarantees for its subprocesses; use Task, SIGINT, or SIGTERM
+cancellation for managed teardown.
+
+The separate-process check compiles the production pool implementation:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer \
+python3 Scripts/check-execution-pool.py
+```
+
 ## Results and cancellation
 
 Each operation creates a uniquely named directory under `outputDirectory`.
