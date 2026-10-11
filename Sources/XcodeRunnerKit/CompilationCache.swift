@@ -38,7 +38,7 @@ public struct CompilationCache: Sendable {
             PrefixMapping(source: derivedDataDirectory, replacement: "/^xcodeRunnerDerivedData"),
             PrefixMapping(source: sourceDirectory, replacement: "/^xcodeRunnerSource"),
         ]
-        let values = mappings.map { mapping in
+        let values = "$(inherited) " + mappings.map { mapping in
             Self.quotedListElement(mapping.source.path(percentEncoded: false) + "=" + mapping.replacement)
         }.joined(separator: " ")
         return [
