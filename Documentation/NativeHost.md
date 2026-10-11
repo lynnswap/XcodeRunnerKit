@@ -158,6 +158,8 @@ them. Each service has its own process group, as required by GitHub's macOS
 updater. A helper watches the host's process exit and cleans up that service's
 group if the host crashes. GUI login remains required; a shared app identity does not
 isolate repositories or credentials from other jobs running as the same user.
+The host also cleans up a service's group if its helper crashes, before reaping
+the helper so its group identifier cannot be reused during cleanup.
 
 To return a runner to the individual mode, remove its `.xcode-runner-host`
 marker, wait for its common-host service to stop, then run `./svc.sh install`

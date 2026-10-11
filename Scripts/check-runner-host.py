@@ -78,6 +78,18 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
             first_group = json.loads((first/'pid.json').read_text())['group']
             second_group = json.loads((second/'pid.json').read_text())['group']
             assert first_group != second_group
+            crashed = fixture(runners, 'crashed-helper')
+            wait_for(lambda:(crashed/'pid.json').exists(), 'Helper-crash fixture did not start')
+            crash_process = json.loads((crashed/'pid.json').read_text())
+            assert crash_process['group'] not in {first_group, second_group}
+            os.kill(crash_process['group'], signal.SIGKILL)
+            wait_for(lambda:not alive(crash_process['pid']), 'Runner survived its helper crash')
+            assert alive(first_pid) and alive(second_pid)
+            (crashed/'.xcode-runner-host').unlink()
+            instant = fixture(runners, 'instant-exit')
+            (instant/'runsvc.sh').write_text('#!/bin/bash\nexit 0\n')
+            instant_log = root/'logs/instant-exit.log'
+            wait_for(lambda:instant_log.exists() and 'Official runner service ended' in instant_log.read_text(), 'Immediate service exit was not observed')
             (first/'.xcode-runner-host').unlink()
             wait_for(lambda:(first/'stopped').exists() and not alive(first_pid), 'Removed runner did not stop')
             host.send_signal(signal.SIGTERM)
@@ -95,7 +107,9 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
                         if (directory/'pid.json').exists():
                             pid = json.loads((directory/'pid.json').read_text())['pid']
                             if alive(pid): os.kill(pid, signal.SIGTERM)
-        print((root/'host.log').read_text())
+        host_log = (root/'host.log').read_text()
+        print(host_log)
+        assert 'service ended: Error' not in host_log
 
     launched = fixture(runners, 'launchd')
     label = f'dev.lynnswap.XcodeRunnerHost.test.{os.getpid()}'
@@ -121,4 +135,4 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
         subprocess.run(['launchctl','bootout',target],check=True)
     wait_for(lambda:not alive(restarted['pid']), 'Runner survived service removal')
 
-print('PASS: multiple runners, separate service groups, discovery, individual-service exclusion, singleton, graceful shutdown, crash cleanup, and service restart')
+print('PASS: multiple runners, separate service groups, discovery, individual-service exclusion, singleton, graceful shutdown, host/helper crash cleanup, immediate service exit, and restart')

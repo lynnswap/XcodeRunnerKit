@@ -208,6 +208,62 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         }
     }
 
+    private nonisolated static func cleanUpServiceGroupAfterExit(_ identifier: Int32) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            let source = DispatchSource.makeProcessSource(identifier: identifier, eventMask: .exit, queue: .global())
+            source.setEventHandler {
+                // Subprocess retains the zombie until this body returns, preventing PID/group reuse.
+                let result = kill(-identifier, SIGKILL)
+                let code = errno
+                source.setEventHandler(handler: nil)
+                source.cancel()
+                do {
+                    if result != 0 && code != ESRCH {
+                        // macOS reports EPERM for a group containing only unreaped zombies.
+                        if try code != EPERM || groupHasLiveProcesses(identifier) {
+                            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+                        }
+                    }
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+            source.resume()
+        }
+    }
+
+    private nonisolated static func groupHasLiveProcesses(_ identifier: Int32) throws -> Bool {
+        let estimatedBytes = proc_listpids(UInt32(PROC_PGRP_ONLY), UInt32(identifier), nil, 0)
+        guard estimatedBytes > 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        var members = [Int32](repeating: 0, count: Int(estimatedBytes) / MemoryLayout<Int32>.stride)
+        var count: Int32
+        repeat {
+            errno = 0
+            count = members.withUnsafeMutableBytes {
+                proc_listpids(UInt32(PROC_PGRP_ONLY), UInt32(identifier), $0.baseAddress, Int32($0.count))
+            }
+            guard count > 0 || errno == 0 else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
+            if Int(count) < members.count * MemoryLayout<Int32>.stride { break }
+            members += members
+        } while true
+        for member in members.prefix(Int(count) / MemoryLayout<Int32>.stride) {
+            var info = proc_bsdshortinfo()
+            let size = Int32(MemoryLayout<proc_bsdshortinfo>.size)
+            let read = proc_pidinfo(member, PROC_PIDT_SHORTBSDINFO, 0, &info, size)
+            if read == size {
+                if info.pbsi_pgid == UInt32(identifier) && info.pbsi_status != UInt32(SZOMB) { return true }
+            } else if errno != ESRCH {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
+        }
+        return false
+    }
+
     private func serve(_ directory: URL) async {
         let name = directory.lastPathComponent
         let log = logs.appending(path: name + ".log")
@@ -232,9 +288,12 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 environment: .inherit,
                 workingDirectory: .init(directory.path(percentEncoded: false)),
                 platformOptions: options,
+                input: .none,
                 output: .fileDescriptor(.init(rawValue: descriptor), closeAfterSpawningProcess: false),
                 error: .fileDescriptor(.init(rawValue: descriptor), closeAfterSpawningProcess: false)
-            )
+            ) { execution in
+                try await Self.cleanUpServiceGroupAfterExit(execution.processIdentifier.value)
+            }
             if Task.isCancelled {
                 print("\(name) service stopped.")
             } else {
