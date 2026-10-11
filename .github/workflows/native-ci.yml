@@ -25,6 +25,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Check host storage setup and cleanup
+        run: python3 Scripts/check-host-setup.py
       - name: Build the checkout CLI
         run: |
           xcodebuild build \

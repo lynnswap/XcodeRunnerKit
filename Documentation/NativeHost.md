@@ -49,7 +49,8 @@ the shared pool controls how many Xcode payloads execute.
 The installer pins the initial official macOS ARM64 runner to v2.338.0 and
 verifies its release asset checksum. Download that archive from
 [the official release](https://github.com/actions/runner/releases/tag/v2.338.0).
-Copy the archive and installer to the CI Mac.
+Copy the archive, installer, and both `cleanup-runner-temp` scripts from
+`Scripts` to the same directory on the CI Mac.
 
 On an authenticated controller with repository administration access, obtain a
 short-lived registration token and send it directly to the host installer:
@@ -72,6 +73,76 @@ registered runner and installed plist so they can be started after GUI login.
 The labels include `self-hosted`, `macOS`, `ARM64`, `xcode-runnerkit`, and
 `m1pro`. The provided workflow selects the first four. Change the custom labels
 for other hardware and keep the workflow plus actionlint configuration aligned.
+
+## Storage locations
+
+XcodeRunnerKit explicitly passes `-derivedDataPath`, so Xcode's GUI DerivedData
+preference does not select native CI storage. The workflow's
+`--output-directory` contains a UUID directory for each operation, including
+DerivedData, the result bundle, and the log. Dependency checkouts in
+`RUNNER_TEMP` follow the official runner's work directory.
+
+Keep the runner installation, tools, credentials, and host pool on the internal
+disk. To place job data and the shared CAS on another disk:
+
+1. Create a CI directory on the mounted disk. If its path contains spaces,
+   create a stable symlink with a space-free name, such as `$HOME/CIStorage`.
+   Keep that disk mounted while the services run.
+2. Pass a separate work directory for each runner as the installer's fifth
+   argument. It is relative to the runner installation unless absolute.
+   Installation and work paths must contain no whitespace; a space-free symlink
+   lets the physical volume name contain spaces.
+3. Pass the shared CAS directory as the host-tool installer's fourth argument.
+   It keeps `<host-root>/CompilationCache` as a symlink to that directory, so
+   existing consumer workflows keep using the same path.
+
+For example, after creating `$HOME/CIStorage`:
+
+```sh
+ci_root="$HOME/Library/Application Support/XcodeRunnerKit"
+bash Scripts/install-host-tools.sh .build/release/xcode-runner \
+  "$(git rev-parse HEAD)" "$ci_root" "$HOME/CIStorage/CompilationCache"
+
+# Send the registration token on stdin as in the registration example.
+bash Scripts/install-github-runner.sh OWNER/REPO runner-name \
+  /path/to/actions-runner-osx-arm64-2.338.0.tar.gz \
+  "$HOME/Library/XcodeRunnerKit/runners" "$HOME/CIStorage/Work/runner-name"
+```
+
+The cache installer preserves an existing cache. If its location changes and
+the old directory contains data, setup stops before replacing it. Drain and
+stop all cache users, copy the data to the new location, and retain the old
+directory for rollback before configuring the link. Never point simultaneous
+runners at the same work directory or DerivedData directory.
+
+For an existing runner, stop its service before copying the work directory.
+Back up its `.runner` file and update only `workFolder` to the new absolute,
+space-free path; retain the registration and credentials. Verify the new
+physical storage and native jobs before removing the old copy. Rollback restores
+the saved `.runner` and cache location while all users are stopped.
+
+## Temporary-directory cleanup
+
+The runner installer copies the two `cleanup-runner-temp` scripts into its
+internal `hooks` directory and sets `ACTIONS_RUNNER_HOOK_JOB_COMPLETED` in
+`.env`. The completed hook removes symbolic links inside `RUNNER_TEMP` without
+following directory links or removing their targets. This prevents the
+official runner's parallel deletion from leaving a link behind after its target
+has been deleted. Regular files and runner metadata remain for the official
+cleanup; the shared CAS is outside `RUNNER_TEMP`.
+
+For an existing runner, copy those scripts to its internal `hooks` directory,
+set the completed-hook variable to the absolute `.sh` path in `.env`, and
+restart the service. Preserve and compose an existing custom completed hook
+rather than replacing it. Artifact upload steps run before this hook, including
+action post steps. A cleanup error fails the hook and is visible in the job log.
+Forcefully terminating the runner can prevent hooks from running.
+
+Check cache configuration, existing-data preservation, and temporary links with:
+
+```sh
+python3 Scripts/check-host-setup.py
+```
 
 ## Configure private SwiftPM dependencies
 
@@ -137,8 +208,8 @@ Keep mutable SwiftPM checkouts separate between concurrent jobs.
 
 Consumer workflows should upload logs and result bundles with short retention.
 GitHub runner temporary directories are cleaned after jobs; download needed
-artifacts before they expire. Native-host CAS files stay under the host root,
-outside job temporary directories. The package's hosted CI uses job-local CAS
+artifacts before they expire. Native-host CAS files stay outside job temporary directories; the host root's
+`CompilationCache` path can point to another disk. The package's hosted CI uses job-local CAS
 and one-day artifact retention.
 
 ## Service operations and recovery

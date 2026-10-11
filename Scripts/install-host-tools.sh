@@ -2,12 +2,29 @@
 set -euo pipefail
 umask 077
 
-executable=${1:?Usage: install-host-tools.sh EXECUTABLE SOURCE_COMMIT [HOST_ROOT]}
+executable=${1:?Usage: install-host-tools.sh EXECUTABLE SOURCE_COMMIT [HOST_ROOT] [COMPILATION_CACHE_DIRECTORY]}
 source_commit=${2:?Specify the verified XcodeRunnerKit source commit}
 host_root=${3:-"$HOME/Library/Application Support/XcodeRunnerKit"}
 mkdir -p "$host_root"
 host_root="$(cd "$host_root" && pwd -P)"
-mkdir -p "$host_root/bin" "$host_root/Pool" "$host_root/CompilationCache" "$host_root/logs" "$HOME/Library/LaunchAgents"
+cache_directory=${4:-"$host_root/CompilationCache"}
+python3 - "$host_root" "$cache_directory" <<'PY'
+from pathlib import Path
+import sys
+
+cache = Path(sys.argv[1]) / "CompilationCache"
+destination = Path(sys.argv[2]).expanduser().absolute()
+if cache.resolve() != destination.resolve():
+    if cache.is_symlink() or cache.exists():
+        if cache.is_symlink() or any(cache.iterdir()):
+            raise RuntimeError(f"Preserve or move the existing cache at {cache} before changing its location")
+        cache.rmdir()
+    destination.mkdir(parents=True, exist_ok=True)
+    cache.symlink_to(destination, target_is_directory=True)
+else:
+    cache.mkdir(parents=True, exist_ok=True)
+PY
+mkdir -p "$host_root/bin" "$host_root/Pool" "$host_root/logs" "$HOME/Library/LaunchAgents"
 if [[ -f "$host_root/bin/xcode-runner" ]]; then
     cp -p "$host_root/bin/xcode-runner" "$host_root/bin/xcode-runner.previous"
     if [[ -f "$host_root/bin/xcode-runner.commit" ]]; then
