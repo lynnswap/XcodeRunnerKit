@@ -7,6 +7,7 @@ let package = Package(
     products: [
         .library(name: "XcodeRunnerKit", targets: ["XcodeRunnerKit"]),
         .executable(name: "xcode-runner", targets: ["XcodeRunnerCLI"]),
+        .executable(name: "xcode-runner-host", targets: ["XcodeRunnerHost"]),
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-subprocess.git", from: "1.0.1"),
@@ -21,6 +22,14 @@ let package = Package(
         .executableTarget(
             name: "XcodeRunnerCLI",
             dependencies: ["XcodeRunnerKit", .product(name: "ArgumentParser", package: "swift-argument-parser")],
+            swiftSettings: [.swiftLanguageMode(.v6), .defaultIsolation(nil)]
+        ),
+        .executableTarget(
+            name: "XcodeRunnerHost",
+            dependencies: [
+                .product(name: "Subprocess", package: "swift-subprocess"),
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
             swiftSettings: [.swiftLanguageMode(.v6), .defaultIsolation(nil)]
         ),
         .testTarget(

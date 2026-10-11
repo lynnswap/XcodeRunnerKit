@@ -41,6 +41,11 @@ system sleep on AC power. It requires the CI user's GUI launchd domain.
 
 ## Register repository runners
 
+For one privacy identity across repository runners, install the signed
+[common host app](#common-host-app) before registering runners and pass `host`
+as the installer's seventh argument. The default `individual` mode retains
+the official per-runner LaunchAgents described below.
+
 For a personal GitHub account, register runners separately for each repository.
 An organization can instead provide organization runners with appropriate
 repository access. Register enough listeners to admit jobs from several repos;
@@ -75,6 +80,96 @@ The default labels include `self-hosted`, `macOS`, `ARM64`, and
 `xcode-runnerkit`. The optional sixth argument selects comma-separated custom
 labels. Keep the labels selected by consumer workflows in that list; hardware
 or host-specific labels belong in the installation configuration.
+
+## Common host app
+
+`XcodeRunnerHost.app` is a windowless macOS app that starts opted-in official
+runner services as child processes. One user LaunchAgent starts the app in the
+CI user's GUI session. Runner installations, registration credentials, hooks,
+work directories, and the shared compilation cache remain outside its bundle.
+The app shares the existing execution pool through the workflows' CLI options;
+it does not replace GitHub's listener, service retries, or automatic updates.
+
+Build with a certificate identity available in the build machine's keychain:
+
+```sh
+security find-identity -v -p codesigning
+bash Scripts/build-runner-host.sh "SIGNING_IDENTITY" /path/to/output
+```
+
+The script builds the `xcode-runner-host` product and signs the app with the
+selected identity. An ad-hoc identity (`-`) is useful for packaging tests, but
+the installer requires a certificate signature. Keep the same bundle identifier
+and signing identity across updates to retain macOS privacy decisions. This
+local build procedure does not notarize or publish the app.
+
+Copy the app and setup scripts to the CI Mac. Install the host before opting in
+runners:
+
+```sh
+bash Scripts/install-runner-host.sh /path/to/XcodeRunnerHost.app
+```
+
+Optional arguments select the runner installation root, host root, and apps
+directory. Defaults are `~/Library/XcodeRunnerKit/runners`,
+`~/Library/Application Support/XcodeRunnerKit`, and `~/Applications`. Updating
+the app stops its services, so first drain hosted jobs. The previous app is kept
+as `XcodeRunnerHost.previous.app`.
+
+For a newly registered runner, add `host` after the labels argument:
+
+```sh
+# Supply the registration token on stdin as in the registration example.
+bash Scripts/install-github-runner.sh OWNER/REPO runner-name /path/to/runner.tar.gz \
+  "$HOME/Library/XcodeRunnerKit/runners" "/Volumes/BuildStorage/CI/Work/runner-name" \
+  "xcode-runnerkit" host
+```
+
+To move an existing runner, drain its jobs, then run:
+
+```sh
+bash Scripts/enable-hosted-runner.sh "$HOME/Library/XcodeRunnerKit/runners/runner-name"
+```
+
+The script stops and removes its individual LaunchAgent, preserves `.runner`
+and registration credentials, and creates `.xcode-runner-host` as the opt-in
+marker. It backs up the service path and plist with a `.before-host` suffix.
+The host discovers changes within two seconds. A runner with an individual
+`.service` is excluded to avoid starting duplicate listeners.
+Setup waits for the previous service's processes to exit before enabling host
+discovery. Keep `stop-runner-service.py` beside the setup scripts when copying
+them to another Mac.
+
+For removable work storage, allow the initial **XcodeRunnerHost** prompt in the
+CI user's GUI session. The LaunchAgent associates its process tree with that
+app's bundle identifier. The intent is one app-level approval for its runner
+children; it does not bypass privacy protection or automatically grant access.
+Changing the signing identity or the responsible process can require approval
+again. See Apple's [file-system permission guidance](https://developer.apple.com/forums/thread/678819).
+
+Host logs are `<host-root>/logs/runner-host.stdout.log` and
+`runner-host.stderr.log`. Each service writes to `logs/runners/<runner-name>.log`.
+GitHub's service wrapper owns listener retries. If that wrapper stops after a
+permanent failure, inspect its log, resolve the error, and restart the host:
+
+```sh
+launchctl kickstart -k "gui/$(id -u)/dev.lynnswap.XcodeRunnerHost"
+```
+
+Stopping the host forwards cancellation to the service wrappers and waits for
+them. Each service has its own process group, as required by GitHub's macOS
+updater. A helper watches the host's process exit and cleans up that service's
+group if the host crashes. GUI login remains required; a shared app identity does not
+isolate repositories or credentials from other jobs running as the same user.
+The host also cleans up a service's group if its helper crashes, before reaping
+the helper so its group identifier cannot be reused during cleanup.
+The ownership lock is inherited by the service processes. A replacement host
+waits for old services to finish shutting down before starting new listeners.
+
+To return a runner to the individual mode, remove its `.xcode-runner-host`
+marker, wait for its common-host service to stop, then run `./svc.sh install`
+and bootstrap the installed plist in `gui/<uid>`. Do not run both service modes
+for one registration.
 
 ## Storage locations
 
