@@ -10,6 +10,11 @@ host_root="$(cd "$host_root" && pwd -P)"
 mkdir -p "$host_root/bin" "$host_root/Pool" "$host_root/CompilationCache" "$host_root/logs" "$HOME/Library/LaunchAgents"
 if [[ -f "$host_root/bin/xcode-runner" ]]; then
     cp -p "$host_root/bin/xcode-runner" "$host_root/bin/xcode-runner.previous"
+    if [[ -f "$host_root/bin/xcode-runner.commit" ]]; then
+        cp -p "$host_root/bin/xcode-runner.commit" "$host_root/bin/xcode-runner.commit.previous"
+    else
+        rm -f "$host_root/bin/xcode-runner.commit.previous"
+    fi
 fi
 install -m 755 "$executable" "$host_root/bin/xcode-runner.new"
 mv "$host_root/bin/xcode-runner.new" "$host_root/bin/xcode-runner"
