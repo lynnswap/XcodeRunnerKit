@@ -2,6 +2,7 @@
 """Exercise job-owned Simulator lifecycle using the real CLI and a public fixture."""
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -48,14 +49,17 @@ def main():
             output = root / name / "output"
             log = open(root / (name + ".log"), "wb")
             logs.append(log)
+            child_environment = dict(os.environ)
+            selected_xcode = child_environment.pop("DEVELOPER_DIR")
             jobs[name] = subprocess.Popen([
                 str(args.executable.resolve()), "test", "--package", str(package),
                 "--scheme", "BuildProbe", "--output-directory", str(output),
                 "--pool-directory", str(root / "pool"), "--maximum-concurrent-jobs", "2",
                 "--simulator-runtime", runtime["identifier"], "--simulator-device-type", device["identifier"],
                 "--environment", "TEST_RUNNER_PROBE_MODE=" + mode,
+                "--environment", "DEVELOPER_DIR=" + selected_xcode,
                 "--", "-parallel-testing-enabled", "NO", "-jobs", "4",
-            ], stdout=log, stderr=subprocess.STDOUT)
+            ], stdout=log, stderr=subprocess.STDOUT, env=child_environment)
             return jobs[name]
 
         try:

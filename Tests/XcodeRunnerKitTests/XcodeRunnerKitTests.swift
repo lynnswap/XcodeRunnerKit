@@ -118,7 +118,8 @@ struct XcodeRunnerKitTests {
         let identifier = UUID().uuidString
         let simulator = root.appending(path: "simctl")
         let deleted = root.appending(path: "deleted")
-        try ("#!/bin/sh\ncase \"$2\" in\ncreate) echo " + identifier + ";;\ndelete) printf '%s' \"$3\" > " + deleted.path + ";;\nesac\n")
+        let selectedXcode = root.appending(path: "selected-xcode")
+        try ("#!/bin/sh\ncase \"$2\" in\ncreate) echo " + identifier + "; printf '%s' \"$DEVELOPER_DIR\" > " + selectedXcode.path + ";;\ndelete) printf '%s' \"$3\" > " + deleted.path + ";;\nesac\n")
             .write(to: simulator, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: simulator.path)
         let executable = try script("printf '%s\\n' \"$@\"; exit \(exitCode)", at: root)
@@ -126,13 +127,18 @@ struct XcodeRunnerKitTests {
         runner.executionPool = try HostExecutionPool(directory: root.appending(path: "pool"), maximumConcurrentJobs: 1)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
         request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
+        request.arguments = ["-parallel-testing-enabled", "NO"]
+        request.environment["DEVELOPER_DIR"] = root.appending(path: "SelectedXcode").path
         let result: XcodeBuildResult
         do { result = try await runner.run(.test, request: request) }
         catch let failure as XcodeBuildFailure { result = failure.result }
         #expect(result.status == .exited(exitCode))
         #expect(result.simulatorIdentifier == identifier)
         #expect(try String(contentsOf: deleted, encoding: .utf8) == identifier)
-        #expect(try String(contentsOf: result.logURL, encoding: .utf8).contains("platform=iOS Simulator,id=" + identifier))
+        let log = try String(contentsOf: result.logURL, encoding: .utf8)
+        #expect(log.contains("platform=iOS Simulator,id=" + identifier))
+        #expect(log.components(separatedBy: "-parallel-testing-enabled").count == 2)
+        #expect(try String(contentsOf: selectedXcode, encoding: .utf8) == request.environment["DEVELOPER_DIR"])
     }
 
     @Test func simulatorCleanupFailurePreservesBuildFailure() async throws {

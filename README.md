@@ -100,9 +100,9 @@ DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer xcrun simctl list 
 Pass both identifiers to the CLI:
 
 ```sh
-xcode-runner test --workspace /path/to/App.xcworkspace --scheme App \\
-  --simulator-runtime com.apple.CoreSimulator.SimRuntime.iOS-27-0 \\
-  --simulator-device-type com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro \\
+xcode-runner test --workspace /path/to/App.xcworkspace --scheme App \
+  --simulator-runtime com.apple.CoreSimulator.SimRuntime.iOS-27-0 \
+  --simulator-device-type com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro \
   --pool-directory /path/to/shared-pool --maximum-concurrent-jobs 2
 ```
 
@@ -128,7 +128,7 @@ The public fixture contains Swift, Clang, and the SDK's Observation macro.
 Validate concurrent devices, test-failure cleanup, and cancellation cleanup:
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer \\
+DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer \
 python3 Scripts/check-simulators.py /absolute/path/to/xcode-runner
 ```
 

@@ -45,7 +45,8 @@ public struct XcodeRunner: Sendable {
             return try await runUnrestricted(action, request: request, onOutput: onOutput)
         }
         try Task.checkCancellation()
-        let tool = SimulatorTool(executableURL: simulatorExecutableURL, developerDirectory: developerDirectory)
+        let selectedXcode = developerDirectory ?? request.environment["DEVELOPER_DIR"].map { URL(filePath: $0) }
+        let tool = SimulatorTool(executableURL: simulatorExecutableURL, developerDirectory: selectedXcode)
         // Finish creation even if the caller cancels, so the owned UDID is known.
         let identifier = try await Task.detached { try await tool.create(configuration) }.value
         let outcome: Result<XcodeBuildResult, any Error>
@@ -53,7 +54,9 @@ public struct XcodeRunner: Sendable {
             try Task.checkCancellation()
             var simulatorRequest = request
             simulatorRequest.destination = "platform=iOS Simulator,id=" + identifier
-            simulatorRequest.arguments = ["-parallel-testing-enabled", "NO"] + request.arguments
+            if !request.arguments.contains("-parallel-testing-enabled") {
+                simulatorRequest.arguments = ["-parallel-testing-enabled", "NO"] + request.arguments
+            }
             outcome = .success(try await runUnrestricted(
                 action, request: simulatorRequest, simulatorIdentifier: identifier, onOutput: onOutput
             ))
