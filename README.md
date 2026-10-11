@@ -169,12 +169,10 @@ DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer \
 python3 Scripts/check-compilation-cache.py /absolute/path/to/xcode-runner
 ```
 
-Measured on an M1 Pro (32 GB, macOS 27.2, Xcode 27.1), this small fixture took
-6.17 seconds cold and 3.76 seconds after relocation. Both concurrent relocated
-builds took about 4 seconds. Relocated runs emitted 41 replay-hit notes and no
-replay-miss notes; Xcode can repeat notes, so these are not compiler-task counts.
-Changing the C implementation and its test expectation produced misses and
-passed the tests with the changed result. These timings describe this fixture.
+The check records cold and relocated build timings, cache replay diagnostics,
+and concurrent runs. Xcode can repeat diagnostic notes, so note counts are not
+compiler-task counts. It also changes the C implementation and its expected
+result to verify that the cache respects changed compiler inputs.
 
 The fixture exercises the SDK's Observation macro. Its result does not establish
 cache reuse for every third-party macro or build-tool plugin. Those consumers

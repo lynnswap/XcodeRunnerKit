@@ -45,7 +45,7 @@ if existing:
 else:
     result = subprocess.run(
         ["gh", "api", "-X", "POST", "repos/" + repository + "/keys", "--input", "-"],
-        input=json.dumps({"title": "XcodeRunnerKit M1 Pro", "key": public_key, "read_only": True}),
+        input=json.dumps({"title": "XcodeRunnerKit", "key": public_key, "read_only": True}),
         text=True, stdout=subprocess.PIPE, check=True,
     )
     key_id = json.loads(result.stdout)["id"]
