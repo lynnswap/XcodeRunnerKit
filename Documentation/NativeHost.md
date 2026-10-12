@@ -237,8 +237,13 @@ three managed subdirectories:
 | `CompilationCache` | Shared compiler CAS. |
 | `Build/<operation-UUID>` | DerivedData, `xcodebuild.log`, and result bundles for one operation. |
 
+New registrations use the physical `Work/<runner-name>` path under the selected
+parent. If an earlier registration uses a different work path, reconfigure it
+explicitly while it is stopped. Setup does not relocate running registrations.
+
 Setup creates these directories, checks write access, and preserves their
-existing contents. Repeating setup with the same parent updates tools without
+existing contents and permissions. New managed directories have owner-only
+permissions. Repeating setup with the same parent updates tools without
 moving data. Selecting a different parent after initialization fails before
 changing the active configuration; the initializer does not migrate live data.
 An existing cache alias is preserved, including its target.

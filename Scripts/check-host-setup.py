@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -14,7 +15,8 @@ executable = Path(sys.argv[1]).resolve()
 
 def configure(home, directory):
     return subprocess.run([str(executable), "host", "storage", "configure", "--directory", str(directory), "--json"],
-                          env={**os.environ, "HOME": str(home)}, check=True, capture_output=True, text=True)
+                          env={**os.environ, "HOME": str(home)}, umask=0o022,
+                          check=True, capture_output=True, text=True)
 
 
 def install_cli(home):
@@ -27,6 +29,17 @@ def compilation_cache_in(log):
     setting = "COMPILATION_CACHE_CAS_PATH = "
     return Path(next(line.strip()[len(setting):] for line in log.read_text().splitlines()
                      if line.strip().startswith(setting))).resolve()
+
+
+with tempfile.TemporaryDirectory(prefix="Host storage permissions ") as temporary:
+    root = Path(temporary)
+    storage = root / "Selected parent"
+    storage.mkdir(mode=0o750)
+    parent_mode = stat.S_IMODE(storage.stat().st_mode)
+    configure(root / "home", storage)
+    assert stat.S_IMODE(storage.stat().st_mode) == parent_mode
+    for name in ("Work", "CompilationCache", "Build"):
+        assert stat.S_IMODE((storage / name).stat().st_mode) == 0o700
 
 
 with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit host setup ") as temporary:
@@ -49,11 +62,13 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit host setup ") as tempora
     work = storage / "Work" / "existing-runner"
     work.mkdir(parents=True)
     (work / "retained").write_text("work data")
+    existing_modes = {path: stat.S_IMODE(path.stat().st_mode) for path in (storage, cache, work.parent)}
     command = ["bash", str(scripts / "install-host-tools.sh"), str(executable), "test-source", str(storage)]
     subprocess.run(command, env=environment, check=True, capture_output=True)
     assert (host / "CompilationCache").is_symlink()
     assert (host / "CompilationCache").resolve() == cache.resolve()
     assert (storage / "Build").is_dir()
+    assert all(stat.S_IMODE(path.stat().st_mode) == mode for path, mode in existing_modes.items())
     layout = json.loads(configure(home, storage).stdout)
     assert layout["storageDirectory"] == str(storage.resolve())
     assert layout["buildDirectory"] == str((storage / "Build").resolve())
