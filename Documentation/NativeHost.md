@@ -120,13 +120,16 @@ as `XcodeRunnerHost.previous.app`.
 Click the hammer icon in the menu bar and choose **Settings…**. The window shows:
 
 - The shared execution limit and currently running XcodeRunnerKit jobs.
+- Jobs waiting for an execution slot, counted separately for High, Normal,
+  and Low priority. These counts come from the shared pool, including jobs
+  submitted through other runner processes.
 - Opted-in runners and the state of their local service processes. GitHub
   connection and job status remain available on GitHub.
 - The host data, pool, compilation cache, runner installations, service logs,
   and each runner's registered work directory. Folder buttons reveal their
   physical locations in Finder, including cache symlink destinations.
 
-![Host settings with six running jobs after lowering the execution limit to four.](Images/HostSettings.png)
+![Host settings with six running jobs, a limit of four, and jobs waiting at each priority.](Images/HostSettings.png)
 
 Enter a positive whole number and choose **Apply** to change the execution
 limit without restarting the host or runners. Decreasing from six to four
