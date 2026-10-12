@@ -85,7 +85,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     host_root = home/'Library/Application Support/XcodeRunnerKit'
     runners = home/'Library/XcodeRunnerKit/runners'
     runners.mkdir(parents=True)
-    first = fixture(runners, 'first')
+    first = fixture(runners, '.hidden-first')
     excluded = fixture(runners, 'individual')
     (excluded / '.service').touch()
     arguments = [executable, '--home-directory', str(home)]
@@ -94,7 +94,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
                                 env={**os.environ, 'PATH':str(Path(executable).parent)+os.pathsep+os.environ['PATH']},
                                 stdout=log, stderr=log)
         try:
-            wait_for(lambda:(first/'pid.json').exists(), 'First runner did not start')
+            wait_for(lambda:(first/'pid.json').exists(), 'Hidden runner did not start')
             first_pid = json.loads((first/'pid.json').read_text())['pid']
             first_environment = json.loads((first/'pid.json').read_text())
             assert first_environment['storage'] == str((host_root/'Storage').resolve())
@@ -245,4 +245,4 @@ with open(sys.argv[1], 'a+b') as coordinator:
         holder.wait(timeout=10)
     assert not (pool/'capacity').exists(), 'Host status reads configured an unused pool'
 
-print('PASS: multiple runners, separate service groups, discovery, individual-service exclusion, singleton, graceful shutdown, host/helper crash cleanup, immediate service exit, restart, and discovery/removal/shutdown while the pool coordinator is locked')
+print('PASS: multiple runners, separate service groups, hidden runner discovery, individual-service exclusion, singleton, graceful shutdown, host/helper crash cleanup, immediate service exit, restart, and discovery/removal/shutdown while the pool coordinator is locked')

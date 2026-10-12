@@ -19,6 +19,12 @@ def configure(home, directory):
                           check=True, capture_output=True, text=True)
 
 
+def storage_status(home):
+    result = subprocess.run([str(executable), "host", "storage", "status", "--json"],
+                            env={**os.environ, "HOME": str(home)}, check=True, capture_output=True, text=True)
+    return json.loads(result.stdout)
+
+
 def install_cli(home):
     installed = home / "Library/Application Support/XcodeRunnerKit/bin/xcode-runner"
     installed.parent.mkdir(parents=True, exist_ok=True)
@@ -33,13 +39,55 @@ def compilation_cache_in(log):
 
 with tempfile.TemporaryDirectory(prefix="Host storage permissions ") as temporary:
     root = Path(temporary)
+    home = root / "home"
     storage = root / "Selected parent"
     storage.mkdir(mode=0o750)
     parent_mode = stat.S_IMODE(storage.stat().st_mode)
-    configure(root / "home", storage)
+    layout = json.loads(configure(home, storage).stdout)
     assert stat.S_IMODE(storage.stat().st_mode) == parent_mode
     for name in ("Work", "CompilationCache", "Build"):
         assert stat.S_IMODE((storage / name).stat().st_mode) == 0o700
+        shutil.rmtree(storage / name)
+    assert json.loads(configure(home, storage).stdout) == layout
+    assert stat.S_IMODE(storage.stat().st_mode) == parent_mode
+    for name in ("Work", "CompilationCache", "Build"):
+        assert stat.S_IMODE((storage / name).stat().st_mode) == 0o700
+    shutil.rmtree(storage)
+    failure = subprocess.run([str(executable), "host", "storage", "configure", "--json"],
+                             env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=30)
+    assert failure.returncode != 0, "Reinitialization must fail when the saved parent is unavailable"
+    assert not storage.exists(), "Reinitialization recreated an unavailable parent"
+    assert storage_status(home) == layout, "Failed reinitialization changed the active storage record"
+
+
+with tempfile.TemporaryDirectory(prefix="Host storage concurrent initialization ") as temporary:
+    root = Path(temporary)
+    home = root / "home"
+    parents = [root / "First parent", root / "Second parent"]
+    processes = []
+    try:
+        for parent in parents:
+            processes.append(subprocess.Popen(
+                ["/bin/bash", "-c", 'read -r start; exec "$@"', "host-storage-configure",
+                 str(executable), "host", "storage", "configure", "--directory", str(parent), "--json"],
+                env={**os.environ, "HOME": str(home)}, umask=0o022,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+        for process in processes:
+            process.stdin.write("start\n")
+            process.stdin.flush()
+        outputs = [process.communicate(timeout=30) for process in processes]
+        winners = [index for index, process in enumerate(processes) if process.returncode == 0]
+        assert len(winners) == 1, [(process.returncode, outputs[index]) for index, process in enumerate(processes)]
+        winner = winners[0]
+        layout = json.loads(outputs[winner][0])
+        assert layout["storageDirectory"] == str(parents[winner].resolve())
+        assert storage_status(home) == layout
+        assert not parents[1 - winner].exists(), "The rejected initializer prepared its requested parent"
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
 
 
 with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit host setup ") as temporary:
@@ -297,4 +345,4 @@ with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
     assert failure.returncode != 0 and b"certificate signing identity" in failure.stderr
     assert (applications / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host").read_text() == "updated executable"
 
-print("PASS: unified storage, existing data preservation, cleanup, physical runner work paths, common-host opt-in, app installation, and signature requirements")
+print("PASS: unified storage, serialized initial selection, unavailable parent rejection, managed directory recovery and permissions, existing data preservation, cleanup, physical runner work paths, common-host opt-in, app installation, and signature requirements")

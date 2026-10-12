@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 package struct HostInstallation: Sendable {
@@ -30,11 +31,19 @@ package struct HostInstallation: Sendable {
         package var compilationCacheDirectory: URL { directory.appending(path: "CompilationCache") }
         package var buildDirectory: URL { directory.appending(path: "Build") }
 
-        fileprivate func prepare() throws {
-            for location in [workDirectory, compilationCacheDirectory, buildDirectory] {
+        fileprivate func prepare(creatingParent: Bool) throws {
+            if creatingParent {
                 try FileManager.default.createDirectory(
-                    at: location, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]
+                    at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]
                 )
+            }
+            guard try directory.resolvingSymlinksInPath().resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTDIR), userInfo: [NSURLErrorKey: directory])
+            }
+            for location in [workDirectory, compilationCacheDirectory, buildDirectory] {
+                if mkdir(location.path(percentEncoded: false), 0o700) != 0, errno != EEXIST {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSURLErrorKey: location])
+                }
                 let probe = location.appending(path: ".host-storage-\(UUID().uuidString)")
                 try Data().write(to: probe, options: .withoutOverwriting)
                 try FileManager.default.removeItem(at: probe)
@@ -53,24 +62,42 @@ package struct HostInstallation: Sendable {
     }
 
     package func initializeStorage(at directory: URL? = nil) throws -> Storage {
-        if let existing = try storage() {
-            if let directory, directory.standardizedFileURL.resolvingSymlinksInPath().path != existing.directory.resolvingSymlinksInPath().path {
-                throw ConfigurationError.alreadyConfigured(existing.directory)
+        try withStorageLock {
+            if let existing = try storage() {
+                if let directory, directory.standardizedFileURL.resolvingSymlinksInPath().path != existing.directory.resolvingSymlinksInPath().path {
+                    throw ConfigurationError.alreadyConfigured(existing.directory)
+                }
+                try existing.prepare(creatingParent: false)
+                return existing
             }
-            try existing.prepare()
-            return existing
+            return try commitStorageDirectory(directory ?? hostRoot.appending(path: "Storage"), creatingParent: true)
         }
-        return try saveStorageDirectory(directory ?? hostRoot.appending(path: "Storage"))
     }
 
     // The host commits this active location only after its startup migration succeeds.
     package func saveStorageDirectory(_ directory: URL) throws -> Storage {
+        try withStorageLock { try commitStorageDirectory(directory, creatingParent: false) }
+    }
+
+    private func commitStorageDirectory(_ directory: URL, creatingParent: Bool) throws -> Storage {
         let requested = Storage(directory: directory)
-        try requested.prepare()
+        try requested.prepare(creatingParent: creatingParent)
         let storage = Storage(directory: try requested.directory.resolvingSymlinksInPath().compilerCanonicalURL())
         try FileManager.default.createDirectory(at: hostRoot, withIntermediateDirectories: true)
         try Data(storage.directory.path(percentEncoded: false).utf8).write(to: storageRecord, options: .atomic)
         return storage
+    }
+
+    private func withStorageLock<Result>(_ operation: () throws -> Result) throws -> Result {
+        try FileManager.default.createDirectory(at: hostRoot, withIntermediateDirectories: true)
+        let lock = hostRoot.appending(path: "storage.lock")
+        let descriptor = open(lock.path(percentEncoded: false), O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        defer { close(descriptor) }
+        while flock(descriptor, LOCK_EX) != 0 {
+            if errno != EINTR { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        }
+        return try operation()
     }
 
     package func environment(for storage: Storage) -> [String: String] {
