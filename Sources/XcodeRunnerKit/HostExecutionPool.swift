@@ -25,13 +25,13 @@ public struct HostExecutionPool: Sendable {
     /// The admission order for waiting operations. Running operations are never preempted.
     public enum Priority: String, Sendable, CaseIterable, Codable {
         case high
-        case normal
+        case medium
         case low
 
         fileprivate var rank: Int {
             switch self {
             case .high: 2
-            case .normal: 1
+            case .medium: 1
             case .low: 0
             }
         }
@@ -40,15 +40,15 @@ public struct HostExecutionPool: Sendable {
     /// The number of waiting operations at each priority.
     public struct WaitingJobCounts: Sendable, Equatable, Codable {
         public let high: Int
-        public let normal: Int
+        public let medium: Int
         public let low: Int
 
-        public var total: Int { high + normal + low }
+        public var total: Int { high + medium + low }
 
         public subscript(_ priority: Priority) -> Int {
             switch priority {
             case .high: high
-            case .normal: normal
+            case .medium: medium
             case .low: low
             }
         }
@@ -79,7 +79,7 @@ public struct HostExecutionPool: Sendable {
                 maximumConcurrentJobs: capacity, activeJobCount: inspectSlots().activeJobCount,
                 waitingJobCounts: WaitingJobCounts(
                     high: waiters.count(where: { $0.priority == .high }),
-                    normal: waiters.count(where: { $0.priority == .normal }),
+                    medium: waiters.count(where: { $0.priority == .medium }),
                     low: waiters.count(where: { $0.priority == .low })
                 )
             )
@@ -108,7 +108,7 @@ public struct HostExecutionPool: Sendable {
     /// Higher priorities start first; equal priorities start in their local
     /// registration order. Continuous higher-priority work can postpone lower priorities.
     public func withSlot<Result: Sendable>(
-        priority: Priority = .normal,
+        priority: Priority = .medium,
         operation: @Sendable () async throws -> Result
     ) async throws -> Result {
         try Task.checkCancellation()

@@ -248,12 +248,12 @@ try await pool.updateMaximumConcurrentJobs(to: 4)
 `status()` returns `nil` for an unconfigured pool and does not initialize it.
 Otherwise it reports `maximumConcurrentJobs` and `activeJobCount`, including
 operations that started before a capacity decrease, and `waitingJobCounts` for
-the `high`, `normal`, and `low` priorities. Updating from six to four
+the `high`, `medium`, and `low` priorities. Updating from six to four
 while six operations run lets all six finish. New operations, including existing
 waiters, start only after the active count drops below four. Increasing the limit
 lets waiting operations use the additional capacity.
 
-An operation uses `normal` priority by default. Supply a priority when running an
+An operation uses `medium` priority by default. Supply a priority when running an
 Xcode operation or acquiring a slot directly:
 
 ```swift
@@ -263,7 +263,7 @@ try await pool.withSlot(priority: .low) {
 }
 ```
 
-Waiting operations start in `high`, `normal`, then `low` priority order. Operations
+Waiting operations start in `high`, `medium`, then `low` priority order. Operations
 at the same priority start in the order they register with the local pool. An
 operation that already holds a slot continues through its cleanup. A continuous
 stream of higher-priority work can keep lower-priority operations waiting. The
