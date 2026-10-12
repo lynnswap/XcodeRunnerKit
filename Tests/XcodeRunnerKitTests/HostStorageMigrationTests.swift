@@ -110,6 +110,44 @@ struct HostStorageMigrationTests {
         #expect(try Data(contentsOf: source.buildDirectory.appending(path: "output")) == data)
     }
 
+    @Test func removedRunnerFolderUnderManagedWorkAliasCanLaunchAndRelocate() async throws {
+        let (root, installation, source) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = try runner("runner-one", installation: installation, storage: source)
+        let metadata = directory.appending(path: ".runner")
+        let credentials = try Data(contentsOf: directory.appending(path: ".credentials"))
+        let externalWork = root.appending(path: "External work")
+        try FileManager.default.moveItem(at: source.workDirectory, to: externalWork)
+        try FileManager.default.createSymbolicLink(at: source.workDirectory, withDestinationURL: externalWork)
+        let physicalWork = try externalWork.compilerCanonicalURL()
+        let physicalRunnerWork = try physicalWork.appending(path: "runner-one").compilerCanonicalURL()
+        var object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: metadata)) as? [String: Any])
+        object["workFolder"] = physicalRunnerWork.path(percentEncoded: false)
+        let original = Data([0xEF, 0xBB, 0xBF]) + (try JSONSerialization.data(withJSONObject: object))
+        try original.write(to: metadata)
+        let retained = Data("retained work data".utf8)
+        try retained.write(to: physicalWork.appending(path: "retained"))
+        try FileManager.default.removeItem(at: physicalRunnerWork)
+
+        #expect(try await installation.prepareStorageForLaunch().directory == source.directory)
+        #expect(try Data(contentsOf: metadata) == original)
+        #expect(!FileManager.default.fileExists(atPath: physicalRunnerWork.path(percentEncoded: false)))
+        let target = try await choose(root.appending(path: "Second"), installation: installation)
+        let migrated = try await installation.prepareStorageForLaunch()
+        #expect(migrated.directory == target)
+        let updated = try Data(contentsOf: metadata)
+        #expect(updated.starts(with: [0xEF, 0xBB, 0xBF]))
+        let registration = try #require(JSONSerialization.jsonObject(with: updated) as? [String: Any])
+        #expect(registration["workFolder"] as? String == migrated.workDirectory.appending(path: "runner-one").path(percentEncoded: false))
+        #expect(registration["agentId"] as? Int == 12)
+        #expect((registration["unknownSetting"] as? [String: Bool])?["retained"] == true)
+        #expect(try Data(contentsOf: directory.appending(path: ".credentials")) == credentials)
+        #expect(try Data(contentsOf: migrated.workDirectory.appending(path: "retained")) == retained)
+        #expect(try Data(contentsOf: physicalWork.appending(path: "retained")) == retained)
+        #expect(try source.workDirectory.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true)
+        #expect(!FileManager.default.fileExists(atPath: physicalRunnerWork.path(percentEncoded: false)))
+    }
+
     @Test func savedSelectionDoesNotChangeRunningStorageAndCopiesOnNextLaunch() async throws {
         let (root, installation, source) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

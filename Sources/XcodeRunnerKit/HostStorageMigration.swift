@@ -239,9 +239,8 @@ extension HostInstallation {
             guard let path = object["workFolder"] as? String, path.hasPrefix("/") else {
                 throw StorageMigrationError("\(directory.lastPathComponent) uses a different work folder from the host. Correct its registration before starting runner services.")
             }
-            let expected = storage.workDirectory.appending(path: directory.lastPathComponent)
-                .standardizedFileURL.resolvingSymlinksInPath().path(percentEncoded: false)
-            let registered = URL(filePath: path).standardizedFileURL.resolvingSymlinksInPath().path(percentEncoded: false)
+            let expected = normalizedPathComponents(of: storage.workDirectory.appending(path: directory.lastPathComponent))
+            let registered = normalizedPathComponents(of: URL(filePath: path))
             guard expected == registered else {
                 throw StorageMigrationError("\(directory.lastPathComponent) uses a different work folder from the host. Correct its registration before starting runner services.")
             }
