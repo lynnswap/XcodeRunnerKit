@@ -37,16 +37,27 @@ package struct HostInstallation: Sendable {
                     at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]
                 )
             }
-            guard try directory.resolvingSymlinksInPath().resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTDIR), userInfo: [NSURLErrorKey: directory])
-            }
+            try requireAvailableParent()
             for location in [workDirectory, compilationCacheDirectory, buildDirectory] {
-                if mkdir(location.path(percentEncoded: false), 0o700) != 0, errno != EEXIST {
-                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSURLErrorKey: location])
-                }
+                try createManagedDirectory(location)
                 let probe = location.appending(path: ".host-storage-\(UUID().uuidString)")
                 try Data().write(to: probe, options: .withoutOverwriting)
                 try FileManager.default.removeItem(at: probe)
+            }
+        }
+
+        package func requireAvailableParent() throws {
+            guard try directory.resolvingSymlinksInPath().resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTDIR), userInfo: [NSURLErrorKey: directory])
+            }
+        }
+
+        package func createBuildDirectory() throws { try createManagedDirectory(buildDirectory) }
+        package func createCompilationCacheDirectory() throws { try createManagedDirectory(compilationCacheDirectory) }
+
+        private func createManagedDirectory(_ location: URL) throws {
+            if mkdir(location.path(percentEncoded: false), 0o700) != 0, errno != EEXIST {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSURLErrorKey: location])
             }
         }
     }
