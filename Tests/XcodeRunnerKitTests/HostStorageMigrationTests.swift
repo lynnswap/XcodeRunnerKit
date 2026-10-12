@@ -220,6 +220,25 @@ struct HostStorageMigrationTests {
         let second = try runner("runner-two", installation: installation, storage: source)
         let originals = try [first, second].map { try Data(contentsOf: $0.appending(path: ".runner")) }
         let target = try await choose(root.appending(path: "Second"), installation: installation)
+        let readOnlyParent = source.compilationCacheDirectory.appending(path: "Results.xcresult")
+        let readOnlyChild = readOnlyParent.appending(path: ".read-only")
+        let outside = root.appending(path: "Outside migration")
+        let content = Data("retained readonly output".utf8)
+        for directory in [readOnlyChild, outside] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try content.write(to: directory.appending(path: "output"))
+        }
+        try FileManager.default.createSymbolicLink(at: readOnlyParent.appending(path: "outside"), withDestinationURL: outside)
+        for directory in [readOnlyParent, readOnlyChild, outside] {
+            try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: directory.path(percentEncoded: false))
+        }
+        defer {
+            for directory in [readOnlyParent, readOnlyChild, outside,
+                              target.appending(path: "CompilationCache/Results.xcresult"),
+                              target.appending(path: "CompilationCache/Results.xcresult/.read-only")] {
+                try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path(percentEncoded: false))
+            }
+        }
         try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: second.appending(path: ".runner").path(percentEncoded: false))
         try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: second.path(percentEncoded: false))
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: second.path(percentEncoded: false)) }
@@ -228,8 +247,24 @@ struct HostStorageMigrationTests {
         for (directory, data) in zip([first, second], originals) {
             #expect(try Data(contentsOf: directory.appending(path: ".runner")) == data)
         }
-        #expect(!FileManager.default.fileExists(atPath: target.appending(path: "Work").path(percentEncoded: false)))
+        for name in ["Work", "CompilationCache", "Build"] {
+            #expect(!FileManager.default.fileExists(atPath: target.appending(path: name).path(percentEncoded: false)))
+        }
+        #expect(!FileManager.default.fileExists(atPath: installation.hostRoot.appending(path: "storage-migration.json").path(percentEncoded: false)))
         #expect(FileManager.default.fileExists(atPath: source.workDirectory.path(percentEncoded: false)))
+        for directory in [readOnlyParent, readOnlyChild, outside] {
+            let attributes = try FileManager.default.attributesOfItem(atPath: directory.path(percentEncoded: false))
+            #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o555)
+        }
+        #expect(try Data(contentsOf: readOnlyChild.appending(path: "output")) == content)
+        #expect(try Data(contentsOf: outside.appending(path: "output")) == content)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: second.path(percentEncoded: false))
+        let migrated = try await installation.prepareStorageForLaunch()
+        #expect(migrated.directory == target)
+        let copied = migrated.compilationCacheDirectory.appending(path: "Results.xcresult/.read-only")
+        #expect(try Data(contentsOf: copied.appending(path: "output")) == content)
+        let copiedAttributes = try FileManager.default.attributesOfItem(atPath: copied.path(percentEncoded: false))
+        #expect((copiedAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o555)
     }
 
     @Test func interruptedMigrationRestoresOriginalBytesEvenIfDesiredWasChangedBack() async throws {

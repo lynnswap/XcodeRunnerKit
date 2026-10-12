@@ -253,15 +253,33 @@ extension HostInstallation {
                 guard token == journal.token else {
                     throw StorageMigrationError("The destination \(name) folder could not be identified as this host's copy.")
                 }
-                try FileManager.default.removeItem(at: directory)
+                try removeOwnedCopy(at: directory)
             } catch { failures.append(error.localizedDescription) }
         }
         if FileManager.default.fileExists(atPath: journal.staging.path(percentEncoded: false)) {
-            do { try FileManager.default.removeItem(at: journal.staging) }
+            do { try removeOwnedCopy(at: journal.staging) }
             catch { failures.append(error.localizedDescription) }
         }
         guard failures.isEmpty else { throw StorageMigrationError(failures.joined(separator: " ")) }
         try FileManager.default.removeItem(at: migrationRecord)
+    }
+
+    private func removeOwnedCopy(at directory: URL) throws {
+        let manager = FileManager.default
+        func makeDirectoriesRemovable(at location: URL) throws {
+            let values = try location.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey])
+            guard values.isSymbolicLink == false, values.isDirectory == true else { return }
+            let path = location.path(percentEncoded: false)
+            guard let permissions = try manager.attributesOfItem(atPath: path)[.posixPermissions] as? NSNumber else {
+                throw StorageMigrationError("A copied folder's permissions could not be read for cleanup.")
+            }
+            try manager.setAttributes([.posixPermissions: permissions.intValue | 0o300], ofItemAtPath: path)
+            for child in try manager.contentsOfDirectory(at: location, includingPropertiesForKeys: [.isSymbolicLinkKey, .isDirectoryKey]) {
+                try makeDirectoriesRemovable(at: child)
+            }
+        }
+        try makeDirectoriesRemovable(at: directory)
+        try manager.removeItem(at: directory)
     }
 
     private func cleanCommittedMigration(_ journal: MigrationJournal) throws {
