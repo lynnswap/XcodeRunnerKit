@@ -172,6 +172,29 @@ def main():
             for name in ("grow-b", "grow-c", "grow-d", "grow-after-exit"):
                 release(name)
 
+            physical = root / "physical"
+            (physical / "pool").mkdir(parents=True)
+            alias = root / "alias"
+            alias.mkdir()
+            (alias / "pool").symlink_to(physical / "pool", target_is_directory=True)
+            assert status(alias) is None
+            assert not list((physical / "pool").iterdir()), "Reading an unconfigured alias initialized its target"
+            assert update(2, physical) == {"maximumConcurrentJobs": 2, "activeJobCount": 0}
+            assert status(alias) == status(physical)
+            start("alias-a", 4, alias)
+            wait_for(lambda: started("alias-a"))
+            start("physical-b", 4, physical)
+            wait_for(lambda: started("physical-b"))
+            start("alias-waiter", 4, alias)
+            assert_waiting("alias-waiter")
+            assert update(1, alias) == {"maximumConcurrentJobs": 1, "activeJobCount": 2}
+            release("alias-a")
+            assert_waiting("alias-waiter")
+            release("physical-b")
+            wait_for(lambda: started("alias-waiter"))
+            assert status(alias) == status(physical) == {"maximumConcurrentJobs": 1, "activeJobCount": 1}
+            release("alias-waiter")
+
             unconfigured = root / "unconfigured"
             (unconfigured / "pool").mkdir(parents=True)
             (unconfigured / "pool/pool.lock").touch()
