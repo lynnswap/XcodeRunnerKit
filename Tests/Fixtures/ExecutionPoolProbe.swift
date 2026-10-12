@@ -11,7 +11,7 @@ struct ExecutionPoolProbe {
         let identifier = values[2]
         if identifier == "status" || identifier == "update" {
             do {
-                let pool = try HostExecutionPool(directory: root.appending(path: "pool"), maximumConcurrentJobs: 4)
+                let pool = try HostExecutionPool(directory: root.appending(path: "pool"), initialCapacity: 4)
                 if identifier == "update" {
                     try await pool.updateMaximumConcurrentJobs(to: Int(values[3])!)
                 }
@@ -24,7 +24,7 @@ struct ExecutionPoolProbe {
             return
         }
         let capacity = Int(values[3])!
-        let pool = try HostExecutionPool(directory: root.appending(path: "pool"), maximumConcurrentJobs: capacity)
+        let pool = try HostExecutionPool(directory: root.appending(path: "pool"), initialCapacity: capacity)
         let task = Task {
             try await pool.withSlot {
                 try "\(getpid())".write(to: root.appending(path: identifier + ".started"), atomically: true, encoding: .utf8)

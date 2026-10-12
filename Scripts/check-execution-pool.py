@@ -4,7 +4,6 @@ from pathlib import Path
 import json
 import signal
 import subprocess
-import sys
 import tempfile
 import time
 
@@ -33,14 +32,13 @@ def main():
         roots = {}
         logs = []
 
-        def start(name, capacity=2, job_root=root, legacy=False):
+        def start(name, capacity=2, job_root=root):
             roots[name] = job_root
             log = open(root / (name + ".log"), "wb")
             logs.append(log)
-            command = [str(executable)]
-            if legacy:
-                command = [sys.executable, str(REPO / "Tests/Fixtures/LegacyExecutionPoolProbe.py")]
-            jobs[name] = subprocess.Popen(command + [str(job_root), name, str(capacity)], stdout=log, stderr=subprocess.STDOUT)
+            jobs[name] = subprocess.Popen(
+                [str(executable), str(job_root), name, str(capacity)], stdout=log, stderr=subprocess.STDOUT
+            )
             wait_for(lambda: (job_root / (name + ".ready")).exists() or jobs[name].poll() is not None)
             return jobs[name]
 
@@ -132,9 +130,9 @@ def main():
                 wait_for(lambda name=name: started(name))
             start("shrink-waiter", 6, shrink)
             assert_waiting("shrink-waiter")
-            coordinator_inode = (shrink / "pool/capacity.lock").stat().st_ino
+            coordinator_inode = (shrink / "pool/pool.lock").stat().st_ino
             assert update(4, shrink) == {"maximumConcurrentJobs": 4, "activeJobCount": 6}
-            assert (shrink / "pool/capacity.lock").stat().st_ino == coordinator_inode
+            assert (shrink / "pool/pool.lock").stat().st_ino == coordinator_inode
             assert all(jobs[f"shrink-{index}"].poll() is None for index in range(6))
             release("shrink-0")
             assert status(shrink) == {"maximumConcurrentJobs": 4, "activeJobCount": 5}
@@ -174,59 +172,13 @@ def main():
             for name in ("grow-b", "grow-c", "grow-d", "grow-after-exit"):
                 release(name)
 
-            interop = root / "interop"
-            interop.mkdir()
-            start("interop-new", 2, interop)
-            wait_for(lambda: started("interop-new"))
-            assert (interop / "pool/capacity.lock").read_text() == "2"
-            assert not (interop / "pool/capacity").exists()
-            start("interop-old", 4, interop, legacy=True)
-            wait_for(lambda: started("interop-old"))
-            start("interop-old-waiter", 4, interop, legacy=True)
-            assert_waiting("interop-old-waiter")
-            assert status(interop) == {"maximumConcurrentJobs": 2, "activeJobCount": 2}
-            release("interop-new")
-            wait_for(lambda: started("interop-old-waiter"))
-            for name in ("interop-old", "interop-old-waiter"):
-                release(name)
-
-            explicit_interop = root / "explicit-interop"
-            assert update(1, explicit_interop) == {"maximumConcurrentJobs": 1, "activeJobCount": 0}
-            assert (explicit_interop / "pool/capacity.lock").read_text() == "1"
-            assert not (explicit_interop / "pool/capacity").exists()
-            start("explicit-old", 4, explicit_interop, legacy=True)
-            wait_for(lambda: started("explicit-old"))
-            start("explicit-new", 4, explicit_interop)
-            assert_waiting("explicit-new")
-            release("explicit-old")
-            wait_for(lambda: started("explicit-new"))
-            release("explicit-new")
-
-            legacy = root / "legacy"
-            (legacy / "pool").mkdir(parents=True)
-            (legacy / "pool/capacity.lock").write_text("2")
-            assert status(legacy) == {"maximumConcurrentJobs": 2, "activeJobCount": 0}
-            assert not (legacy / "pool/capacity").exists(), "Reading legacy status changed its configuration"
-            start("legacy-a", 4, legacy)
-            wait_for(lambda: started("legacy-a"))
-            assert status(legacy) == {"maximumConcurrentJobs": 2, "activeJobCount": 1}
-            assert update(1, legacy) == {"maximumConcurrentJobs": 1, "activeJobCount": 1}
-            assert (legacy / "pool/capacity.lock").read_text() == "2"
-            start("legacy-b", 4, legacy)
-            assert_waiting("legacy-b")
-            release("legacy-a")
-            wait_for(lambda: started("legacy-b"))
-            release("legacy-b")
-
             unconfigured = root / "unconfigured"
             (unconfigured / "pool").mkdir(parents=True)
-            (unconfigured / "pool/capacity.lock").touch()
+            (unconfigured / "pool/pool.lock").touch()
             assert status(unconfigured) is None
             assert not (unconfigured / "pool/capacity").exists()
             assert update(3, unconfigured) == {"maximumConcurrentJobs": 3, "activeJobCount": 0}
-            assert (unconfigured / "pool/capacity.lock").read_text() == "3"
-            assert not (unconfigured / "pool/capacity").exists()
-            assert update(3, unconfigured) == {"maximumConcurrentJobs": 3, "activeJobCount": 0}
+            assert (unconfigured / "pool/capacity").read_text() == "3"
             for capacity in (0, -1):
                 result = subprocess.run(
                     [str(executable), str(unconfigured), "update", str(capacity)], capture_output=True
@@ -254,7 +206,7 @@ def main():
                 pool_directory.chmod(0o700)
             assert status(unconfigured) == {"maximumConcurrentJobs": 3, "activeJobCount": 0}
 
-            coordinator = unconfigured / "pool/capacity.lock"
+            coordinator = unconfigured / "pool/pool.lock"
             coordinator.chmod(0)
             try:
                 result = subprocess.run([str(executable), str(unconfigured), "status"], capture_output=True)
@@ -270,14 +222,14 @@ def main():
             for index, value in enumerate(("0", "invalid")):
                 invalid = root / f"invalid-{index}"
                 (invalid / "pool").mkdir(parents=True)
-                (invalid / "pool/capacity.lock").write_text(value)
+                (invalid / "pool/capacity").write_text(value)
                 name = f"invalid-{index}"
                 job = start(name, 2, invalid)
                 assert job.wait(timeout=10) != 0
                 assert not started(name), "Invalid saved capacity executed a payload"
                 assert "invalidStoredCapacity" in (root / (name + ".log")).read_text()
 
-            print("PASS: stored capacities, differing callers, live shrink/grow, legacy slots/configuration, queue cancellation, process exit, invalid configuration, I/O failures")
+            print("PASS: stored capacities, differing callers, live shrink/grow, queue cancellation, process exit, invalid configuration, I/O failures")
         finally:
             for job in jobs.values():
                 if job.poll() is None:

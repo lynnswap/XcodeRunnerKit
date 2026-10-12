@@ -60,7 +60,7 @@ struct XcodeRunnerKitTests {
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root)
         request.environment["READY_PATH"] = marker.path(percentEncoded: false)
         var runner = XcodeRunner(executableURL: executable)
-        runner.executionPool = try HostExecutionPool(directory: root.appending(path: "pool"), maximumConcurrentJobs: 1)
+        runner.executionPool = try HostExecutionPool(directory: root.appending(path: "pool"), initialCapacity: 1)
         let configuredRunner = runner
         let task = Task { try await configuredRunner.run(.test, request: request) }
         let clock = ContinuousClock()
@@ -101,7 +101,7 @@ struct XcodeRunnerKitTests {
         let blocked = root.appending(path: "pool")
         try Data().write(to: blocked)
         let marker = root.appending(path: "unexpected-payload")
-        let pool = try HostExecutionPool(directory: blocked, maximumConcurrentJobs: 2)
+        let pool = try HostExecutionPool(directory: blocked, initialCapacity: 2)
         do {
             try await pool.withSlot { try Data().write(to: marker) }
             Issue.record("A pool I/O failure bypassed the limit.")
@@ -124,7 +124,7 @@ struct XcodeRunnerKitTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: simulator.path)
         let executable = try script("printf '%s\\n' \"$@\"; exit \(exitCode)", at: root)
         var runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
-        runner.executionPool = try HostExecutionPool(directory: root.appending(path: "pool"), maximumConcurrentJobs: 1)
+        runner.executionPool = try HostExecutionPool(directory: root.appending(path: "pool"), initialCapacity: 1)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
         request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
         request.arguments = ["-parallel-testing-enabled", "NO"]
@@ -218,7 +218,7 @@ struct XcodeRunnerKitTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: simulator.path)
         let executable = try script("printf 'completed payload\\n'; exit \(exitCode)", at: root)
         var runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
-        runner.executionPool = try HostExecutionPool(directory: root.appending(path: "pool"), maximumConcurrentJobs: 1)
+        runner.executionPool = try HostExecutionPool(directory: root.appending(path: "pool"), initialCapacity: 1)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
         request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
         let configuredRunner = runner

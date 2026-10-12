@@ -195,7 +195,7 @@ let poolDirectory = URL(filePath: "/Users/ci/Library/Application Support/XcodeRu
 var runner = XcodeRunner()
 runner.executionPool = try HostExecutionPool(
     directory: poolDirectory,
-    maximumConcurrentJobs: 2
+    initialCapacity: 2
 )
 ```
 
@@ -214,7 +214,7 @@ Keep the pool directory and lock files in place while jobs run. Read or change
 the saved limit without stopping CI:
 
 ```swift
-let pool = try HostExecutionPool(directory: poolDirectory, maximumConcurrentJobs: 4)
+let pool = try HostExecutionPool(directory: poolDirectory, initialCapacity: 4)
 let status = try await pool.status()
 try await pool.updateMaximumConcurrentJobs(to: 4)
 ```
@@ -227,9 +227,11 @@ waiters, start only after the active count drops below four. Increasing the limi
 lets waiting operations use the additional capacity. Waiting does not guarantee
 first-in, first-out ordering.
 
-Upgrade every cooperating CLI and library client before changing a live pool.
-Older clients keep the capacity they first read, so their waiting operations do
-not follow updates. Existing saved capacities are preserved when upgrading.
+All cooperating CLI and library clients must use the current pool protocol.
+To upgrade from a version that stores capacity in `capacity.lock`, stop new jobs
+and let running jobs finish. Replace every client, remove the old pool directory,
+and configure the desired capacity again. Older clients and pool data are not
+supported.
 
 Locks coordinate XcodeRunnerKit operations; unmanaged commands do not participate.
 Force-killing the wrapper does not provide cleanup guarantees for its subprocesses;

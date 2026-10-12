@@ -8,15 +8,17 @@ import Foundation
 /// Do not remove the directory or its lock files while jobs are running.
 public struct HostExecutionPool: Sendable {
     public let directory: URL
-    /// The capacity used when the pool has no saved configuration.
-    public let maximumConcurrentJobs: Int
+    private let initialCapacity: Int
 
-    public init(directory: URL, maximumConcurrentJobs: Int) throws {
-        guard maximumConcurrentJobs > 0 else {
+    /// Creates a pool with a capacity to use when its first slot acquisition initializes the directory.
+    ///
+    /// Creating the value does not configure the directory.
+    public init(directory: URL, initialCapacity: Int) throws {
+        guard initialCapacity > 0 else {
             throw ConfigurationError.invalidCapacity
         }
         self.directory = directory
-        self.maximumConcurrentJobs = maximumConcurrentJobs
+        self.initialCapacity = initialCapacity
     }
 
     /// The configured limit and the number of slots observed in use.
@@ -29,15 +31,15 @@ public struct HostExecutionPool: Sendable {
     ///
     /// Running operations can finish while this snapshot is being read.
     public func status() async throws -> Status? {
-        let configuration: FileHandle
+        let coordinator: FileHandle
         do {
-            configuration = try Self.open(directory.appending(path: "capacity.lock"), create: false)
+            coordinator = try Self.open(directory.appending(path: "pool.lock"), create: false)
         } catch let error as NSError where error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT) {
             return nil
         }
-        return try await Self.withHandle(configuration) {
-            try await Self.lock(configuration)
-            guard let capacity = try savedCapacity(configuration: configuration) else { return nil }
+        return try await Self.withHandle(coordinator) {
+            try await Self.lock(coordinator)
+            guard let capacity = try savedCapacity() else { return nil }
             return try Status(maximumConcurrentJobs: capacity, activeJobCount: inspectSlots().activeJobCount)
         }
     }
@@ -50,14 +52,10 @@ public struct HostExecutionPool: Sendable {
         guard capacity > 0 else { throw ConfigurationError.invalidCapacity }
         try Task.checkCancellation()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let configuration = try Self.open(directory.appending(path: "capacity.lock"))
-        try await Self.withHandle(configuration) {
-            try await Self.lock(configuration)
-            if try savedCapacity(configuration: configuration) == nil {
-                try initializeCapacity(capacity, configuration: configuration)
-            } else {
-                try saveCapacity(capacity)
-            }
+        let coordinator = try Self.open(directory.appending(path: "pool.lock"))
+        try await Self.withHandle(coordinator) {
+            try await Self.lock(coordinator)
+            try saveCapacity(capacity)
         }
     }
 
@@ -72,15 +70,15 @@ public struct HostExecutionPool: Sendable {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         while true {
             try Task.checkCancellation()
-            let configuration = try Self.open(directory.appending(path: "capacity.lock"))
-            let slot: FileHandle? = try await Self.withHandle(configuration) {
-                try await Self.lock(configuration)
+            let coordinator = try Self.open(directory.appending(path: "pool.lock"))
+            let slot: FileHandle? = try await Self.withHandle(coordinator) {
+                try await Self.lock(coordinator)
                 let capacity: Int
-                if let saved = try savedCapacity(configuration: configuration) {
+                if let saved = try savedCapacity() {
                     capacity = saved
                 } else {
-                    capacity = maximumConcurrentJobs
-                    try initializeCapacity(capacity, configuration: configuration)
+                    capacity = initialCapacity
+                    try saveCapacity(capacity)
                 }
                 let slots = try inspectSlots()
                 guard slots.activeJobCount < capacity else { return nil }
@@ -103,15 +101,12 @@ public struct HostExecutionPool: Sendable {
         }
     }
 
-    private func savedCapacity(configuration: FileHandle) throws -> Int? {
+    private func savedCapacity() throws -> Int? {
         let stored: Data
         do {
             stored = try Data(contentsOf: directory.appending(path: "capacity"))
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
-            // Older installations saved the integer in the coordinator file.
-            try configuration.seek(toOffset: 0)
-            stored = try configuration.readToEnd() ?? Data()
-            if stored.isEmpty { return nil }
+            return nil
         }
         guard let value = String(data: stored, encoding: .utf8),
               let capacity = Int(value), capacity > 0 else {
@@ -123,13 +118,6 @@ public struct HostExecutionPool: Sendable {
     private func saveCapacity(_ capacity: Int) throws {
         // The coordinator inode stays in place while the data is atomically replaced.
         try Data(String(capacity).utf8).write(to: directory.appending(path: "capacity"), options: .atomic)
-    }
-
-    private func initializeCapacity(_ capacity: Int, configuration: FileHandle) throws {
-        // Initial configuration remains readable by clients that predate live updates.
-        try configuration.seek(toOffset: 0)
-        try configuration.write(contentsOf: Data(String(capacity).utf8))
-        try configuration.synchronize()
     }
 
     private func inspectSlots() throws -> (activeJobCount: Int, availableIndex: Int) {
