@@ -53,7 +53,11 @@ public struct HostExecutionPool: Sendable {
         let configuration = try Self.open(directory.appending(path: "capacity.lock"))
         try await Self.withHandle(configuration) {
             try await Self.lock(configuration)
-            try saveCapacity(capacity)
+            if try savedCapacity(configuration: configuration) == nil {
+                try initializeCapacity(capacity, configuration: configuration)
+            } else {
+                try saveCapacity(capacity)
+            }
         }
     }
 
@@ -76,7 +80,7 @@ public struct HostExecutionPool: Sendable {
                     capacity = saved
                 } else {
                     capacity = maximumConcurrentJobs
-                    try saveCapacity(capacity)
+                    try initializeCapacity(capacity, configuration: configuration)
                 }
                 let slots = try inspectSlots()
                 guard slots.activeJobCount < capacity else { return nil }
@@ -119,6 +123,13 @@ public struct HostExecutionPool: Sendable {
     private func saveCapacity(_ capacity: Int) throws {
         // The coordinator inode stays in place while the data is atomically replaced.
         try Data(String(capacity).utf8).write(to: directory.appending(path: "capacity"), options: .atomic)
+    }
+
+    private func initializeCapacity(_ capacity: Int, configuration: FileHandle) throws {
+        // Initial configuration remains readable by clients that predate live updates.
+        try configuration.seek(toOffset: 0)
+        try configuration.write(contentsOf: Data(String(capacity).utf8))
+        try configuration.synchronize()
     }
 
     private func inspectSlots() throws -> (activeJobCount: Int, availableIndex: Int) {

@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -32,14 +33,14 @@ def main():
         roots = {}
         logs = []
 
-        def start(name, capacity=2, job_root=root):
+        def start(name, capacity=2, job_root=root, legacy=False):
             roots[name] = job_root
             log = open(root / (name + ".log"), "wb")
             logs.append(log)
-            jobs[name] = subprocess.Popen(
-                [str(executable), str(job_root), name, str(capacity)],
-                stdout=log, stderr=subprocess.STDOUT,
-            )
+            command = [str(executable)]
+            if legacy:
+                command = [sys.executable, str(REPO / "Tests/Fixtures/LegacyExecutionPoolProbe.py")]
+            jobs[name] = subprocess.Popen(command + [str(job_root), name, str(capacity)], stdout=log, stderr=subprocess.STDOUT)
             wait_for(lambda: (job_root / (name + ".ready")).exists() or jobs[name].poll() is not None)
             return jobs[name]
 
@@ -173,6 +174,34 @@ def main():
             for name in ("grow-b", "grow-c", "grow-d", "grow-after-exit"):
                 release(name)
 
+            interop = root / "interop"
+            interop.mkdir()
+            start("interop-new", 2, interop)
+            wait_for(lambda: started("interop-new"))
+            assert (interop / "pool/capacity.lock").read_text() == "2"
+            assert not (interop / "pool/capacity").exists()
+            start("interop-old", 4, interop, legacy=True)
+            wait_for(lambda: started("interop-old"))
+            start("interop-old-waiter", 4, interop, legacy=True)
+            assert_waiting("interop-old-waiter")
+            assert status(interop) == {"maximumConcurrentJobs": 2, "activeJobCount": 2}
+            release("interop-new")
+            wait_for(lambda: started("interop-old-waiter"))
+            for name in ("interop-old", "interop-old-waiter"):
+                release(name)
+
+            explicit_interop = root / "explicit-interop"
+            assert update(1, explicit_interop) == {"maximumConcurrentJobs": 1, "activeJobCount": 0}
+            assert (explicit_interop / "pool/capacity.lock").read_text() == "1"
+            assert not (explicit_interop / "pool/capacity").exists()
+            start("explicit-old", 4, explicit_interop, legacy=True)
+            wait_for(lambda: started("explicit-old"))
+            start("explicit-new", 4, explicit_interop)
+            assert_waiting("explicit-new")
+            release("explicit-old")
+            wait_for(lambda: started("explicit-new"))
+            release("explicit-new")
+
             legacy = root / "legacy"
             (legacy / "pool").mkdir(parents=True)
             (legacy / "pool/capacity.lock").write_text("2")
@@ -193,6 +222,9 @@ def main():
             (unconfigured / "pool").mkdir(parents=True)
             (unconfigured / "pool/capacity.lock").touch()
             assert status(unconfigured) is None
+            assert not (unconfigured / "pool/capacity").exists()
+            assert update(3, unconfigured) == {"maximumConcurrentJobs": 3, "activeJobCount": 0}
+            assert (unconfigured / "pool/capacity.lock").read_text() == "3"
             assert not (unconfigured / "pool/capacity").exists()
             assert update(3, unconfigured) == {"maximumConcurrentJobs": 3, "activeJobCount": 0}
             for capacity in (0, -1):
