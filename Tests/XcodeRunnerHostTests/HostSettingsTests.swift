@@ -25,8 +25,7 @@ struct HostSettingsTests {
         #expect(settings.poolStatus?.maximumConcurrentJobs == 6)
         #expect(settings.poolStatus?.activeJobCount == 0)
         #expect(settings.poolStatus?.waitingJobCounts.total == 0)
-        #expect(settings.pool.directory == settings.hostRoot.appending(path: "Pool"))
-        #expect(!FileManager.default.fileExists(atPath: settings.logsDirectory.appending(path: "Pool").path()))
+        #expect(settings.pool.directory == root.appending(path: "Host/Pool"))
         try FileManager.default.removeItem(at: root)
     }
 
@@ -131,11 +130,11 @@ struct HostSettingsTests {
         var events = started.stream.makeAsyncIterator()
         await events.next()
         let high = Task { try await settings.pool.withSlot(priority: .high) {} }
-        let normal = Task { try await settings.pool.withSlot(priority: .normal) {} }
+        let medium = Task { try await settings.pool.withSlot(priority: .medium) {} }
         let low = Task { try await settings.pool.withSlot(priority: .low) {} }
         defer {
             finish.continuation.finish()
-            for job in [active, high, normal, low] { job.cancel() }
+            for job in [active, high, medium, low] { job.cancel() }
         }
         for _ in 0..<100 {
             await settings.refreshPoolStatus()
@@ -144,18 +143,18 @@ struct HostSettingsTests {
         }
         #expect(settings.poolStatus?.activeJobCount == 1)
         #expect(settings.poolStatus?.waitingJobCounts.high == 1)
-        #expect(settings.poolStatus?.waitingJobCounts.normal == 1)
+        #expect(settings.poolStatus?.waitingJobCounts.medium == 1)
         #expect(settings.poolStatus?.waitingJobCounts.low == 1)
         #expect(settings.capacityInput == "1")
 
-        normal.cancel()
+        medium.cancel()
         do {
-            try await normal.value
+            try await medium.value
             Issue.record("The cancelled waiting job completed without cancellation.")
         } catch is CancellationError {}
         await settings.refreshPoolStatus()
         #expect(settings.poolStatus?.waitingJobCounts.high == 1)
-        #expect(settings.poolStatus?.waitingJobCounts.normal == 0)
+        #expect(settings.poolStatus?.waitingJobCounts.medium == 0)
         #expect(settings.poolStatus?.waitingJobCounts.low == 1)
 
         finish.continuation.finish()

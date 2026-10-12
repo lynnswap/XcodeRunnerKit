@@ -27,7 +27,7 @@ public struct XcodeRunner: Sendable {
     public func run(
         _ action: XcodeBuildAction,
         request: XcodeBuildRequest,
-        priority: HostExecutionPool.Priority = .normal,
+        priority: HostExecutionPool.Priority = .medium,
         onOutput: (@Sendable (Data) throws -> Void)? = nil
     ) async throws -> XcodeBuildResult {
         if let executionPool {

@@ -68,5 +68,5 @@ private func printStatus(_ status: HostExecutionPool.Status?) {
     print("Maximum concurrent jobs: \(status.maximumConcurrentJobs)")
     print("Active jobs: \(status.activeJobCount)")
     let waiting = status.waitingJobCounts
-    print("Waiting jobs: \(waiting.total) (high: \(waiting.high), normal: \(waiting.normal), low: \(waiting.low))")
+    print("Waiting jobs: \(waiting.total) (high: \(waiting.high), medium: \(waiting.medium), low: \(waiting.low))")
 }

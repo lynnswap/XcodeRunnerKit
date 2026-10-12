@@ -119,7 +119,7 @@ as `XcodeRunnerHost.previous.app`.
 Click the hammer icon in the menu bar and choose **Settings…**. The window shows:
 
 - The shared execution limit and currently running XcodeRunnerKit jobs.
-- Jobs waiting for an execution slot, counted separately for High, Normal,
+- Jobs waiting for an execution slot, counted separately for High, Medium,
   and Low priority. These counts come from the shared pool, including jobs
   submitted through other runner processes.
 - Opted-in runners and the state of their local service processes. GitHub

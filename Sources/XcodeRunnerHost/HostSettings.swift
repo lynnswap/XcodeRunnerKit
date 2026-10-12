@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import Observation
 import SwiftUI
@@ -45,8 +44,6 @@ struct RunnerSettingsRow: Identifiable, Sendable {
 final class HostSettingsModel {
     let installation: HostInstallation
     let pool: HostExecutionPool
-    var hostRoot: URL { installation.hostRoot }
-    var logsDirectory: URL { installation.logsDirectory }
     var hostState = "Starting"
     var runners: [RunnerSettingsRow] = []
     var runnerScanError: String?
@@ -77,6 +74,7 @@ final class HostSettingsModel {
 
     var storageMessage: String {
         if let savedStorageDirectory, savedStorageDirectory != activeStorage?.directory {
+            if activeStorage == nil { return "Saved for the next host launch." }
             return "Saved for the next host launch. Running jobs continue using their current storage."
         }
         if activeStorage != nil { return "Runner checkouts, build results, and the shared compiler cache use this folder." }
@@ -194,6 +192,7 @@ struct HostSettingsView: View {
                     TextField("Storage folder", text: $model.storageDirectoryInput)
                         .textFieldStyle(.roundedBorder)
                         .accessibilityIdentifier("storage-folder")
+                        .disabled(model.isSavingStorage || model.hostState == "Stopping")
                     HStack {
                         Button("Choose…") { Task { await model.chooseStorageDirectory() } }
                             .accessibilityIdentifier("choose-storage-folder")
@@ -216,8 +215,8 @@ struct HostSettingsView: View {
                         Text(model.poolStatus.map { String($0.waitingJobCounts.high) } ?? unavailablePoolValue)
                             .monospacedDigit()
                     }
-                    LabeledContent("Waiting jobs (Normal)") {
-                        Text(model.poolStatus.map { String($0.waitingJobCounts.normal) } ?? unavailablePoolValue)
+                    LabeledContent("Waiting jobs (Medium)") {
+                        Text(model.poolStatus.map { String($0.waitingJobCounts.medium) } ?? unavailablePoolValue)
                             .monospacedDigit()
                     }
                     LabeledContent("Waiting jobs (Low)") {

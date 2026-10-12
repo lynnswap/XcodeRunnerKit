@@ -122,7 +122,7 @@ CLI operations retain their own defaults. See the
 
 ### Execution priority
 
-All four Xcode subcommands accept `--priority high|normal|low`, with `normal`
+All four Xcode subcommands accept `--priority high|medium|low`, with `medium`
 as the default:
 
 ```sh
@@ -155,7 +155,7 @@ already running continue; queued jobs use the new limit. See
 at each priority. With `--json`, a configured pool produces:
 
 ```json
-{"maximumConcurrentJobs":4,"activeJobCount":4,"waitingJobCounts":{"high":1,"normal":2,"low":1}}
+{"maximumConcurrentJobs":4,"activeJobCount":4,"waitingJobCounts":{"high":1,"medium":2,"low":1}}
 ```
 
 An unconfigured pool produces `null` without creating its directory. The text
@@ -295,12 +295,12 @@ try await pool.updateMaximumConcurrentJobs(to: 4)
 `status()` returns `nil` for an unconfigured pool and does not initialize it.
 Otherwise it reports `maximumConcurrentJobs` and `activeJobCount`, including
 operations that started before a capacity decrease, and `waitingJobCounts` for
-the `high`, `normal`, and `low` priorities. Updating from six to four
+the `high`, `medium`, and `low` priorities. Updating from six to four
 while six operations run lets all six finish. New operations, including existing
 waiters, start only after the active count drops below four. Increasing the limit
 lets waiting operations use the additional capacity.
 
-An operation uses `normal` priority by default. Supply a priority when running an
+An operation uses `medium` priority by default. Supply a priority when running an
 Xcode operation or acquiring a slot directly:
 
 ```swift
@@ -310,7 +310,7 @@ try await pool.withSlot(priority: .low) {
 }
 ```
 
-Waiting operations start in `high`, `normal`, then `low` priority order. Operations
+Waiting operations start in `high`, `medium`, then `low` priority order. Operations
 at the same priority start in the order they register with the local pool. An
 operation that already holds a slot continues through its cleanup. A continuous
 stream of higher-priority work can keep lower-priority operations waiting. The
@@ -367,8 +367,8 @@ on isolated hosted runners rather than a Mac that holds private credentials.
 ### Choose priorities in consumer workflows
 
 A trusted consumer workflow can choose a priority from its event. This example
-uses `high` for pull requests, `normal` for pushes, and `low` for other events,
-including scheduled and manual runs. XcodeRunnerKit reads the explicit CLI flag;
+uses `high` for pull requests, `low` for pushes and scheduled runs, and `medium`
+for manual runs and other events. XcodeRunnerKit reads the explicit CLI flag;
 it does not inspect GitHub events.
 
 Set the environment value on the consumer job and add the test step after its
@@ -376,7 +376,7 @@ checkout and dependency setup:
 
 ```yaml
 env:
-  XCODE_JOB_PRIORITY: ${{ github.event_name == 'pull_request' && 'high' || github.event_name == 'push' && 'normal' || 'low' }}
+  XCODE_JOB_PRIORITY: ${{ github.event_name == 'pull_request' && 'high' || (github.event_name == 'push' || github.event_name == 'schedule') && 'low' || 'medium' }}
 steps:
   - name: Run Xcode tests
     run: |

@@ -32,7 +32,7 @@ def main():
         roots = {}
         logs = []
 
-        def start(name, capacity=2, job_root=root, priority="normal"):
+        def start(name, capacity=2, job_root=root, priority="medium"):
             roots[name] = job_root
             log = open(root / (name + ".log"), "wb")
             logs.append(log)
@@ -64,10 +64,10 @@ def main():
             )
             return json.loads(result.stdout)
 
-        def expected_status(capacity, active, high=0, normal=0, low=0):
+        def expected_status(capacity, active, high=0, medium=0, low=0):
             return {
                 "maximumConcurrentJobs": capacity, "activeJobCount": active,
-                "waitingJobCounts": {"high": high, "normal": normal, "low": low},
+                "waitingJobCounts": {"high": high, "medium": medium, "low": low},
             }
 
         def assert_waiting(name):
@@ -137,14 +137,14 @@ def main():
             start("shrink-waiter", 6, shrink)
             assert_waiting("shrink-waiter")
             coordinator_inode = (shrink / "pool/pool.lock").stat().st_ino
-            assert update(4, shrink) == expected_status(4, 6, normal=1)
+            assert update(4, shrink) == expected_status(4, 6, medium=1)
             assert (shrink / "pool/pool.lock").stat().st_ino == coordinator_inode
             assert all(jobs[f"shrink-{index}"].poll() is None for index in range(6))
             release("shrink-0")
-            assert status(shrink) == expected_status(4, 5, normal=1)
+            assert status(shrink) == expected_status(4, 5, medium=1)
             assert_waiting("shrink-waiter")
             release("shrink-1")
-            assert status(shrink) == expected_status(4, 4, normal=1)
+            assert status(shrink) == expected_status(4, 4, medium=1)
             assert_waiting("shrink-waiter")
             release("shrink-2")
             wait_for(lambda: started("shrink-waiter"))
@@ -183,19 +183,19 @@ def main():
             start("priority-running", 1, ordered, priority="low")
             wait_for(lambda: started("priority-running"))
             priorities = (
-                ("low-first", "low"), ("normal-first", "normal"), ("low-second", "low"),
+                ("low-first", "low"), ("medium-first", "medium"), ("low-second", "low"),
                 ("high-first", "high"), ("high-second", "high"),
             )
-            counts = {"high": 0, "normal": 0, "low": 0}
+            counts = {"high": 0, "medium": 0, "low": 0}
             for name, priority in priorities:
                 start(name, 1, ordered, priority=priority)
                 counts[priority] += 1
                 wait_for(lambda: status(ordered)["waitingJobCounts"] == counts)
                 assert not started(name)
-            assert status(ordered) == expected_status(1, 1, high=2, normal=1, low=2)
+            assert status(ordered) == expected_status(1, 1, high=2, medium=1, low=2)
             assert jobs["priority-running"].poll() is None, "A high priority preempted an active operation"
             previous = "priority-running"
-            execution_order = ("high-first", "high-second", "normal-first", "low-first", "low-second")
+            execution_order = ("high-first", "high-second", "medium-first", "low-first", "low-second")
             for index, name in enumerate(execution_order):
                 release(previous)
                 wait_for(lambda name=name: started(name))
@@ -262,7 +262,7 @@ def main():
             wait_for(lambda: started("physical-b"))
             start("alias-waiter", 4, alias)
             assert_waiting("alias-waiter")
-            assert update(1, alias) == expected_status(1, 2, normal=1)
+            assert update(1, alias) == expected_status(1, 2, medium=1)
             release("alias-a")
             assert_waiting("alias-waiter")
             release("physical-b")
