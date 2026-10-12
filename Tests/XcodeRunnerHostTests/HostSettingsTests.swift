@@ -149,6 +149,23 @@ struct HostSettingsTests {
         try FileManager.default.removeItem(at: root)
     }
 
+    @Test func individualServiceDoesNotUseStaleHostLog() throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        let directory = root.appending(path: "installation")
+        let logs = root.appending(path: "Host logs")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        try Data(#"{"agentName":"repository-runner","workFolder":"_work"}"#.utf8).write(to: directory.appending(path: ".runner"))
+        let formerHostLog = logs.appending(path: "installation.log")
+        try Data("Previous host service log".utf8).write(to: formerHostLog)
+        let individual = RunnerSettingsRow.read(directory: directory, state: .individualService, logsDirectory: logs)
+        #expect(individual.log == nil)
+        #expect(individual.configurationError == nil)
+        let hosted = RunnerSettingsRow.read(directory: directory, state: .running, logsDirectory: logs)
+        #expect(hosted.log == formerHostLog)
+        try FileManager.default.removeItem(at: root)
+    }
+
     @Test func customHostRootDoesNotDependOnLogLocation() throws {
         let options = try HostOptions.parse(["--host-root", "/tmp/Host data", "--logs-directory", "/tmp/Service logs"])
         #expect(options.hostRoot == "/tmp/Host data")

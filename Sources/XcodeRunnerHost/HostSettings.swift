@@ -17,7 +17,7 @@ struct RunnerSettingsRow: Identifiable, Sendable {
     let name: String
     let state: RunnerServiceState
     let workDirectory: URL?
-    let log: URL
+    let log: URL?
     let configurationError: String?
 
     var id: URL { directory }
@@ -27,6 +27,7 @@ struct RunnerSettingsRow: Identifiable, Sendable {
             var agentName: String?
             var workFolder: String?
         }
+        let log = state == .individualService ? nil : logsDirectory.appending(path: directory.lastPathComponent + ".log")
         do {
             let registration = try JSONDecoder().decode(
                 Registration.self, from: Data(contentsOf: directory.appending(path: ".runner"))
@@ -37,12 +38,12 @@ struct RunnerSettingsRow: Identifiable, Sendable {
                     let installation = URL(filePath: directory.path(percentEncoded: false), directoryHint: .isDirectory)
                     return URL(filePath: $0, directoryHint: .isDirectory, relativeTo: installation).standardizedFileURL
                 },
-                log: logsDirectory.appending(path: directory.lastPathComponent + ".log"), configurationError: nil
+                log: log, configurationError: nil
             )
         } catch {
             return Self(
                 directory: directory, name: directory.lastPathComponent, state: state, workDirectory: nil,
-                log: logsDirectory.appending(path: directory.lastPathComponent + ".log"),
+                log: log,
                 configurationError: "Could not read this runner’s settings: \(error.localizedDescription)"
             )
         }
@@ -173,7 +174,8 @@ struct HostSettingsView: View {
                             directoryRow("Installation", url: runner.directory)
                             if let work = runner.workDirectory { directoryRow("Work directory", url: work) }
                             else { LabeledContent("Work directory", value: "Not available") }
-                            directoryRow("Service log", url: runner.log)
+                            if let log = runner.log { directoryRow("Service log", url: log) }
+                            else { LabeledContent("Service log", value: "Managed by individual service") }
                             if runner.state == .individualService {
                                 Text("This runner uses its individual service. The host does not start another service for it.")
                                     .font(.callout).foregroundStyle(.secondary)
