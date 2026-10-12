@@ -126,6 +126,8 @@ Click the hammer icon in the menu bar and choose **Settings…**. The window sho
   and each runner's registered work directory. Folder buttons reveal their
   physical locations in Finder, including cache symlink destinations.
 
+![Host settings with six running jobs after lowering the execution limit to four.](Images/HostSettings.png)
+
 Enter a positive whole number and choose **Apply** to change the execution
 limit without restarting the host or runners. Decreasing from six to four
 leaves all six running jobs intact. New jobs wait until fewer than four remain,
