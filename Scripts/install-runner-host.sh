@@ -57,7 +57,7 @@ identifier="dev.lynnswap.XcodeRunnerHost"
 plist=Path.home()/"Library/LaunchAgents"/(identifier+".plist")
 plist.write_bytes(plistlib.dumps({
     "Label": identifier,
-    "ProgramArguments": [str(app/"Contents/MacOS/xcode-runner-host"), "--runners-root", str(runners), "--logs-directory", str(root/"logs/runners")],
+    "ProgramArguments": [str(app/"Contents/MacOS/xcode-runner-host"), "--runners-root", str(runners), "--host-root", str(root), "--logs-directory", str(root/"logs/runners")],
     "AssociatedBundleIdentifiers": [identifier],
     "RunAtLoad": True,
     "KeepAlive": {"SuccessfulExit": False},

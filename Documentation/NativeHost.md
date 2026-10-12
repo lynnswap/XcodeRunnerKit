@@ -83,12 +83,13 @@ or host-specific labels belong in the installation configuration.
 
 ## Common host app
 
-`XcodeRunnerHost.app` is a windowless macOS app that starts opted-in official
+`XcodeRunnerHost.app` is a menu bar macOS app that starts opted-in official
 runner services as child processes. One user LaunchAgent starts the app in the
 CI user's GUI session. Runner installations, registration credentials, hooks,
 work directories, and the shared compilation cache remain outside its bundle.
-The app shares the existing execution pool through the workflows' CLI options;
-it does not replace GitHub's listener, service retries, or automatic updates.
+The app shares the existing execution pool through the workflows' CLI options
+and provides a settings window for its live limit. GitHub's listener, service
+retries, and automatic updates continue to run in the official runner.
 
 Build with a certificate identity available in the build machine's keychain:
 
@@ -115,6 +116,32 @@ directory. Defaults are `~/Library/XcodeRunnerKit/runners`,
 `~/Library/Application Support/XcodeRunnerKit`, and `~/Applications`. Updating
 the app stops its services, so first drain hosted jobs. The previous app is kept
 as `XcodeRunnerHost.previous.app`.
+
+Click the hammer icon in the menu bar and choose **Settings…**. The window shows:
+
+- The shared execution limit and currently running XcodeRunnerKit jobs.
+- Opted-in runners and the state of their local service processes. GitHub
+  connection and job status remain available on GitHub.
+- The host data, pool, compilation cache, runner installations, service logs,
+  and each runner's registered work directory. Folder buttons reveal their
+  physical locations in Finder, including cache symlink destinations.
+
+![Host settings with six running jobs after lowering the execution limit to four.](Images/HostSettings.png)
+
+Enter a positive whole number and choose **Apply** to change the execution
+limit without restarting the host or runners. Decreasing from six to four
+leaves all six running jobs intact. New jobs wait until fewer than four remain,
+then start as slots become available. Increasing the limit makes additional
+slots available to waiting jobs. The display refreshes every two seconds.
+Reading the window does not configure an unused pool; **Apply** explicitly
+creates its saved limit if necessary.
+
+Closing the settings window leaves the host and runners running. Storage paths
+are shown for inspection; use the installation scripts and the migration
+procedure below to move storage or register another runner. A directly launched
+host accepts `--host-root` separately from `--runners-root` and
+`--logs-directory`. Keep the host root consistent with the workflows' pool and
+cache paths.
 
 For a newly registered runner, add `host` after the labels argument:
 
@@ -350,8 +377,9 @@ launchctl print "gui/$(id -u)/$label"
 launchctl kickstart -k "gui/$(id -u)/$label"
 ```
 
-Stop accepting jobs and let active operations finish before changing capacity,
-pruning caches, or updating host tools. Remove the pool directory only after
+Change the pool limit live from the common host's settings window. Stop accepting
+jobs and let active operations finish before pruning caches or updating host
+tools. Remove the pool directory only after
 all its users have stopped. The first operation initializes the pool capacity;
 later workflows use that saved capacity even if their specified value differs.
 For cache retention, inspect disk usage and remove an old CAS while its users

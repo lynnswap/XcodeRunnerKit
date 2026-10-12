@@ -27,6 +27,7 @@ let package = Package(
         .executableTarget(
             name: "XcodeRunnerHost",
             dependencies: [
+                "XcodeRunnerKit",
                 .product(name: "Subprocess", package: "swift-subprocess"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
@@ -35,6 +36,11 @@ let package = Package(
         .testTarget(
             name: "XcodeRunnerKitTests",
             dependencies: ["XcodeRunnerKit"],
+            swiftSettings: [.swiftLanguageMode(.v6), .defaultIsolation(nil)]
+        ),
+        .testTarget(
+            name: "XcodeRunnerHostTests",
+            dependencies: ["XcodeRunnerHost"],
             swiftSettings: [.swiftLanguageMode(.v6), .defaultIsolation(nil)]
         ),
     ]

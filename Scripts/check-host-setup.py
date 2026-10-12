@@ -222,7 +222,7 @@ with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
     subprocess.run(command, env=env, check=True, capture_output=True)
     plist = plistlib.loads((home / "Library/LaunchAgents/dev.lynnswap.XcodeRunnerHost.plist").read_bytes())
     assert plist["AssociatedBundleIdentifiers"] == ["dev.lynnswap.XcodeRunnerHost"]
-    assert plist["ProgramArguments"] == [str(applications.resolve() / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host"), "--runners-root", str(runners.resolve()), "--logs-directory", str(host.resolve() / "logs/runners")]
+    assert plist["ProgramArguments"] == [str(applications.resolve() / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host"), "--runners-root", str(runners.resolve()), "--host-root", str(host.resolve()), "--logs-directory", str(host.resolve() / "logs/runners")]
     (app / "Contents/MacOS/xcode-runner-host").write_text("updated executable")
     subprocess.run(command, env=env, check=True, capture_output=True)
     assert (applications / "XcodeRunnerHost.previous.app/Contents/MacOS/xcode-runner-host").read_text() == "first executable"

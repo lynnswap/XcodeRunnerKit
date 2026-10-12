@@ -31,6 +31,21 @@ def alive(pid):
         return False
 
 
+def stop_host(host, runners):
+    if host.poll() is not None:
+        return
+    host.send_signal(signal.SIGTERM)
+    try:
+        host.wait(timeout=45)
+    except subprocess.TimeoutExpired:
+        host.kill()
+        host.wait()
+        for directory in runners.iterdir():
+            if (directory/'pid.json').exists():
+                pid = json.loads((directory/'pid.json').read_text())['pid']
+                if alive(pid): os.kill(pid, signal.SIGTERM)
+
+
 def fixture(root, name):
     directory = root / name
     directory.mkdir()
@@ -46,7 +61,9 @@ def stop(*args):
     raise SystemExit(0)
 signal.signal(signal.SIGINT, stop)
 signal.signal(signal.SIGTERM, stop)
-Path('pid.json').write_text(json.dumps({'pid':os.getpid(), 'group':os.getpgrp()}))
+pending = Path('pid.pending')
+pending.write_text(json.dumps({'pid':os.getpid(), 'group':os.getpgrp()}))
+pending.replace('pid.json')
 while True: time.sleep(1)
 ''')
     (directory / 'runsvc.sh').write_text('''#!/bin/bash
@@ -67,7 +84,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     first = fixture(runners, 'first')
     excluded = fixture(runners, 'individual')
     (excluded / '.service').touch()
-    arguments = [executable, '--runners-root', str(runners), '--logs-directory', str(root/'logs')]
+    arguments = [executable, '--runners-root', str(runners), '--host-root', str(root/'host'), '--logs-directory', str(root/'logs')]
     with (root/'host.log').open('w') as log:
         host = subprocess.Popen([Path(executable).name]+arguments[1:], cwd=root,
                                 env={**os.environ, 'PATH':str(Path(executable).parent)+os.pathsep+os.environ['PATH']},
@@ -127,17 +144,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
             assert host.wait(timeout=15) == 0
             assert (second/'stopped').exists() and not alive(second_pid)
         finally:
-            if host.poll() is None:
-                host.send_signal(signal.SIGTERM)
-                try:
-                    host.wait(timeout=45)
-                except subprocess.TimeoutExpired:
-                    host.kill()
-                    host.wait()
-                    for directory in runners.iterdir():
-                        if (directory/'pid.json').exists():
-                            pid = json.loads((directory/'pid.json').read_text())['pid']
-                            if alive(pid): os.kill(pid, signal.SIGTERM)
+            stop_host(host, runners)
         host_log = (root/'host.log').read_text()
         print(host_log)
         assert 'service ended: Error' not in host_log
@@ -173,6 +180,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     finally:
         subprocess.run(['launchctl','bootout',target],check=True)
     wait_for(lambda:not alive(restarted['pid']), 'Runner survived service removal')
+    assert not (root/'host/Pool').exists(), 'Host status reads configured an unused pool'
 
     subprocess.run(['bash',str(scripts/'build-runner-host.sh'),'-',str(root/'packaging'),executable],check=True,capture_output=True)
     tools = root/'tools'
@@ -185,4 +193,47 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     assert rejected.returncode != 0 and b'certificate signing identity' in rejected.stderr
     assert not (root/'home/Applications').exists()
 
-print('PASS: multiple runners, separate service groups, discovery, individual-service exclusion, singleton, graceful shutdown, host/helper crash cleanup, immediate service exit, and restart')
+with tempfile.TemporaryDirectory(prefix='RunnerHost blocked pool ') as temporary:
+    root = Path(temporary)
+    runners = root/'runners'
+    runners.mkdir()
+    pool = root/'host/Pool'
+    pool.mkdir(parents=True)
+    ready = root/'pool-held'
+    holder = subprocess.Popen([sys.executable, '-c', '''import fcntl, sys, time
+from pathlib import Path
+with open(sys.argv[1], 'a+b') as coordinator:
+    fcntl.flock(coordinator, fcntl.LOCK_EX)
+    ready = Path(sys.argv[2])
+    pending = ready.with_suffix('.pending')
+    pending.write_text('locked')
+    pending.replace(ready)
+    while True: time.sleep(1)
+''', str(pool/'pool.lock'), str(ready)])
+    try:
+        wait_for(ready.exists, 'External process did not hold the pool coordinator')
+        first = fixture(runners, 'first')
+        arguments = [executable, '--runners-root', str(runners), '--host-root', str(root/'host'), '--logs-directory', str(root/'logs')]
+        with (root/'host.log').open('w') as log:
+            host = subprocess.Popen(arguments, stdout=log, stderr=log)
+            try:
+                wait_for(lambda:(first/'pid.json').exists(), 'Pool status wait prevented initial runner discovery')
+                first_pid = json.loads((first/'pid.json').read_text())['pid']
+                second = fixture(runners, 'second')
+                wait_for(lambda:(second/'pid.json').exists(), 'Pool status wait prevented new runner discovery')
+                second_pid = json.loads((second/'pid.json').read_text())['pid']
+                (first/'.xcode-runner-host').unlink()
+                wait_for(lambda:(first/'stopped').exists() and not alive(first_pid), 'Pool status wait prevented runner removal')
+                assert holder.poll() is None
+                host.send_signal(signal.SIGTERM)
+                assert host.wait(timeout=15) == 0
+                assert (second/'stopped').exists() and not alive(second_pid)
+                assert holder.poll() is None, 'Pool coordinator must remain held throughout host shutdown'
+            finally:
+                stop_host(host, runners)
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+    assert not (pool/'capacity').exists(), 'Host status reads configured an unused pool'
+
+print('PASS: multiple runners, separate service groups, discovery, individual-service exclusion, singleton, graceful shutdown, host/helper crash cleanup, immediate service exit, restart, and discovery/removal/shutdown while the pool coordinator is locked')
