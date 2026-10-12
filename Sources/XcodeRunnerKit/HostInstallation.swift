@@ -73,16 +73,19 @@ package struct HostInstallation: Sendable {
     }
 
     package func initializeStorage(at directory: URL? = nil) throws -> Storage {
-        try withStorageLock {
-            if let existing = try storage() {
-                if let directory, directory.standardizedFileURL.resolvingSymlinksInPath().path != existing.directory.resolvingSymlinksInPath().path {
-                    throw ConfigurationError.alreadyConfigured(existing.directory)
-                }
-                try existing.prepare(creatingParent: false)
-                return existing
+        try withStorageLock { try prepareStorageDirectory(at: directory, creatingParent: true) }
+    }
+
+    // Call while holding storage.lock, including throughout startup migration.
+    package func prepareStorageDirectory(at directory: URL?, creatingParent: Bool) throws -> Storage {
+        if let existing = try storage() {
+            if let directory, directory.standardizedFileURL.resolvingSymlinksInPath().path != existing.directory.resolvingSymlinksInPath().path {
+                throw ConfigurationError.alreadyConfigured(existing.directory)
             }
-            return try commitStorageDirectory(directory ?? hostRoot.appending(path: "Storage"), creatingParent: true)
+            try existing.prepare(creatingParent: false)
+            return existing
         }
+        return try commitStorageDirectory(directory ?? hostRoot.appending(path: "Storage"), creatingParent: creatingParent)
     }
 
     // The host commits this active location only after its startup migration succeeds.
@@ -90,7 +93,7 @@ package struct HostInstallation: Sendable {
         try withStorageLock { try commitStorageDirectory(directory, creatingParent: false) }
     }
 
-    private func commitStorageDirectory(_ directory: URL, creatingParent: Bool) throws -> Storage {
+    package func commitStorageDirectory(_ directory: URL, creatingParent: Bool) throws -> Storage {
         let requested = Storage(directory: directory)
         try requested.prepare(creatingParent: creatingParent)
         let storage = Storage(directory: try requested.directory.resolvingSymlinksInPath().compilerCanonicalURL())
@@ -99,13 +102,29 @@ package struct HostInstallation: Sendable {
         return storage
     }
 
-    private func withStorageLock<Result>(_ operation: () throws -> Result) throws -> Result {
+    package func withStorageLock<Result>(_ operation: () throws -> Result) throws -> Result {
         try FileManager.default.createDirectory(at: hostRoot, withIntermediateDirectories: true)
         let lock = hostRoot.appending(path: "storage.lock")
         let descriptor = open(lock.path(percentEncoded: false), O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
         defer { close(descriptor) }
-        while flock(descriptor, LOCK_EX) != 0 {
+        let lockingDescriptor: Int32
+        if let inherited = ProcessInfo.processInfo.environment["XCODE_RUNNER_STORAGE_LOCK_DESCRIPTOR"] {
+            // The installer holds this open file description across nested configure and opt-in calls.
+            guard let inherited = Int32(inherited) else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL)) }
+            var ownStatus = stat()
+            var inheritedStatus = stat()
+            guard fstat(descriptor, &ownStatus) == 0, fstat(inherited, &inheritedStatus) == 0 else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
+            guard ownStatus.st_dev == inheritedStatus.st_dev, ownStatus.st_ino == inheritedStatus.st_ino else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
+            }
+            lockingDescriptor = inherited
+        } else {
+            lockingDescriptor = descriptor
+        }
+        while flock(lockingDescriptor, LOCK_EX) != 0 {
             if errno != EINTR { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
         }
         return try operation()

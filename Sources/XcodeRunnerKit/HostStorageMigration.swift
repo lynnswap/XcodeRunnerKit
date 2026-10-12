@@ -20,14 +20,27 @@ extension HostInstallation {
             throw StorageMigrationError("Choose an existing folder for storage.")
         }
         let physical = try resolved.compilerCanonicalURL()
-        try FileManager.default.createDirectory(at: hostRoot, withIntermediateDirectories: true)
-        try Data(physical.path(percentEncoded: false).utf8).write(to: requestedStorageRecord, options: .atomic)
+        try withStorageLock {
+            _ = try activeStorageForChange()
+            try Data(physical.path(percentEncoded: false).utf8).write(to: requestedStorageRecord, options: .atomic)
+        }
         return physical
     }
 
     // The host calls this only after obtaining ownership of its runners, before starting services.
     @concurrent package func prepareStorageForLaunch() async throws -> Storage {
-        let active = try storage()
+        try withStorageLock { try prepareStorageWhileLocked() }
+    }
+
+    private func activeStorageForChange() throws -> Storage? {
+        do { return try storage() }
+        catch {
+            throw StorageMigrationError("Could not read the current storage configuration. Restore the original storage-directory record or its read access before changing folders: \(error.localizedDescription)")
+        }
+    }
+
+    private func prepareStorageWhileLocked() throws -> Storage {
+        let active = try activeStorageForChange()
         if let journal = try readMigrationJournal() {
             if active?.directory == journal.target {
                 try cleanCommittedMigration(journal)
@@ -46,7 +59,7 @@ extension HostInstallation {
             try validateHostedWorkDirectories(storage: migrated)
             return migrated
         }
-        let prepared = try initializeStorage(at: active == nil ? requested : nil)
+        let prepared = try prepareStorageDirectory(at: active == nil ? requested : nil, creatingParent: requested == nil)
         try validateHostedWorkDirectories(storage: prepared)
         return prepared
     }
@@ -144,7 +157,7 @@ extension HostInstallation {
             try manager.removeItem(at: journal.staging)
             try Task.checkCancellation()
             let committed: Storage
-            do { committed = try saveStorageDirectory(target.directory) }
+            do { committed = try commitStorageDirectory(target.directory, creatingParent: false) }
             catch {
                 // An atomic write can report failure after replacement. Read back before restoring runners.
                 let saved: Storage?

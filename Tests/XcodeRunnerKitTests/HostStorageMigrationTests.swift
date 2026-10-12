@@ -29,6 +29,27 @@ struct HostStorageMigrationTests {
         return try await installation.requestStorageDirectory(directory)
     }
 
+    @Test func unavailableFirstSavedParentIsNotRecreatedBeforeRunnerStartup() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root.appending(path: "Home"))
+        let selected = try await choose(root.appending(path: "Selected storage"), installation: installation)
+        let disconnected = root.appending(path: "Disconnected storage")
+        let retained = Data("existing job data".utf8)
+        try retained.write(to: selected.appending(path: "retained"))
+        try FileManager.default.moveItem(at: selected, to: disconnected)
+
+        await #expect(throws: (any Error).self) { try await installation.prepareStorageForLaunch() }
+        #expect(try installation.storage() == nil)
+        #expect(try installation.requestedStorageDirectory() == selected)
+        #expect(!FileManager.default.fileExists(atPath: selected.path(percentEncoded: false)))
+        #expect(try Data(contentsOf: disconnected.appending(path: "retained")) == retained)
+
+        try FileManager.default.moveItem(at: disconnected, to: selected)
+        #expect(try await installation.prepareStorageForLaunch().directory == selected)
+        #expect(try Data(contentsOf: selected.appending(path: "retained")) == retained)
+    }
+
     @Test func unchangedStoragePreparesMissingManagedDirectoriesBeforeRunnerStartup() async throws {
         let (root, installation, source) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

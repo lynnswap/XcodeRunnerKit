@@ -153,12 +153,22 @@ credentials, and keeps the original files. Existing managed subdirectories
 in a new destination are preserved by refusing the change; choose another
 parent folder instead. Unrelated files in the chosen parent are kept.
 
+Migration copies checkout files without rewriting Git configuration. After
+draining jobs and before restarting the host, update custom path-dependent Git
+authentication settings for the new physical `Work` location, including
+`includeIf.gitdir` conditions and included file paths. `actions/checkout`
+configures its own credentials on each checkout. The private dependency
+helper's keys and mirror configuration remain under the fixed host root.
+
 If storage cannot be prepared, the host opens Settings with **Needs attention**
 and leaves runner services stopped. The error describes what needs to be
 corrected. Choose and save another folder if necessary, then restart the host
-to retry. A failure before the new storage selection is committed restores
-original runner settings and reports any restoration failure. If cleanup fails
-after commit, the new storage stays active and cleanup is retried before
+to retry a destination error. If the original storage is unavailable, restore
+its access before retrying. If the active storage record cannot be read, repair
+that record or its read access first; saving a different folder cannot recover
+an unknown source location. A failure before the new storage selection is
+committed restores original runner settings and reports any restoration
+failure. If cleanup fails after commit, the new storage stays active and cleanup is retried before
 runner services start. An interrupted change is restored before another
 attempt; its error remains visible until the next successful launch.
 

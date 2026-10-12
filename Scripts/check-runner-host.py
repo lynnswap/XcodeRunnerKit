@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shutil
 import signal
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import tempfile
 import time
 
 executable = str(Path(sys.argv[1]).resolve())
+cli = Path(executable).with_name('xcode-runner')
 scripts = Path(__file__).resolve().parent
 
 
@@ -86,15 +88,20 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     root = Path(temporary)
     home = root / 'home'
     host_root = home/'Library/Application Support/XcodeRunnerKit'
+    installed_cli = host_root/'bin/xcode-runner'
+    installed_cli.parent.mkdir(parents=True)
+    shutil.copy2(cli, installed_cli)
     runners = home/'Library/XcodeRunnerKit/runners'
     runners.mkdir(parents=True)
     first = fixture(runners, '.hidden-first')
     excluded = fixture(runners, 'individual')
     (excluded / '.service').touch()
     arguments = [executable, '--home-directory', str(home)]
+    environment = {**os.environ, 'HOME':str(home),
+                   'PATH':str(Path(executable).parent)+os.pathsep+os.environ['PATH']}
     with (root/'host.log').open('w') as log:
         host = subprocess.Popen([Path(executable).name]+arguments[1:], cwd=root,
-                                env={**os.environ, 'PATH':str(Path(executable).parent)+os.pathsep+os.environ['PATH']},
+                                env=environment,
                                 stdout=log, stderr=log)
         try:
             wait_for(lambda:(first/'pid.json').exists(), 'Hidden runner did not start')
@@ -128,7 +135,8 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
             try:
                 wait_for(lambda:(legacy/'pid.json').exists(), 'Individual service did not start')
                 legacy_pid = json.loads((legacy/'pid.json').read_text())['pid']
-                migration = subprocess.Popen(['bash',str(scripts/'enable-hosted-runner.sh'),str(legacy)],stdout=log,stderr=log)
+                migration = subprocess.Popen(['bash',str(scripts/'enable-hosted-runner.sh'),str(legacy)],
+                                             env=environment, stdout=log,stderr=log)
                 wait_for(lambda:(legacy/'stopping').exists(), 'Individual service did not start shutdown')
                 assert alive(legacy_pid) and not (legacy/'.xcode-runner-host').exists()
                 assert migration.wait(timeout=20) == 0
