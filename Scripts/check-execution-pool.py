@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Verify production pool locks using separate operating-system processes."""
 from pathlib import Path
+import json
 import signal
 import subprocess
 import tempfile
@@ -54,7 +55,27 @@ def main():
             code = jobs[name].wait(timeout=10)
             assert code == 130, (name, code, (root / (name + ".log")).read_text())
 
+        def status(job_root=root):
+            result = subprocess.run([str(executable), str(job_root), "status"], check=True, capture_output=True)
+            return json.loads(result.stdout)
+
+        def update(capacity, job_root=root):
+            result = subprocess.run(
+                [str(executable), str(job_root), "update", str(capacity)], check=True, capture_output=True
+            )
+            return json.loads(result.stdout)
+
+        def assert_waiting(name):
+            # A bounded observation window checks that no payload starts without a slot release.
+            end = time.monotonic() + 0.3
+            while time.monotonic() < end:
+                assert not started(name), f"Waiting process {name} executed its payload"
+                assert jobs[name].poll() is None, f"Waiting process {name} exited"
+                time.sleep(0.02)
+
         try:
+            assert status() is None
+            assert not (root / "pool").exists(), "Reading status initialized an empty pool"
             start("a")
             start("b")
             wait_for(lambda: started("a") and started("b"))
@@ -77,7 +98,7 @@ def main():
             assert not started("overflow"), "Larger caller capacity bypassed the two-slot pool"
             release("b")
             wait_for(lambda: started("overflow"))
-            assert (root / "pool/capacity.lock").read_text() == "2"
+            assert status() == {"maximumConcurrentJobs": 2, "activeJobCount": 2}
 
             for name in ("overflow", "d"):
                 release(name)
@@ -98,9 +119,121 @@ def main():
             assert not started("large-waiter"), "Fifth process bypassed the four-slot pool"
             release("large-a")
             wait_for(lambda: started("large-waiter"))
-            assert (larger / "pool/capacity.lock").read_text() == "4"
+            assert status(larger) == {"maximumConcurrentJobs": 4, "activeJobCount": 4}
             for name in ("large-b", "large-c", "large-d", "large-waiter"):
                 release(name)
+
+            shrink = root / "shrink"
+            shrink.mkdir()
+            for index in range(6):
+                name = f"shrink-{index}"
+                start(name, 6, shrink)
+                wait_for(lambda name=name: started(name))
+            start("shrink-waiter", 6, shrink)
+            assert_waiting("shrink-waiter")
+            coordinator_inode = (shrink / "pool/capacity.lock").stat().st_ino
+            assert update(4, shrink) == {"maximumConcurrentJobs": 4, "activeJobCount": 6}
+            assert (shrink / "pool/capacity.lock").stat().st_ino == coordinator_inode
+            assert all(jobs[f"shrink-{index}"].poll() is None for index in range(6))
+            release("shrink-0")
+            assert status(shrink) == {"maximumConcurrentJobs": 4, "activeJobCount": 5}
+            assert_waiting("shrink-waiter")
+            release("shrink-1")
+            assert status(shrink) == {"maximumConcurrentJobs": 4, "activeJobCount": 4}
+            assert_waiting("shrink-waiter")
+            release("shrink-2")
+            wait_for(lambda: started("shrink-waiter"))
+            assert status(shrink) == {"maximumConcurrentJobs": 4, "activeJobCount": 4}
+            assert all(jobs[f"shrink-{index}"].poll() is None for index in (3, 4, 5))
+            for name in ("shrink-3", "shrink-4", "shrink-5", "shrink-waiter"):
+                release(name)
+
+            grow = root / "grow"
+            grow.mkdir()
+            for name in ("grow-a", "grow-b"):
+                start(name, 2, grow)
+                wait_for(lambda name=name: started(name))
+            start("grow-c", 2, grow)
+            assert_waiting("grow-c")
+            assert update(4, grow)["maximumConcurrentJobs"] == 4
+            wait_for(lambda: started("grow-c"))
+            start("grow-d", 2, grow)
+            wait_for(lambda: started("grow-d"))
+            assert status(grow) == {"maximumConcurrentJobs": 4, "activeJobCount": 4}
+            start("grow-cancelled", 2, grow)
+            assert_waiting("grow-cancelled")
+            cancel("grow-cancelled")
+            assert not started("grow-cancelled")
+            start("grow-after-exit", 2, grow)
+            assert_waiting("grow-after-exit")
+            jobs["grow-a"].kill()
+            assert jobs["grow-a"].wait(timeout=10) == -signal.SIGKILL
+            wait_for(lambda: started("grow-after-exit"))
+            assert status(grow) == {"maximumConcurrentJobs": 4, "activeJobCount": 4}
+            for name in ("grow-b", "grow-c", "grow-d", "grow-after-exit"):
+                release(name)
+
+            legacy = root / "legacy"
+            (legacy / "pool").mkdir(parents=True)
+            (legacy / "pool/capacity.lock").write_text("2")
+            assert status(legacy) == {"maximumConcurrentJobs": 2, "activeJobCount": 0}
+            assert not (legacy / "pool/capacity").exists(), "Reading legacy status changed its configuration"
+            start("legacy-a", 4, legacy)
+            wait_for(lambda: started("legacy-a"))
+            assert status(legacy) == {"maximumConcurrentJobs": 2, "activeJobCount": 1}
+            assert update(1, legacy) == {"maximumConcurrentJobs": 1, "activeJobCount": 1}
+            assert (legacy / "pool/capacity.lock").read_text() == "2"
+            start("legacy-b", 4, legacy)
+            assert_waiting("legacy-b")
+            release("legacy-a")
+            wait_for(lambda: started("legacy-b"))
+            release("legacy-b")
+
+            unconfigured = root / "unconfigured"
+            (unconfigured / "pool").mkdir(parents=True)
+            (unconfigured / "pool/capacity.lock").touch()
+            assert status(unconfigured) is None
+            assert not (unconfigured / "pool/capacity").exists()
+            assert update(3, unconfigured) == {"maximumConcurrentJobs": 3, "activeJobCount": 0}
+            for capacity in (0, -1):
+                result = subprocess.run(
+                    [str(executable), str(unconfigured), "update", str(capacity)], capture_output=True
+                )
+                assert result.returncode != 0
+                assert "invalidCapacity" in result.stderr.decode()
+                assert status(unconfigured)["maximumConcurrentJobs"] == 3
+
+            unreadable = unconfigured / "pool/capacity"
+            unreadable.chmod(0)
+            try:
+                result = subprocess.run([str(executable), str(unconfigured), "status"], capture_output=True)
+                assert result.returncode != 0, "A saved-capacity read failure returned an empty status"
+                job = start("unreadable-capacity", 4, unconfigured)
+                assert job.wait(timeout=10) != 0
+                assert not started("unreadable-capacity"), "A capacity read failure executed a payload"
+            finally:
+                unreadable.chmod(0o600)
+            pool_directory = unconfigured / "pool"
+            pool_directory.chmod(0o500)
+            try:
+                result = subprocess.run([str(executable), str(unconfigured), "update", "5"], capture_output=True)
+                assert result.returncode != 0, "A saved-capacity write failure returned success"
+            finally:
+                pool_directory.chmod(0o700)
+            assert status(unconfigured) == {"maximumConcurrentJobs": 3, "activeJobCount": 0}
+
+            coordinator = unconfigured / "pool/capacity.lock"
+            coordinator.chmod(0)
+            try:
+                result = subprocess.run([str(executable), str(unconfigured), "status"], capture_output=True)
+                assert result.returncode != 0, "A coordinator open failure returned an empty status"
+            finally:
+                coordinator.chmod(0o600)
+
+            (unconfigured / "pool/capacity").write_text("")
+            result = subprocess.run([str(executable), str(unconfigured), "status"], capture_output=True)
+            assert result.returncode != 0
+            assert "invalidStoredCapacity" in result.stderr.decode()
 
             for index, value in enumerate(("0", "invalid")):
                 invalid = root / f"invalid-{index}"
@@ -112,7 +245,7 @@ def main():
                 assert not started(name), "Invalid saved capacity executed a payload"
                 assert "invalidStoredCapacity" in (root / (name + ".log")).read_text()
 
-            print("PASS: stored capacities 2/4, differing callers 4/2, queueing, cancellation, reuse, invalid configuration")
+            print("PASS: stored capacities, differing callers, live shrink/grow, legacy slots/configuration, queue cancellation, process exit, invalid configuration, I/O failures")
         finally:
             for job in jobs.values():
                 if job.poll() is None:

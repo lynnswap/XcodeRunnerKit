@@ -191,9 +191,10 @@ The path-mapping approach also follows [this worktree cache investigation](https
 Configure the same pool directory in every repository runner:
 
 ```swift
+let poolDirectory = URL(filePath: "/Users/ci/Library/Application Support/XcodeRunnerKit/Pool")
 var runner = XcodeRunner()
 runner.executionPool = try HostExecutionPool(
-    directory: URL(filePath: "/Users/ci/Library/Application Support/XcodeRunnerKit/Pool"),
+    directory: poolDirectory,
     maximumConcurrentJobs: 2
 )
 ```
@@ -209,11 +210,30 @@ The kernel holds each slot through execution and log cleanup. Waiting jobs can
 be cancelled. Invalid saved configuration or lock I/O failures stop the operation.
 
 Use a local filesystem and the same macOS user for all cooperating runners.
-Keep lock files in place while jobs run. To change capacity, stop all runners,
-wait for their managed jobs to finish, remove the pool directory, then initialize
-the new pool with the desired capacity. Locks coordinate XcodeRunnerKit operations;
-unmanaged commands do not participate. Force-killing the wrapper does not
-provide cleanup guarantees for its subprocesses; use Task, SIGINT, or SIGTERM
+Keep the pool directory and lock files in place while jobs run. Read or change
+the saved limit without stopping CI:
+
+```swift
+let pool = try HostExecutionPool(directory: poolDirectory, maximumConcurrentJobs: 4)
+let status = try await pool.status()
+try await pool.updateMaximumConcurrentJobs(to: 4)
+```
+
+`status()` returns `nil` for an unconfigured pool and does not initialize it.
+Otherwise it reports `maximumConcurrentJobs` and `activeJobCount`, including
+operations that started before a capacity decrease. Updating from six to four
+while six operations run lets all six finish. New operations, including existing
+waiters, start only after the active count drops below four. Increasing the limit
+lets waiting operations use the additional capacity. Waiting does not guarantee
+first-in, first-out ordering.
+
+Upgrade every cooperating CLI and library client before changing a live pool.
+Older clients keep the capacity they first read, so their waiting operations do
+not follow updates. Existing saved capacities are preserved when upgrading.
+
+Locks coordinate XcodeRunnerKit operations; unmanaged commands do not participate.
+Force-killing the wrapper does not provide cleanup guarantees for its subprocesses;
+use Task, SIGINT, or SIGTERM
 cancellation for managed teardown.
 
 The separate-process check compiles the production pool implementation:
