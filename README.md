@@ -96,6 +96,23 @@ Repeat `--setting NAME=VALUE` for build settings and
 `--developer-directory` selects Xcode without changing the host's
 `xcode-select` setting.
 
+### Execution priority
+
+All four Xcode subcommands accept `--priority high|normal|low`, with `normal`
+as the default:
+
+```sh
+xcode-runner test --package /path/to/Package --scheme PackageName \
+  --pool-directory /path/to/shared-pool --maximum-concurrent-jobs 4 \
+  --priority high
+```
+
+Priority controls admission to the local shared pool. Jobs already running
+continue, and a command without `--pool-directory` starts immediately regardless
+of its priority. See [shared host capacity](#shared-host-capacity) for ordering
+and cancellation rules. GitHub assigns jobs to runner listeners before the CLI
+reaches this pool.
+
 ### Pool management
 
 Inspect or change a pool while jobs run:
@@ -110,9 +127,15 @@ xcode-runner pool status --pool-directory /path/to/shared-pool --json
 already running continue; queued jobs use the new limit. See
 [shared host capacity](#shared-host-capacity) for the execution rules.
 
-`pool status` reports the saved `maximumConcurrentJobs` and `activeJobCount`.
-With `--json`, a configured pool produces an object with those two fields;
-an unconfigured pool produces `null` without creating its directory.
+`pool status` reports the saved capacity, active job count, and waiting job counts
+at each priority. With `--json`, a configured pool produces:
+
+```json
+{"maximumConcurrentJobs":4,"activeJobCount":4,"waitingJobCounts":{"high":1,"normal":2,"low":1}}
+```
+
+An unconfigured pool produces `null` without creating its directory. The text
+output also includes the total number of waiting jobs.
 
 Check CLI administration and the existing Xcode command interface:
 
@@ -316,6 +339,51 @@ macOS tests, separate-process capacity, and the iOS consumer fixture.
 repositories on an owned Mac, including private dependency authentication,
 service operation, and cache retention. Public contribution workflows belong
 on isolated hosted runners rather than a Mac that holds private credentials.
+
+### Choose priorities in consumer workflows
+
+A trusted consumer workflow can choose a priority from its event. This example
+uses `high` for pull requests, `normal` for pushes, and `low` for other events,
+including scheduled and manual runs. XcodeRunnerKit reads the explicit CLI flag;
+it does not inspect GitHub events.
+
+Set the environment value on the consumer job and add the test step after its
+checkout and dependency setup:
+
+```yaml
+env:
+  XCODE_JOB_PRIORITY: ${{ github.event_name == 'pull_request' && 'high' || github.event_name == 'push' && 'normal' || 'low' }}
+steps:
+  - name: Run Xcode tests
+    run: |
+      ci_root="$HOME/Library/Application Support/XcodeRunnerKit"
+      exec "$ci_root/bin/xcode-runner" test \
+        --package "$GITHUB_WORKSPACE" --scheme PackageName \
+        --destination 'platform=macOS,arch=arm64' \
+        --pool-directory "$ci_root/Pool" --maximum-concurrent-jobs 4 \
+        --priority "$XCODE_JOB_PRIORITY" \
+        --output-directory "$RUNNER_TEMP/XcodeRunnerOutput"
+```
+
+If every official runner listener is busy, a high-priority GitHub job can still
+wait for assignment before it reaches the local pool. To reserve a listener for
+pull requests, add `ci-interactive` to one installed runner and `ci-batch` to the
+other runners. Keep the base labels on each runner and select the additional
+label in the consumer job:
+
+```yaml
+runs-on:
+  - self-hosted
+  - macOS
+  - ARM64
+  - xcode-runnerkit
+  - "${{ github.event_name == 'pull_request' && 'ci-interactive' || 'ci-batch' }}"
+```
+
+Jobs that use `ci-batch` cannot occupy the listener labeled only `ci-interactive`.
+Use the same pool directory for both groups. Reserving a listener does not reserve
+Xcode execution capacity or interrupt a running operation. Configure custom
+labels during [native runner installation](Documentation/NativeHost.md#register-repository-runners).
 
 ## Development
 
