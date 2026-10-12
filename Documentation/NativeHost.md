@@ -124,9 +124,8 @@ Click the hammer icon in the menu bar and choose **Settings…**. The window sho
   submitted through other runner processes.
 - Opted-in runners and the state of their local service processes. GitHub
   connection and job status remain available on GitHub.
-- The host data, pool, compilation cache, runner installations, service logs,
-  and each runner's registered work directory. Folder buttons reveal their
-  physical locations in Finder, including cache symlink destinations.
+- One storage folder for checkouts, build results, and the shared compiler
+  cache. Choose a parent folder once; the host manages its subdirectories.
 
 ![Host settings with six running jobs, a limit of four, and jobs waiting at each priority.](Images/HostSettings.png)
 
@@ -138,9 +137,28 @@ slots available to waiting jobs. The display refreshes every two seconds.
 Reading the window does not configure an unused pool; **Apply** explicitly
 creates its saved limit if necessary.
 
-Closing the settings window leaves the host and runners running. Storage paths
-are shown for inspection. Select the job-data parent during initial setup;
-the initializer preserves an existing selection rather than moving live data.
+Closing the settings window leaves the host and runners running.
+
+### Change the storage folder
+
+In **Storage**, choose a parent folder with **Choose…**, then choose **Save**.
+Saving keeps running jobs and their storage unchanged. The same field shows
+the saved selection, which takes effect on the next host launch.
+
+Before restarting the host, drain its jobs and stop other tools that use its
+checkouts, build results, or compiler cache. The host copies its `Work`,
+`CompilationCache`, and `Build` directories before starting runner services.
+It updates opted-in runners' work directories, preserves registration
+credentials, and keeps the original files. Existing managed subdirectories
+in a new destination are preserved by refusing the change; choose another
+parent folder instead. Unrelated files in the chosen parent are kept.
+
+If storage cannot be prepared, the host opens Settings with **Needs attention**
+and leaves runner services stopped. The error describes what needs to be
+corrected. Choose and save another folder if necessary, then restart the host
+to retry. A failed change restores original runner settings where possible
+and reports any restoration failure. An interrupted change is restored before
+another attempt; its error remains visible until the next successful launch.
 
 Register another runner with optional custom labels:
 

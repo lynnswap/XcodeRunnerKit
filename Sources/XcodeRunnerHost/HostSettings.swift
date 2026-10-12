@@ -20,7 +20,7 @@ struct RunnerSettingsRow: Identifiable, Sendable {
 
     var id: URL { directory }
 
-    static func read(directory: URL, state: RunnerServiceState, logsDirectory _: URL) -> Self {
+    static func read(directory: URL, state: RunnerServiceState) -> Self {
         struct Registration: Decodable {
             var agentName: String?
         }
@@ -43,10 +43,10 @@ struct RunnerSettingsRow: Identifiable, Sendable {
 
 @MainActor @Observable
 final class HostSettingsModel {
-    let hostRoot: URL
-    let runnersRoot: URL
-    let logsDirectory: URL
+    let installation: HostInstallation
     let pool: HostExecutionPool
+    var hostRoot: URL { installation.hostRoot }
+    var logsDirectory: URL { installation.logsDirectory }
     var hostState = "Starting"
     var runners: [RunnerSettingsRow] = []
     var runnerScanError: String?
@@ -56,13 +56,81 @@ final class HostSettingsModel {
     private(set) var isSaving = false
     private(set) var hasLoadedPoolStatus = false
     var capacityInput = "4"
+    private(set) var activeStorage: HostInstallation.Storage?
+    private(set) var storageError: String?
+    private(set) var storageSaveError: String?
+    private(set) var savedStorageDirectory: URL?
+    private(set) var isSavingStorage = false
+    var storageDirectoryInput = ""
 
-    init(hostRoot: URL, runnersRoot: URL, logsDirectory: URL) throws {
-        self.hostRoot = hostRoot
-        self.runnersRoot = runnersRoot
-        self.logsDirectory = logsDirectory
+    init(installation: HostInstallation) throws {
+        self.installation = installation
         // Reading status does not initialize the pool. Only Apply or a job can do that.
-        self.pool = try HostExecutionPool(directory: hostRoot.appending(path: "Pool"), initialCapacity: 4)
+        self.pool = try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4)
+        do {
+            savedStorageDirectory = try installation.requestedStorageDirectory() ?? installation.storage()?.directory
+            storageDirectoryInput = savedStorageDirectory?.path(percentEncoded: false) ?? ""
+        } catch {
+            storageSaveError = "Could not read the saved storage folder: \(error.localizedDescription)"
+        }
+    }
+
+    var storageMessage: String {
+        if let savedStorageDirectory, savedStorageDirectory != activeStorage?.directory {
+            return "Saved for the next host launch. Running jobs continue using their current storage."
+        }
+        if activeStorage != nil { return "Runner checkouts, build results, and the shared compiler cache use this folder." }
+        return "Choose one folder for runner checkouts, build results, and the shared compiler cache."
+    }
+
+    func storageDidBecomeAvailable(_ storage: HostInstallation.Storage) {
+        activeStorage = storage
+        storageError = nil
+        if savedStorageDirectory == nil {
+            savedStorageDirectory = storage.directory
+            storageDirectoryInput = storage.directory.path(percentEncoded: false)
+        }
+    }
+
+    func storagePreparationFailed(_ error: any Error) {
+        storageError = "Could not prepare storage: \(error.localizedDescription)"
+        hostState = "Needs attention"
+    }
+
+    func saveStorageSelection() async {
+        guard !isSavingStorage else { return }
+        guard storageDirectoryInput.hasPrefix("/") else {
+            storageSaveError = "Enter an absolute folder path or choose a folder."
+            return
+        }
+        isSavingStorage = true
+        defer { isSavingStorage = false }
+        do {
+            let directory = try await installation.requestStorageDirectory(URL(filePath: storageDirectoryInput))
+            savedStorageDirectory = directory
+            storageDirectoryInput = directory.path(percentEncoded: false)
+            storageSaveError = nil
+        } catch {
+            storageSaveError = "Could not save the storage folder: \(error.localizedDescription)"
+        }
+    }
+
+    func chooseStorageDirectory() async {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Storage Folder"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        let response: NSApplication.ModalResponse
+        if let window = NSApplication.shared.keyWindow {
+            response = await panel.beginSheetModal(for: window)
+        } else {
+            response = await panel.begin()
+        }
+        if response == .OK, let directory = panel.url {
+            storageDirectoryInput = directory.path(percentEncoded: false)
+        }
     }
 
     var admissionMessage: String {
@@ -122,6 +190,23 @@ struct HostSettingsView: View {
     var body: some View {
         ScrollView {
             Form {
+                Section("Storage") {
+                    TextField("Storage folder", text: $model.storageDirectoryInput)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("storage-folder")
+                    HStack {
+                        Button("Choose…") { Task { await model.chooseStorageDirectory() } }
+                            .accessibilityIdentifier("choose-storage-folder")
+                        Button(model.isSavingStorage ? "Saving…" : "Save") { Task { await model.saveStorageSelection() } }
+                            .accessibilityIdentifier("save-storage-folder")
+                    }
+                    .disabled(model.isSavingStorage || model.hostState == "Stopping")
+                    Text(model.storageMessage).font(.callout).foregroundStyle(.secondary)
+                    Text("A changed folder is applied before runners start on the next launch. Existing data is copied and its original files are kept. Stop other tools that use these files before restarting the host.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    if let error = model.storageError { errorMessage(error) }
+                    if let error = model.storageSaveError { errorMessage(error) }
+                }
                 Section("Execution Pool") {
                     LabeledContent("Running jobs") {
                         Text(model.poolStatus.map { String($0.activeJobCount) } ?? unavailablePoolValue)
@@ -162,7 +247,7 @@ struct HostSettingsView: View {
                 Section("Runner Services") {
                     LabeledContent("Host", value: model.hostState)
                     if model.runners.isEmpty {
-                        Text("No runners have opted in to this host.")
+                        Text(model.storageError == nil ? "No runners have opted in to this host." : "Runner services have not started because storage needs attention.")
                             .foregroundStyle(.secondary)
                     }
                     ForEach(model.runners) { runner in

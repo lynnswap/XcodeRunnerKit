@@ -49,7 +49,10 @@ def stop_host(host, runners):
 def fixture(root, name):
     directory = root / name
     directory.mkdir()
-    (directory / '.runner').write_text('{}')
+    home = root.parents[2]
+    work = home/'Library/Application Support/XcodeRunnerKit/Storage/Work'/name
+    work.mkdir(parents=True, exist_ok=True)
+    (directory / '.runner').write_text(json.dumps({'agentName': name, 'workFolder': str(work.resolve())}))
     (directory / '.xcode-runner-host').touch()
     (directory / 'worker.py').write_text('''import json, os, signal, time
 from pathlib import Path
@@ -245,4 +248,66 @@ with open(sys.argv[1], 'a+b') as coordinator:
         holder.wait(timeout=10)
     assert not (pool/'capacity').exists(), 'Host status reads configured an unused pool'
 
-print('PASS: multiple runners, separate service groups, discovery, individual-service exclusion, singleton, graceful shutdown, host/helper crash cleanup, immediate service exit, restart, and discovery/removal/shutdown while the pool coordinator is locked')
+with tempfile.TemporaryDirectory(prefix='RunnerHost storage change ') as temporary:
+    root = Path(temporary)
+    home = root/'home'
+    host_root = home/'Library/Application Support/XcodeRunnerKit'
+    runners = home/'Library/XcodeRunnerKit/runners'
+    runners.mkdir(parents=True)
+    first = fixture(runners, 'first')
+    credential = b'unchanged registration credentials'
+    (first/'.credentials').write_bytes(credential)
+    arguments = [executable, '--home-directory', str(home)]
+    with (root/'host.log').open('w') as log:
+        host = subprocess.Popen(arguments, stdout=log, stderr=log)
+        try:
+            wait_for(lambda:(first/'pid.json').exists(), 'Storage fixture runner did not start')
+            original_process = json.loads((first/'pid.json').read_text())
+            original_registration = (first/'.runner').read_bytes()
+            source = Path((host_root/'storage-directory').read_text())
+            for name in ['Work', 'CompilationCache', 'Build']:
+                (source/name/'retained').write_text('preserved job data')
+            destination = root/'New job data'
+            destination.mkdir()
+            (host_root/'requested-storage-directory').write_text(str(destination.resolve()))
+            time.sleep(3)
+            assert alive(original_process['pid']), 'Saving a storage selection stopped an active runner'
+            assert (first/'.runner').read_bytes() == original_registration
+            assert (host_root/'storage-directory').read_text() == str(source)
+            stop_host(host, runners)
+            assert not alive(original_process['pid'])
+            (first/'pid.json').unlink()
+            host = subprocess.Popen(arguments, stdout=log, stderr=log)
+            wait_for(lambda:(first/'pid.json').exists(), 'Runner did not start after storage migration')
+            migrated_process = json.loads((first/'pid.json').read_text())
+            assert migrated_process['storage'] == str(destination.resolve())
+            registration = json.loads((first/'.runner').read_text(encoding='utf-8-sig'))
+            assert registration['workFolder'] == str((destination/'Work/first').resolve())
+            assert (first/'.credentials').read_bytes() == credential
+            for name in ['Work', 'CompilationCache', 'Build']:
+                assert (source/name/'retained').read_text() == 'preserved job data'
+                assert (destination/name/'retained').read_text() == 'preserved job data'
+            collision = root/'Occupied storage'
+            (collision/'Work').mkdir(parents=True)
+            (collision/'Work/foreign').write_text('keep existing data')
+            (host_root/'requested-storage-directory').write_text(str(collision.resolve()))
+            stop_host(host, runners)
+            (first/'pid.json').unlink()
+            host = subprocess.Popen(arguments, stdout=log, stderr=log)
+            time.sleep(3)
+            assert host.poll() is None, 'Storage failure exited the host instead of keeping settings available'
+            assert not (first/'pid.json').exists(), 'A listener started after storage migration failed'
+            assert (host_root/'storage-directory').read_text() == str(destination.resolve())
+            assert (collision/'Work/foreign').read_text() == 'keep existing data'
+            replacement = root/'Replacement storage'
+            replacement.mkdir()
+            (host_root/'requested-storage-directory').write_text(str(replacement.resolve()))
+            stop_host(host, runners)
+            host = subprocess.Popen(arguments, stdout=log, stderr=log)
+            wait_for(lambda:(first/'pid.json').exists(), 'Saving another folder did not recover the next host launch')
+            assert json.loads((first/'pid.json').read_text())['storage'] == str(replacement.resolve())
+            assert (replacement/'Work/retained').read_text() == 'preserved job data'
+        finally:
+            stop_host(host, runners)
+
+print('PASS: runner lifecycle, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')
