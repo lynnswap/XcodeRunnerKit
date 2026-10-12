@@ -138,6 +138,18 @@ struct HostSettingsView: View {
                         Text(model.poolStatus.map { String($0.activeJobCount) } ?? unavailablePoolValue)
                             .monospacedDigit()
                     }
+                    LabeledContent("Waiting jobs (High)") {
+                        Text(model.poolStatus.map { String($0.waitingJobCounts.high) } ?? unavailablePoolValue)
+                            .monospacedDigit()
+                    }
+                    LabeledContent("Waiting jobs (Normal)") {
+                        Text(model.poolStatus.map { String($0.waitingJobCounts.normal) } ?? unavailablePoolValue)
+                            .monospacedDigit()
+                    }
+                    LabeledContent("Waiting jobs (Low)") {
+                        Text(model.poolStatus.map { String($0.waitingJobCounts.low) } ?? unavailablePoolValue)
+                            .monospacedDigit()
+                    }
                     LabeledContent("Current limit") {
                         Text(model.poolStatus.map { String($0.maximumConcurrentJobs) } ?? unavailablePoolValue)
                             .monospacedDigit()
