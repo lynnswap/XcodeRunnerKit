@@ -40,14 +40,14 @@ extension HostInstallation {
         }
         try Task.checkCancellation()
         let requested = try requestedStorageDirectory()
-        let source = try active ?? initializeStorage(at: requested)
-        guard let requested, requested != source.directory else {
-            try validateHostedWorkDirectories(storage: source)
-            return source
+        if let active, let requested, requested != active.directory {
+            let migrated = try migrateStorage(from: active, to: requested)
+            try validateHostedWorkDirectories(storage: migrated)
+            return migrated
         }
-        let migrated = try migrateStorage(from: source, to: requested)
-        try validateHostedWorkDirectories(storage: migrated)
-        return migrated
+        let prepared = try initializeStorage(at: active == nil ? requested : nil)
+        try validateHostedWorkDirectories(storage: prepared)
+        return prepared
     }
 
     private struct RegistrationBackup: Codable {
@@ -113,7 +113,8 @@ extension HostInstallation {
                         for registration in registrations {
                             let runnerName = registration.file.deletingLastPathComponent().lastPathComponent
                             let copiedWork = staged.appending(path: runnerName)
-                            if try copiedWork.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true {
+                            if manager.fileExists(atPath: copiedWork.path(percentEncoded: false)),
+                               try copiedWork.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true {
                                 let originalWork = source.workDirectory.appending(path: runnerName).resolvingSymlinksInPath()
                                 try manager.removeItem(at: copiedWork)
                                 try manager.copyItem(at: originalWork, to: copiedWork)
@@ -126,11 +127,12 @@ extension HostInstallation {
                 try Data(token.utf8).write(to: staged.appending(path: journal.ownershipName), options: .withoutOverwriting)
                 try manager.moveItem(at: staged, to: target.directory.appending(path: name))
             }
+            let workDirectory = try target.workDirectory.compilerCanonicalURL()
             for registration in registrations {
                 try Task.checkCancellation()
                 var object = try registrationObject(registration.data)
                 let name = registration.file.deletingLastPathComponent().lastPathComponent
-                object["workFolder"] = try target.workDirectory.appending(path: name).compilerCanonicalURL().path(percentEncoded: false)
+                object["workFolder"] = workDirectory.appending(path: name).path(percentEncoded: false)
                 var data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
                 if registration.data.starts(with: [0xEF, 0xBB, 0xBF]) { data = Data([0xEF, 0xBB, 0xBF]) + data }
                 try data.write(to: registration.file, options: .atomic)
@@ -209,13 +211,10 @@ extension HostInstallation {
             guard let path = object["workFolder"] as? String, path.hasPrefix("/") else {
                 throw StorageMigrationError("\(directory.lastPathComponent) uses a different work folder from the host. Correct its registration before starting runner services.")
             }
-            var relationship = FileManager.URLRelationship.other
-            try manager.getRelationship(
-                &relationship,
-                ofDirectoryAt: storage.workDirectory.appending(path: directory.lastPathComponent).resolvingSymlinksInPath(),
-                toItemAt: URL(filePath: path).resolvingSymlinksInPath()
-            )
-            guard relationship == .same else {
+            let expected = storage.workDirectory.appending(path: directory.lastPathComponent)
+                .standardizedFileURL.resolvingSymlinksInPath().path(percentEncoded: false)
+            let registered = URL(filePath: path).standardizedFileURL.resolvingSymlinksInPath().path(percentEncoded: false)
+            guard expected == registered else {
                 throw StorageMigrationError("\(directory.lastPathComponent) uses a different work folder from the host. Correct its registration before starting runner services.")
             }
             backups.append(RegistrationBackup(file: file, data: data))

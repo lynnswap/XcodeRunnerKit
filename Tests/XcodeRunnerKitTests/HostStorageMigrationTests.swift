@@ -29,6 +29,39 @@ struct HostStorageMigrationTests {
         return try await installation.requestStorageDirectory(directory)
     }
 
+    @Test func unchangedStoragePreparesMissingManagedDirectoriesBeforeRunnerStartup() async throws {
+        let (root, installation, source) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.removeItem(at: source.directory)
+        let prepared = try await installation.prepareStorageForLaunch()
+        #expect(prepared.directory == source.directory)
+        for directory in [prepared.workDirectory, prepared.compilationCacheDirectory, prepared.buildDirectory] {
+            #expect(try directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true)
+        }
+        #expect(try installation.storage()?.directory == source.directory)
+    }
+
+    @Test func removedManagedWorkFolderCanBeRecreatedByRunnerAfterLaunchOrRelocation() async throws {
+        let (root, installation, source) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = try runner("runner-one", installation: installation, storage: source)
+        let work = source.workDirectory.appending(path: "runner-one")
+        let metadata = directory.appending(path: ".runner")
+        let original = try Data(contentsOf: metadata)
+        try FileManager.default.removeItem(at: work)
+        #expect(try await installation.prepareStorageForLaunch().directory == source.directory)
+        #expect(try Data(contentsOf: metadata) == original)
+        #expect(!FileManager.default.fileExists(atPath: work.path(percentEncoded: false)))
+        let target = try await choose(root.appending(path: "Second"), installation: installation)
+        let migrated = try await installation.prepareStorageForLaunch()
+        #expect(migrated.directory == target)
+        let registration = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: metadata)) as? [String: Any])
+        let newWork = migrated.workDirectory.appending(path: "runner-one")
+        #expect(registration["workFolder"] as? String == newWork.path(percentEncoded: false))
+        try FileManager.default.createDirectory(at: newWork, withIntermediateDirectories: true)
+        #expect(try newWork.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true)
+    }
+
     @Test func savedSelectionDoesNotChangeRunningStorageAndCopiesOnNextLaunch() async throws {
         let (root, installation, source) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

@@ -168,7 +168,9 @@ bash Scripts/install-github-runner.sh OWNER/REPO runner-name /path/to/runner.tar
   "xcode-runnerkit"
 ```
 
-To move an existing runner, drain its jobs, then run:
+To enable the common host for an existing runner, its registered work folder
+must already use the configured storage's `Work/<runner-name>` location as a
+physical absolute path. Drain its jobs, then run:
 
 ```sh
 bash Scripts/enable-hosted-runner.sh "$HOME/Library/XcodeRunnerKit/runners/runner-name"
@@ -179,6 +181,10 @@ and registration credentials, and creates `.xcode-runner-host` as the opt-in
 marker. It backs up the service path and plist with a `.before-host` suffix.
 The host discovers changes within two seconds. A runner with an individual
 `.service` is excluded to avoid starting duplicate listeners.
+For runners registered with other work locations, use the
+[main installer](#register-repository-runners) with a new installation name.
+It registers the managed work location; preserve any existing checkout data
+until that new runner is ready.
 Setup waits for the previous service's processes to exit before enabling host
 discovery. Keep `stop-runner-service.py` beside the setup scripts when copying
 them to another Mac.
