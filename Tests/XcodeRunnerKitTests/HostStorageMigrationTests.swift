@@ -64,6 +64,31 @@ struct HostStorageMigrationTests {
         #expect(try newWork.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true)
     }
 
+    @Test func unavailableStorageParentPreservesPendingChangeUntilSourceReturns() async throws {
+        let (root, installation, source) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let registration = try runner("runner-one", installation: installation, storage: source)
+        let file = registration.appending(path: ".runner")
+        let original = try Data(contentsOf: file)
+        let data = Data("retained build output".utf8)
+        try data.write(to: source.buildDirectory.appending(path: "output"))
+        let target = try await choose(root.appending(path: "Second"), installation: installation)
+        let unavailable = root.appending(path: "Disconnected storage")
+        try FileManager.default.moveItem(at: source.directory, to: unavailable)
+        await #expect(throws: (any Error).self) { try await installation.prepareStorageForLaunch() }
+        #expect(try installation.storage()?.directory == source.directory)
+        #expect(try installation.requestedStorageDirectory() == target)
+        #expect(try Data(contentsOf: file) == original)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: target.path(percentEncoded: false)).isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: installation.hostRoot.appending(path: "storage-migration.json").path(percentEncoded: false)))
+        #expect(try Data(contentsOf: unavailable.appending(path: "Build/output")) == data)
+        try FileManager.default.moveItem(at: unavailable, to: source.directory)
+        let migrated = try await installation.prepareStorageForLaunch()
+        #expect(migrated.directory == target)
+        #expect(try Data(contentsOf: migrated.buildDirectory.appending(path: "output")) == data)
+        #expect(try Data(contentsOf: source.buildDirectory.appending(path: "output")) == data)
+    }
+
     @Test func savedSelectionDoesNotChangeRunningStorageAndCopiesOnNextLaunch() async throws {
         let (root, installation, source) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
