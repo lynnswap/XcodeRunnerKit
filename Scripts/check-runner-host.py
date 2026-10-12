@@ -62,7 +62,9 @@ def stop(*args):
 signal.signal(signal.SIGINT, stop)
 signal.signal(signal.SIGTERM, stop)
 pending = Path('pid.pending')
-pending.write_text(json.dumps({'pid':os.getpid(), 'group':os.getpgrp()}))
+pending.write_text(json.dumps({'pid':os.getpid(), 'group':os.getpgrp(),
+                              'storage':os.environ.get('XCODE_RUNNER_HOST_STORAGE_DIRECTORY'),
+                              'hostRoot':os.environ.get('XCODE_RUNNER_HOST_ROOT')}))
 pending.replace('pid.json')
 while True: time.sleep(1)
 ''')
@@ -79,19 +81,24 @@ wait "$PID"
 
 with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as temporary:
     root = Path(temporary)
-    runners = root / 'runners'
-    runners.mkdir()
-    first = fixture(runners, 'first')
+    home = root / 'home'
+    host_root = home/'Library/Application Support/XcodeRunnerKit'
+    runners = home/'Library/XcodeRunnerKit/runners'
+    runners.mkdir(parents=True)
+    first = fixture(runners, '.hidden-first')
     excluded = fixture(runners, 'individual')
     (excluded / '.service').touch()
-    arguments = [executable, '--runners-root', str(runners), '--host-root', str(root/'host'), '--logs-directory', str(root/'logs')]
+    arguments = [executable, '--home-directory', str(home)]
     with (root/'host.log').open('w') as log:
         host = subprocess.Popen([Path(executable).name]+arguments[1:], cwd=root,
                                 env={**os.environ, 'PATH':str(Path(executable).parent)+os.pathsep+os.environ['PATH']},
                                 stdout=log, stderr=log)
         try:
-            wait_for(lambda:(first/'pid.json').exists(), 'First runner did not start')
+            wait_for(lambda:(first/'pid.json').exists(), 'Hidden runner did not start')
             first_pid = json.loads((first/'pid.json').read_text())['pid']
+            first_environment = json.loads((first/'pid.json').read_text())
+            assert first_environment['storage'] == str((host_root/'Storage').resolve())
+            assert Path(first_environment['hostRoot']).resolve() == host_root.resolve()
             assert not (excluded/'pid.json').exists()
             duplicate = subprocess.run(arguments, capture_output=True, timeout=10)
             assert duplicate.returncode != 0 and b'Another runner host' in duplicate.stderr
@@ -136,7 +143,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
             (crashed/'.xcode-runner-host').unlink()
             instant = fixture(runners, 'instant-exit')
             (instant/'runsvc.sh').write_text('#!/bin/bash\nexit 0\n')
-            instant_log = root/'logs/instant-exit.log'
+            instant_log = host_root/'logs/runners/instant-exit.log'
             wait_for(lambda:instant_log.exists() and 'Official runner service ended' in instant_log.read_text(), 'Immediate service exit was not observed')
             (first/'.xcode-runner-host').unlink()
             wait_for(lambda:(first/'stopped').exists() and not alive(first_pid), 'Removed runner did not stop')
@@ -180,7 +187,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     finally:
         subprocess.run(['launchctl','bootout',target],check=True)
     wait_for(lambda:not alive(restarted['pid']), 'Runner survived service removal')
-    assert not (root/'host/Pool').exists(), 'Host status reads configured an unused pool'
+    assert not (host_root/'Pool').exists(), 'Host status reads configured an unused pool'
 
     subprocess.run(['bash',str(scripts/'build-runner-host.sh'),'-',str(root/'packaging'),executable],check=True,capture_output=True)
     tools = root/'tools'
@@ -195,9 +202,11 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
 
 with tempfile.TemporaryDirectory(prefix='RunnerHost blocked pool ') as temporary:
     root = Path(temporary)
-    runners = root/'runners'
-    runners.mkdir()
-    pool = root/'host/Pool'
+    home = root/'home'
+    host_root = home/'Library/Application Support/XcodeRunnerKit'
+    runners = home/'Library/XcodeRunnerKit/runners'
+    runners.mkdir(parents=True)
+    pool = host_root/'Pool'
     pool.mkdir(parents=True)
     ready = root/'pool-held'
     holder = subprocess.Popen([sys.executable, '-c', '''import fcntl, sys, time
@@ -213,7 +222,7 @@ with open(sys.argv[1], 'a+b') as coordinator:
     try:
         wait_for(ready.exists, 'External process did not hold the pool coordinator')
         first = fixture(runners, 'first')
-        arguments = [executable, '--runners-root', str(runners), '--host-root', str(root/'host'), '--logs-directory', str(root/'logs')]
+        arguments = [executable, '--home-directory', str(home)]
         with (root/'host.log').open('w') as log:
             host = subprocess.Popen(arguments, stdout=log, stderr=log)
             try:
@@ -236,4 +245,4 @@ with open(sys.argv[1], 'a+b') as coordinator:
         holder.wait(timeout=10)
     assert not (pool/'capacity').exists(), 'Host status reads configured an unused pool'
 
-print('PASS: multiple runners, separate service groups, discovery, individual-service exclusion, singleton, graceful shutdown, host/helper crash cleanup, immediate service exit, restart, and discovery/removal/shutdown while the pool coordinator is locked')
+print('PASS: multiple runners, separate service groups, hidden runner discovery, individual-service exclusion, singleton, graceful shutdown, host/helper crash cleanup, immediate service exit, restart, and discovery/removal/shutdown while the pool coordinator is locked')

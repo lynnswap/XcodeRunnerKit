@@ -2,35 +2,13 @@
 set -euo pipefail
 umask 077
 
-executable=${1:?Usage: install-host-tools.sh EXECUTABLE SOURCE_COMMIT [HOST_ROOT] [COMPILATION_CACHE_DIRECTORY]}
+executable=${1:?Usage: install-host-tools.sh EXECUTABLE SOURCE_COMMIT [STORAGE_DIRECTORY]}
 source_commit=${2:?Specify the verified XcodeRunnerKit source commit}
-host_root=${3:-"$HOME/Library/Application Support/XcodeRunnerKit"}
-mkdir -p "$host_root"
-host_root="$(cd "$host_root" && pwd -P)"
-cache_directory=${4:-"$host_root/CompilationCache"}
-python3 - "$host_root" "$cache_directory" <<'PY'
-from pathlib import Path
-import sys
-import tempfile
-
-cache = Path(sys.argv[1]) / "CompilationCache"
-destination = Path(sys.argv[2]).expanduser().absolute()
-relocating = cache.resolve() != destination.resolve()
-if relocating and (cache.is_symlink() or cache.exists()):
-    if not cache.is_dir() or any(cache.iterdir()):
-        raise RuntimeError(f"Preserve or move the existing cache at {cache} before changing its location")
-destination.mkdir(parents=True, exist_ok=True)
-destination = destination.resolve()
-with tempfile.TemporaryFile(dir=destination):
-    pass
-if relocating:
-    with tempfile.TemporaryDirectory(prefix=".cache-link-", dir=cache.parent) as staging:
-        link = Path(staging) / "CompilationCache"
-        link.symlink_to(destination, target_is_directory=True)
-        if cache.exists() and not cache.is_symlink():
-            cache.rmdir()
-        link.replace(cache)
-PY
+if [[ $# -gt 3 ]]; then echo "Usage: install-host-tools.sh EXECUTABLE SOURCE_COMMIT [STORAGE_DIRECTORY]" >&2; exit 2; fi
+configuration=(host storage configure --json)
+if [[ $# -eq 3 ]]; then configuration+=(--directory "$3"); fi
+layout=$("$executable" "${configuration[@]}")
+host_root=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hostRoot"])' <<< "$layout")
 mkdir -p "$host_root/bin" "$host_root/Pool" "$host_root/logs" "$HOME/Library/LaunchAgents"
 if [[ -f "$host_root/bin/xcode-runner" ]]; then
     cp -p "$host_root/bin/xcode-runner" "$host_root/bin/xcode-runner.previous"

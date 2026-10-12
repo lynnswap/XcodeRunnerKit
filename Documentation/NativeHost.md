@@ -31,20 +31,23 @@ Build a verified XcodeRunnerKit checkout and install its executable on the host:
 ```sh
 DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer \
 swift build -c release --product xcode-runner
-bash Scripts/install-host-tools.sh .build/release/xcode-runner "$(git rev-parse HEAD)"
+bash Scripts/install-host-tools.sh .build/release/xcode-runner \
+  "$(git rev-parse HEAD)" /path/to/JobData
 ```
 
-The default host root is `~/Library/Application Support/XcodeRunnerKit`.
-The installer keeps the previous executable for rollback and records the source
-commit. Its user LaunchAgent runs `caffeinate -i -s` to prevent idle sleep and
-system sleep on AC power. It requires the CI user's GUI launchd domain.
+The optional third argument selects one parent directory for runner work,
+compilation cache, and build outputs. Omit it to use the managed default.
+Internal tools, credentials, execution pool, and service logs remain in managed
+locations under the user's home directory. The installer keeps the previous
+executable for rollback and records the source commit. Its user LaunchAgent runs
+`caffeinate -i -s` to prevent idle sleep and system sleep on AC power. It requires
+the CI user's GUI launchd domain.
 
 ## Register repository runners
 
-For one privacy identity across repository runners, install the signed
-[common host app](#common-host-app) before registering runners and pass `host`
-as the installer's seventh argument. The default `individual` mode retains
-the official per-runner LaunchAgents described below.
+Install the signed [common host app](#common-host-app) before registering runners.
+The installer opts every new repository runner into that host, so its child
+processes share one app identity for macOS privacy permissions.
 
 For a personal GitHub account, register runners separately for each repository.
 An organization can instead provide organization runners with appropriate
@@ -54,8 +57,7 @@ the shared pool controls how many Xcode payloads execute.
 The installer pins the initial official macOS ARM64 runner to v2.338.0 and
 verifies its release asset checksum. Download that archive from
 [the official release](https://github.com/actions/runner/releases/tag/v2.338.0).
-Copy the archive, installer, and both `cleanup-runner-temp` scripts from
-`Scripts` to the same directory on the CI Mac.
+Copy the archive and the contents of `Scripts` to the CI Mac.
 
 On an authenticated controller with repository administration access, obtain a
 short-lived registration token and send it directly to the host installer:
@@ -67,17 +69,15 @@ ssh CI_HOST 'bash "$HOME/Library/Caches/install-github-runner.sh" OWNER/REPO run
 
 The controller's GitHub credential stays on the controller. The host keeps the
 official runner's generated registration credentials. Each runner is installed
-under `~/Library/XcodeRunnerKit/runners/<runner-name>`, with its own `_work` directory and an
-official service plist in `~/Library/LaunchAgents`. Runner installation and hook
+under `~/Library/XcodeRunnerKit/runners/<runner-name>`. Its checkout and temporary
+data use `<job-data>/Work/<runner-name>`. Runner installation and hook
 paths must contain no whitespace. Work directories use physical absolute paths;
 if they contain spaces, quote the script placeholder in every consumer workflow
-as shown below. Toolkit tools, keys, and CAS can remain in the
-Application Support path. Installation starts the
-service in `gui/<CI-user-uid>`. If startup fails, the installer reports the
-registered runner and installed plist so they can be started after GUI login.
+as shown below. The common host discovers the new registration and starts its
+service in the CI user's GUI session.
 
 The default labels include `self-hosted`, `macOS`, `ARM64`, and
-`xcode-runnerkit`. The optional sixth argument selects comma-separated custom
+`xcode-runnerkit`. The optional fourth argument selects comma-separated custom
 labels. Keep the labels selected by consumer workflows in that list; hardware
 or host-specific labels belong in the installation configuration.
 
@@ -87,7 +87,7 @@ or host-specific labels belong in the installation configuration.
 runner services as child processes. One user LaunchAgent starts the app in the
 CI user's GUI session. Runner installations, registration credentials, hooks,
 work directories, and the shared compilation cache remain outside its bundle.
-The app shares the existing execution pool through the workflows' CLI options
+The app supplies its active storage and execution pool to descendant CLI commands
 and provides a settings window for its live limit. GitHub's listener, service
 retries, and automatic updates continue to run in the official runner.
 
@@ -111,10 +111,9 @@ runners:
 bash Scripts/install-runner-host.sh /path/to/XcodeRunnerHost.app
 ```
 
-Optional arguments select the runner installation root, host root, and apps
-directory. Defaults are `~/Library/XcodeRunnerKit/runners`,
-`~/Library/Application Support/XcodeRunnerKit`, and `~/Applications`. Updating
-the app stops its services, so first drain hosted jobs. The previous app is kept
+The app is installed in `~/Applications`; registration and control directories
+are managed automatically. Updating the app stops its services, so first drain
+hosted jobs. The previous app is kept
 as `XcodeRunnerHost.previous.app`.
 
 Click the hammer icon in the menu bar and choose **Settings…**. The window shows:
@@ -125,11 +124,6 @@ Click the hammer icon in the menu bar and choose **Settings…**. The window sho
   submitted through other runner processes.
 - Opted-in runners and the state of their local service processes. GitHub
   connection and job status remain available on GitHub.
-- The host data, pool, compilation cache, runner installations, service logs,
-  and each runner's registered work directory. Folder buttons reveal their
-  physical locations in Finder, including cache symlink destinations.
-
-![Host settings with six running jobs, a limit of four, and jobs waiting at each priority.](Images/HostSettings.png)
 
 Enter a positive whole number and choose **Apply** to change the execution
 limit without restarting the host or runners. Decreasing from six to four
@@ -139,20 +133,16 @@ slots available to waiting jobs. The display refreshes every two seconds.
 Reading the window does not configure an unused pool; **Apply** explicitly
 creates its saved limit if necessary.
 
-Closing the settings window leaves the host and runners running. Storage paths
-are shown for inspection; use the installation scripts and the migration
-procedure below to move storage or register another runner. A directly launched
-host accepts `--host-root` separately from `--runners-root` and
-`--logs-directory`. Keep the host root consistent with the workflows' pool and
-cache paths.
+Closing the settings window leaves the host and runners running.
+Select the job-data parent during initial setup;
+the initializer preserves an existing selection rather than moving live data.
 
-For a newly registered runner, add `host` after the labels argument:
+Register another runner with optional custom labels:
 
 ```sh
 # Supply the registration token on stdin as in the registration example.
 bash Scripts/install-github-runner.sh OWNER/REPO runner-name /path/to/runner.tar.gz \
-  "$HOME/Library/XcodeRunnerKit/runners" "/Volumes/BuildStorage/CI/Work/runner-name" \
-  "xcode-runnerkit" host
+  "xcode-runnerkit"
 ```
 
 To move an existing runner, drain its jobs, then run:
@@ -196,61 +186,59 @@ the helper so its group identifier cannot be reused during cleanup.
 The ownership lock is inherited by the service processes. A replacement host
 waits for old services to finish shutting down before starting new listeners.
 
-To return a runner to the individual mode, remove its `.xcode-runner-host`
-marker, wait for its common-host service to stop, then run `./svc.sh install`
-and bootstrap the installed plist in `gui/<uid>`. Do not run both service modes
-for one registration.
-
 ## Storage locations
 
 XcodeRunnerKit explicitly passes `-derivedDataPath`, so Xcode's GUI DerivedData
-preference does not select native CI storage. The workflow's
-`--output-directory` contains a UUID directory for each operation, including
-DerivedData, the result bundle, and the log. Dependency checkouts in
-`RUNNER_TEMP` follow the official runner's work directory.
-
-Keep the runner installation, tools, credentials, and host pool on the internal
-disk. To place job data and the shared CAS on another disk:
-
-1. Create a CI directory on the mounted disk and keep that disk mounted while
-   the services run. Use physical work paths: conditional Git credential
-   includes used by checkout actions do not reliably match symlink aliases. In the CI user's GUI session,
-   allow macOS's removable-volume access prompt for the runner or its shell.
-   A service can wait for this prompt during work-directory validation; confirm
-   each configured service connects after permission is granted.
-2. Pass a separate work directory for each runner as the installer's fifth
-   argument. Relative input is based on the runner installation. Setup creates
-   the directory, confirms it is writable, and stores its physical absolute path
-   before registration. A work path containing spaces requires a quoted workflow
-   shell template.
-3. Pass the shared CAS directory as the host-tool installer's fourth argument.
-   It keeps `<host-root>/CompilationCache` as a symlink to that directory, so
-   existing consumer workflows keep using the same path.
-
-For example, with a mounted CI storage directory:
+preference does not select native CI storage. Choose one job-data parent during
+initial setup, for example `/Volumes/BuildStorage/CI`:
 
 ```sh
-ci_root="$HOME/Library/Application Support/XcodeRunnerKit"
 bash Scripts/install-host-tools.sh .build/release/xcode-runner \
-  "$(git rev-parse HEAD)" "$ci_root" "/Volumes/BuildStorage/CI/CompilationCache"
-
-# Send the registration token on stdin as in the registration example.
-bash Scripts/install-github-runner.sh OWNER/REPO runner-name \
-  /path/to/actions-runner-osx-arm64-2.338.0.tar.gz \
-  "$HOME/Library/XcodeRunnerKit/runners" "/Volumes/BuildStorage/CI/Work/runner-name"
+  "$(git rev-parse HEAD)" /Volumes/BuildStorage/CI
+"$HOME/Library/Application Support/XcodeRunnerKit/bin/xcode-runner" host storage status --json
 ```
 
-The cache installer preserves an existing cache. If its location changes and
-the old directory contains data, setup stops before replacing it. Drain and
-stop all cache users, copy the data to the new location, and retain the old
-directory for rollback before configuring the link. Never point simultaneous
-runners at the same work directory or DerivedData directory.
+Omitting the directory uses
+`~/Library/Application Support/XcodeRunnerKit/Storage`. The selected parent has
+three managed subdirectories:
 
-For an existing runner, stop its service before copying the work directory.
-Back up its `.runner` file and update only `workFolder` to the new absolute,
-physical path; retain the registration and credentials. Verify the new
-physical storage and native jobs before removing the old copy. Rollback restores
-the saved `.runner` and cache location while all users are stopped.
+| Directory | Contents |
+| --- | --- |
+| `Work/<runner-name>` | Repository checkouts, dependency checkouts, and runner temporary data. |
+| `CompilationCache` | Shared compiler CAS. |
+| `Build/<operation-UUID>` | DerivedData, `xcodebuild.log`, and result bundles for one operation. |
+
+New registrations use the physical `Work/<runner-name>` path under the selected
+parent. If an earlier registration uses a different work path, reconfigure it
+explicitly while it is stopped. Setup does not relocate running registrations.
+
+Initial setup can create the selected parent and its managed directories. It
+checks write access and preserves existing contents and permissions. New managed
+directories have owner-only permissions. Later setup and host startup require
+the saved parent to exist; they can recreate missing managed subdirectories but
+do not recreate an unavailable parent. Restore the parent or mount its volume
+before retrying. Repeating setup with the same parent updates tools without
+moving data. Selecting a different parent after initialization fails before
+changing the active configuration; the initializer does not migrate live data.
+An existing cache alias is preserved, including its target.
+
+The host captures the active storage and internal control root when it starts.
+It passes that snapshot to its runner processes. Their CLI operations use the
+managed Build directory, compilation cache, and shared pool without additional
+workflow flags. An unused host pool starts with capacity four; its saved limit
+takes precedence thereafter. Explicit `--output-directory`,
+`--compilation-cache`, and pool options still override these defaults. Standalone
+CLI commands retain their own defaults and do not read host configuration.
+Operations using managed paths require the saved parent to remain available
+when creating artifacts, including after waiting in the shared pool. If it has
+disappeared, the operation fails without recreating the parent.
+
+Keep removable storage mounted while the services run, and allow the initial
+**XcodeRunnerHost** volume-access prompt in the GUI session. Work directories
+are stored as physical absolute paths because conditional Git credential
+includes used by checkout actions do not reliably match symlink aliases.
+Each runner gets a separate work directory, and each operation gets separate
+DerivedData.
 
 The default Actions bash template does not quote its script placeholder.
 For work paths containing spaces, each consumer workflow must select:
@@ -261,9 +249,8 @@ defaults:
     shell: 'bash --noprofile --norc -e -o pipefail "{0}"'
 ```
 
-Keep the physical work path even when using a space-free alias for other host
-data. Choosing a symlink alias to avoid shell quoting can break private-repository
-checkout authentication.
+Choosing a symlink alias to avoid shell quoting can break private-repository
+checkout authentication; retain the physical work path.
 
 ## Temporary-directory cleanup
 
@@ -286,7 +273,8 @@ Forcefully terminating the runner can prevent hooks from running.
 Check cache configuration, existing-data preservation, and temporary links with:
 
 ```sh
-python3 Scripts/check-host-setup.py
+DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer \
+python3 Scripts/check-host-setup.py /absolute/path/to/xcode-runner
 ```
 
 ## Configure private SwiftPM dependencies
@@ -335,13 +323,10 @@ workflows; reviewing or merging code does not make the native host a sandbox.
 All repositories use:
 
 ```sh
-ci_root="$HOME/Library/Application Support/XcodeRunnerKit"
+ci_root="$XCODE_RUNNER_HOST_ROOT"
 exec "$ci_root/bin/xcode-runner" test \
   --package "$GITHUB_WORKSPACE" --scheme PackageName \
   --destination 'platform=macOS,arch=arm64' \
-  --pool-directory "$ci_root/Pool" --maximum-concurrent-jobs 2 \
-  --compilation-cache "$ci_root/CompilationCache" \
-  --output-directory "$RUNNER_TEMP/XcodeRunnerOutput" \
   -- -parallel-testing-enabled NO -jobs 4
 ```
 
@@ -357,27 +342,24 @@ directly to the CLI. For example, a workflow calling the script above uses
 group and then deletes its owned Simulator before releasing the pool slot.
 Waiting shells do not automatically forward signals to their child commands.
 
-Consumer workflows should upload logs and result bundles with short retention.
-GitHub runner temporary directories are cleaned after jobs; download needed
-artifacts before they expire. Native-host CAS files stay outside job temporary directories; the host root's
-`CompilationCache` path can point to another disk. The package's hosted CI uses job-local CAS
-and one-day artifact retention.
+The CLI prints log and result-bundle paths. Consumer workflows should upload
+those artifacts with short retention and apply a local retention policy to
+`Build`; build outputs are separate from the official runner's temporary-directory
+cleanup. Native-host CAS files also stay outside job temporary directories.
+The package's hosted CI uses job-local CAS and one-day artifact retention.
 
 ## Service operations and recovery
 
-Runner service stdout/stderr are in `~/Library/Logs/actions.runner.*`.
+Runner service logs are in
+`~/Library/Application Support/XcodeRunnerKit/logs/runners`.
 The official runner's `_diag` directory contains listener and worker diagnostics.
 Xcode output logs and result bundles are in the operation's output directory.
 
-In a runner installation directory, use `./svc.sh status` to inspect the service.
-For explicit GUI-domain control, read the installed plist from `.service` and
-use its label:
+Inspect or restart the common host in the GUI launchd domain:
 
 ```sh
-plist="$(cat .service)"
-label="$(/usr/libexec/PlistBuddy -c 'Print Label' "$plist")"
-launchctl print "gui/$(id -u)/$label"
-launchctl kickstart -k "gui/$(id -u)/$label"
+launchctl print "gui/$(id -u)/dev.lynnswap.XcodeRunnerHost"
+launchctl kickstart -k "gui/$(id -u)/dev.lynnswap.XcodeRunnerHost"
 ```
 
 Change the pool limit live from the common host's settings window. Stop accepting

@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import Observation
 import SwiftUI
@@ -16,34 +15,25 @@ struct RunnerSettingsRow: Identifiable, Sendable {
     let directory: URL
     let name: String
     let state: RunnerServiceState
-    let workDirectory: URL?
-    let log: URL?
     let configurationError: String?
 
     var id: URL { directory }
 
-    static func read(directory: URL, state: RunnerServiceState, logsDirectory: URL) -> Self {
+    static func read(directory: URL, state: RunnerServiceState) -> Self {
         struct Registration: Decodable {
             var agentName: String?
-            var workFolder: String?
         }
-        let log = state == .individualService ? nil : logsDirectory.appending(path: directory.lastPathComponent + ".log")
         do {
             let registration = try JSONDecoder().decode(
                 Registration.self, from: Data(contentsOf: directory.appending(path: ".runner"))
             )
             return Self(
                 directory: directory, name: registration.agentName ?? directory.lastPathComponent, state: state,
-                workDirectory: registration.workFolder.map {
-                    let installation = URL(filePath: directory.path(percentEncoded: false), directoryHint: .isDirectory)
-                    return URL(filePath: $0, directoryHint: .isDirectory, relativeTo: installation).standardizedFileURL
-                },
-                log: log, configurationError: nil
+                configurationError: nil
             )
         } catch {
             return Self(
-                directory: directory, name: directory.lastPathComponent, state: state, workDirectory: nil,
-                log: log,
+                directory: directory, name: directory.lastPathComponent, state: state,
                 configurationError: "Could not read this runner’s settings: \(error.localizedDescription)"
             )
         }
@@ -52,9 +42,6 @@ struct RunnerSettingsRow: Identifiable, Sendable {
 
 @MainActor @Observable
 final class HostSettingsModel {
-    let hostRoot: URL
-    let runnersRoot: URL
-    let logsDirectory: URL
     let pool: HostExecutionPool
     var hostState = "Starting"
     var runners: [RunnerSettingsRow] = []
@@ -66,15 +53,10 @@ final class HostSettingsModel {
     private(set) var hasLoadedPoolStatus = false
     var capacityInput = "4"
 
-    init(hostRoot: URL, runnersRoot: URL, logsDirectory: URL) throws {
-        self.hostRoot = hostRoot
-        self.runnersRoot = runnersRoot
-        self.logsDirectory = logsDirectory
+    init(hostRoot: URL) throws {
         // Reading status does not initialize the pool. Only Apply or a job can do that.
         self.pool = try HostExecutionPool(directory: hostRoot.appending(path: "Pool"), initialCapacity: 4)
     }
-
-    var compilationCache: URL { hostRoot.appending(path: "CompilationCache") }
 
     var admissionMessage: String {
         if !hasLoadedPoolStatus { return "Checking the execution pool…" }
@@ -183,11 +165,6 @@ struct HostSettingsView: View {
                                 Spacer()
                                 Text(runner.state.rawValue).foregroundStyle(.secondary)
                             }
-                            directoryRow("Installation", url: runner.directory)
-                            if let work = runner.workDirectory { directoryRow("Work directory", url: work) }
-                            else { LabeledContent("Work directory", value: "Not available") }
-                            if let log = runner.log { directoryRow("Service log", url: log) }
-                            else { LabeledContent("Service log", value: "Managed by individual service") }
                             if runner.state == .individualService {
                                 Text("This runner uses its individual service. The host does not start another service for it.")
                                     .font(.callout).foregroundStyle(.secondary)
@@ -200,15 +177,6 @@ struct HostSettingsView: View {
                         .font(.callout).foregroundStyle(.secondary)
                     if let error = model.runnerScanError { errorMessage(error) }
                 }
-                Section("Storage") {
-                    directoryRow("Host data", url: model.hostRoot)
-                    directoryRow("Execution pool", url: model.pool.directory)
-                    directoryRow("Compilation cache", url: model.compilationCache)
-                    directoryRow("Runner installations", url: model.runnersRoot)
-                    directoryRow("Runner logs", url: model.logsDirectory)
-                    Text("Storage locations come from the host installation and runner registrations.")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
             }
             .formStyle(.grouped)
         }
@@ -218,23 +186,6 @@ struct HostSettingsView: View {
     private var unavailablePoolValue: String {
         if !model.hasLoadedPoolStatus { return "Checking…" }
         return model.poolError == nil ? "Not configured" : "Unavailable"
-    }
-
-    private func directoryRow(_ title: String, url: URL) -> some View {
-        let physical = url.resolvingSymlinksInPath()
-        return LabeledContent(title) {
-            HStack {
-                Text(physical.path(percentEncoded: false))
-                    .textSelection(.enabled).lineLimit(2).truncationMode(.middle)
-                Button {
-                    NSWorkspace.shared.activateFileViewerSelecting([physical])
-                } label: {
-                    Image(systemName: "folder")
-                }
-                .help("Show in Finder")
-                .accessibilityLabel("Show \(title) in Finder")
-            }
-        }
     }
 
     private func errorMessage(_ message: String) -> some View {

@@ -10,7 +10,6 @@ import subprocess
 parser = argparse.ArgumentParser()
 parser.add_argument("host", help="SSH host alias for the CI Mac")
 parser.add_argument("repository", help="Dependency repository in OWNER/REPO form, using the dependency URL's spelling")
-parser.add_argument("--host-root", default="")
 args = parser.parse_args()
 
 
@@ -22,7 +21,7 @@ repository = github("repos/" + args.repository)["full_name"]
 alias = "xrk-" + hashlib.sha256(repository.lower().encode()).hexdigest()[:16]
 originals = sorted({"https://github.com/" + name + suffix
                     for name in (args.repository, repository) for suffix in ("", ".git")})
-configuration = {"root": args.host_root, "repository": repository, "alias": alias, "originals": originals}
+configuration = {"repository": repository, "alias": alias, "originals": originals}
 host_helper = Path(__file__).with_name("private-dependency-host.py").read_text()
 
 

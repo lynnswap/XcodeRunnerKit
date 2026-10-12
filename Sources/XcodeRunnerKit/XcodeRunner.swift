@@ -5,6 +5,7 @@ import Subprocess
 public struct XcodeRunner: Sendable {
     public var developerDirectory: URL?
     public var executionPool: HostExecutionPool?
+    package var hostStorage: HostInstallation.Storage?
     private let executableURL: URL
     private var simulatorExecutableURL = URL(filePath: "/usr/bin/xcrun")
 
@@ -109,7 +110,15 @@ public struct XcodeRunner: Sendable {
 
         do {
             try Task.checkCancellation()
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let managedOutput = hostStorage.flatMap { request.outputDirectory.path == $0.buildDirectory.path ? $0 : nil }
+            let managedCache = hostStorage.flatMap { request.compilationCache?.directory.path == $0.compilationCacheDirectory.path ? $0 : nil }
+            if let storage = managedOutput ?? managedCache { try storage.requireAvailableParent() }
+            if let managedOutput {
+                try managedOutput.createBuildDirectory()
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            } else {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            }
             try Data().write(to: logURL)
             let handle = try FileHandle(forWritingTo: logURL)
             log = handle
@@ -122,8 +131,14 @@ public struct XcodeRunner: Sendable {
             var commandSource = request.source
             var commandDerivedData = derived
             if let cache = request.compilationCache {
-                try FileManager.default.createDirectory(at: cache.directory, withIntermediateDirectories: true)
-                try FileManager.default.createDirectory(at: derived, withIntermediateDirectories: true)
+                if let managedCache {
+                    try managedCache.createCompilationCacheDirectory()
+                } else {
+                    try FileManager.default.createDirectory(at: cache.directory, withIntermediateDirectories: true)
+                }
+                try FileManager.default.createDirectory(
+                    at: derived, withIntermediateDirectories: managedOutput == nil || request.derivedDataDirectory != nil
+                )
                 commandSource = try request.source.canonicalized()
                 commandDerivedData = try derived.compilerCanonicalURL()
                 buildSettings = cache.buildSettings(sourceDirectory: commandSource.workingDirectory, derivedDataDirectory: commandDerivedData)

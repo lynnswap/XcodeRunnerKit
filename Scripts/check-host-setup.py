@@ -1,11 +1,183 @@
 #!/usr/bin/env python3
-"""Check external cache setup and symlink cleanup without a GUI service."""
+"""Check unified job storage and installers without starting a GUI service."""
+import json
 import os
 from pathlib import Path
+import shutil
+import stat
 import subprocess
+import sys
 import tempfile
+import time
 
 scripts = Path(__file__).resolve().parent
+executable = Path(sys.argv[1]).resolve()
+
+
+def configure(home, directory):
+    return subprocess.run([str(executable), "host", "storage", "configure", "--directory", str(directory), "--json"],
+                          env={**os.environ, "HOME": str(home)}, umask=0o022,
+                          check=True, capture_output=True, text=True)
+
+
+def storage_status(home):
+    result = subprocess.run([str(executable), "host", "storage", "status", "--json"],
+                            env={**os.environ, "HOME": str(home)}, check=True, capture_output=True, text=True)
+    return json.loads(result.stdout)
+
+
+def wait_for(predicate, description, timeout=30):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError(description)
+        time.sleep(0.02)
+
+
+def install_cli(home):
+    installed = home / "Library/Application Support/XcodeRunnerKit/bin/xcode-runner"
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(executable, installed)
+
+
+def compilation_cache_in(log):
+    setting = "COMPILATION_CACHE_CAS_PATH = "
+    return Path(next(line.strip()[len(setting):] for line in log.read_text().splitlines()
+                     if line.strip().startswith(setting))).resolve()
+
+
+with tempfile.TemporaryDirectory(prefix="Host storage permissions ") as temporary:
+    root = Path(temporary)
+    home = root / "home"
+    storage = root / "Selected parent"
+    storage.mkdir(mode=0o750)
+    parent_mode = stat.S_IMODE(storage.stat().st_mode)
+    layout = json.loads(configure(home, storage).stdout)
+    assert stat.S_IMODE(storage.stat().st_mode) == parent_mode
+    for name in ("Work", "CompilationCache", "Build"):
+        assert stat.S_IMODE((storage / name).stat().st_mode) == 0o700
+        shutil.rmtree(storage / name)
+    assert json.loads(configure(home, storage).stdout) == layout
+    assert stat.S_IMODE(storage.stat().st_mode) == parent_mode
+    for name in ("Work", "CompilationCache", "Build"):
+        assert stat.S_IMODE((storage / name).stat().st_mode) == 0o700
+    shutil.rmtree(storage)
+    failure = subprocess.run([str(executable), "host", "storage", "configure", "--json"],
+                             env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=30)
+    assert failure.returncode != 0, "Reinitialization must fail when the saved parent is unavailable"
+    assert not storage.exists(), "Reinitialization recreated an unavailable parent"
+    assert storage_status(home) == layout, "Failed reinitialization changed the active storage record"
+
+
+with tempfile.TemporaryDirectory(prefix="Host storage concurrent initialization ") as temporary:
+    root = Path(temporary)
+    home = root / "home"
+    parents = [root / "First parent", root / "Second parent"]
+    processes = []
+    try:
+        for parent in parents:
+            processes.append(subprocess.Popen(
+                ["/bin/bash", "-c", 'read -r start; exec "$@"', "host-storage-configure",
+                 str(executable), "host", "storage", "configure", "--directory", str(parent), "--json"],
+                env={**os.environ, "HOME": str(home)}, umask=0o022,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+        for process in processes:
+            process.stdin.write("start\n")
+            process.stdin.flush()
+        outputs = [process.communicate(timeout=30) for process in processes]
+        winners = [index for index, process in enumerate(processes) if process.returncode == 0]
+        assert len(winners) == 1, [(process.returncode, outputs[index]) for index, process in enumerate(processes)]
+        winner = winners[0]
+        layout = json.loads(outputs[winner][0])
+        assert layout["storageDirectory"] == str(parents[winner].resolve())
+        assert storage_status(home) == layout
+        assert not parents[1 - winner].exists(), "The rejected initializer prepared its requested parent"
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+
+
+with tempfile.TemporaryDirectory(prefix="Hosted CLI unavailable storage ") as temporary:
+    root = Path(temporary)
+    home = root / "home"
+    storage = root / "Job data"
+    layout = json.loads(configure(home, storage).stdout)
+    offline = root / "Offline job data"
+    environment = {**os.environ, "HOME": str(home),
+                   "XCODE_RUNNER_HOST_STORAGE_DIRECTORY": layout["storageDirectory"],
+                   "XCODE_RUNNER_HOST_ROOT": layout["hostRoot"]}
+    package = root / "BuildProbe"
+    shutil.copytree(scripts.parent / "Tests/Fixtures/BuildProbe", package,
+                    ignore=shutil.ignore_patterns(".build", ".swiftpm"))
+    build = [str(executable), "build", "--package", str(package), "--scheme", "BuildProbe",
+             "--destination", "platform=macOS,arch=arm64", "--", "-jobs", "2"]
+    storage.rename(offline)
+    failure = subprocess.run(build, env=environment, capture_output=True, timeout=30)
+    assert failure.returncode != 0, "A hosted operation accepted its unavailable storage parent"
+    assert not storage.exists(), "A hosted operation recreated its unavailable storage parent"
+    assert not list((offline / "Build").iterdir())
+    assert storage_status(home) == layout
+    offline.rename(storage)
+
+    probe = root / "pool-probe"
+    subprocess.run(["xcrun", "swiftc", "-parse-as-library", "-swift-version", "6",
+                    str(scripts.parent / "Sources/XcodeRunnerKit/HostExecutionPool.swift"),
+                    str(scripts.parent / "Tests/Fixtures/ExecutionPoolProbe.swift"),
+                    "-o", str(probe)], check=True)
+    admission = root / "Admission"
+    admission.mkdir()
+    pool = admission / "pool"
+
+    def pool_status():
+        result = subprocess.run([str(executable), "pool", "status", "--pool-directory", str(pool), "--json"],
+                                env=environment, check=True, capture_output=True, text=True)
+        return json.loads(result.stdout)
+
+    pool_arguments = ["--pool-directory", str(pool), "--maximum-concurrent-jobs", "1"]
+    blocker = subprocess.Popen([str(probe), str(admission), "blocker", "1"],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    queued = None
+    try:
+        wait_for(lambda: (admission / "blocker.started").exists(), "Pool blocker did not acquire its slot")
+        queued = subprocess.Popen(build[:-3] + pool_arguments + build[-3:], env=environment,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        wait_for(lambda: pool_status()["waitingJobCounts"]["medium"] == 1,
+                 "Hosted operation did not wait for the pool")
+        assert queued.poll() is None
+        assert not list((storage / "Build").iterdir())
+        storage.rename(offline)
+        (admission / "blocker.release").touch()
+        stdout, stderr = blocker.communicate(timeout=30)
+        assert blocker.returncode == 0, (stdout, stderr)
+        stdout, stderr = queued.communicate(timeout=30)
+        assert queued.returncode != 0, (stdout, stderr)
+        assert not storage.exists(), "A queued operation recreated its unavailable storage parent"
+        assert not list((offline / "Build").iterdir())
+        status = pool_status()
+        assert status["activeJobCount"] == 0 and not any(status["waitingJobCounts"].values())
+    finally:
+        for process in (queued, blocker):
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate()
+
+    override_build = root / "Override Build"
+    override_cache = root / "Override Cache"
+    result = subprocess.run(build[:-3] + ["--output-directory", str(override_build),
+                            "--compilation-cache", str(override_cache), *pool_arguments, *build[-3:]],
+                            env=environment, check=True, capture_output=True, text=True, timeout=300)
+    log = Path(next(line[5:] for line in result.stdout.splitlines() if line.startswith("Log: ")))
+    assert override_build.resolve() in log.resolve().parents
+    assert compilation_cache_in(log) == override_cache.resolve()
+    assert not storage.exists(), "Explicit paths changed the unavailable managed parent"
+
+
 with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit host setup ") as temporary:
     root = Path(temporary)
     home = root / "home"
@@ -16,55 +188,80 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit host setup ") as tempora
     launchctl.write_text('#!/bin/bash\n[[ "$1" != print ]]\n')
     launchctl.chmod(0o755)
     environment = {**os.environ, "HOME": str(home), "PATH": str(tools) + os.pathsep + os.environ["PATH"]}
-    executable = root / "executable"
-    executable.write_text("test executable")
-    host = root / "Host"
-    cache = root / "External disk" / "Cache"
-    command = ["bash", str(scripts / "install-host-tools.sh"), str(executable), "test-source", str(host), str(cache)]
+    host = home / "Library/Application Support/XcodeRunnerKit"
+    storage = root / "External disk" / "Job data"
+    cache = storage / "CompilationCache"
+    cache.mkdir(parents=True)
+    (cache / "retained").write_text("cache data")
+    host.mkdir(parents=True)
+    (host / "CompilationCache").symlink_to(cache, target_is_directory=True)
+    work = storage / "Work" / "existing-runner"
+    work.mkdir(parents=True)
+    (work / "retained").write_text("work data")
+    existing_modes = {path: stat.S_IMODE(path.stat().st_mode) for path in (storage, cache, work.parent)}
+    command = ["bash", str(scripts / "install-host-tools.sh"), str(executable), "test-source", str(storage)]
     subprocess.run(command, env=environment, check=True, capture_output=True)
     assert (host / "CompilationCache").is_symlink()
     assert (host / "CompilationCache").resolve() == cache.resolve()
-    (cache / "retained").write_text("cache data")
+    assert (storage / "Build").is_dir()
+    assert all(stat.S_IMODE(path.stat().st_mode) == mode for path, mode in existing_modes.items())
+    layout = json.loads(configure(home, storage).stdout)
+    assert layout["storageDirectory"] == str(storage.resolve())
+    assert layout["buildDirectory"] == str((storage / "Build").resolve())
+    assert layout["workDirectory"] == str((storage / "Work").resolve())
     subprocess.run(command, env=environment, check=True, capture_output=True)
     assert (cache / "retained").read_text() == "cache data"
-    failure = subprocess.run(command[:-1] + [str(root / "Different cache")], env=environment, capture_output=True)
+    assert (work / "retained").read_text() == "work data"
+    failure = subprocess.run(command[:-1] + [str(root / "Different storage")], env=environment, capture_output=True)
     assert failure.returncode != 0
     assert (host / "CompilationCache").resolve() == cache.resolve()
     assert (cache / "retained").read_text() == "cache data"
-
-    legacy = root / "Legacy host"
-    subprocess.run(command[:-2] + [str(legacy)], env=environment, check=True, capture_output=True)
-    (legacy / "CompilationCache" / "retained").write_text("legacy data")
-    failure = subprocess.run(command[:-2] + [str(legacy), str(cache)], env=environment, capture_output=True)
-    assert failure.returncode != 0
-    assert (legacy / "CompilationCache" / "retained").read_text() == "legacy data"
-    empty_host = root / "Empty host"
-    empty_cache = root / "Empty external cache"
-    subprocess.run(command[:-2] + [str(empty_host), str(empty_cache)], env=environment, check=True, capture_output=True)
-    moved_empty = root / "Moved empty cache"
-    subprocess.run(command[:-2] + [str(empty_host), str(moved_empty)], env=environment, check=True, capture_output=True)
-    assert (empty_host / "CompilationCache").resolve() == moved_empty.resolve()
-    assert empty_cache.is_dir() and not any(empty_cache.iterdir())
+    assert (work / "retained").read_text() == "work data"
     absent_volume = root / "Absent volume"
     absent_volume.symlink_to(root / "missing-volume", target_is_directory=True)
-    failure = subprocess.run(command[:-2] + [str(empty_host), str(absent_volume / "Cache")], env=environment, capture_output=True)
+    failure = subprocess.run(command[:-1] + [str(absent_volume / "Job data")],
+                             env={**environment, "HOME": str(root / "fresh-home")}, capture_output=True)
     assert failure.returncode != 0
-    assert (empty_host / "CompilationCache").resolve() == moved_empty.resolve()
-    unwritable_cache = root / "Unwritable cache"
-    unwritable_cache.mkdir()
-    unwritable_cache.chmod(0o555)
+    unwritable = root / "Unwritable storage"
+    unwritable.mkdir()
+    unwritable.chmod(0o555)
     try:
-        failure = subprocess.run(command[:-2] + [str(empty_host), str(unwritable_cache)], env=environment, capture_output=True)
+        failure = subprocess.run(command[:-1] + [str(unwritable)],
+                                 env={**environment, "HOME": str(root / "readonly-home")}, capture_output=True)
         assert failure.returncode != 0
-        assert (empty_host / "CompilationCache").resolve() == moved_empty.resolve()
     finally:
-        unwritable_cache.chmod(0o755)
+        unwritable.chmod(0o755)
 
-    nested = empty_host / "CompilationCache" / "nested"
-    expected_nested = nested.resolve()
-    subprocess.run(command[:-2] + [str(empty_host), str(nested)], env=environment, check=True, capture_output=True)
-    assert (empty_host / "CompilationCache").resolve() == expected_nested
-    assert expected_nested.is_dir()
+    package = storage / "Work" / "BuildProbe"
+    shutil.copytree(scripts.parent / "Tests/Fixtures/BuildProbe", package,
+                    ignore=shutil.ignore_patterns(".build", ".swiftpm"))
+    hosted_environment = {**environment, "HOME": str(root / "different-home"),
+                          "XCODE_RUNNER_HOST_STORAGE_DIRECTORY": str(storage.resolve()),
+                          "XCODE_RUNNER_HOST_ROOT": str(host.resolve())}
+    build = [str(executable), "build", "--package", str(package), "--scheme", "BuildProbe",
+             "--destination", "platform=macOS,arch=arm64", "--", "-jobs", "2"]
+    shutil.rmtree(storage / "Build")
+    result = subprocess.run(build, env=hosted_environment, check=True, capture_output=True, text=True, timeout=300)
+    log = Path(next(line[5:] for line in result.stdout.splitlines() if line.startswith("Log: ")))
+    assert (storage / "Build").resolve() in log.parents
+    assert compilation_cache_in(log) == cache.resolve()
+    pool_status = subprocess.run([str(executable), "pool", "status", "--pool-directory", str(host / "Pool"), "--json"],
+                                 env=environment, check=True, capture_output=True, text=True)
+    assert json.loads(pool_status.stdout)["maximumConcurrentJobs"] == 4
+    assert not (root / "different-home").exists()
+    override = root / "Overrides"
+    override_build = override / "Build"
+    override_cache = override / "Cache"
+    override_pool = override / "Pool"
+    result = subprocess.run(build[:-3] + ["--output-directory", str(override_build),
+                            "--compilation-cache", str(override_cache),
+                            "--pool-directory", str(override_pool), "--maximum-concurrent-jobs", "1",
+                            *build[-3:]], env=hosted_environment, check=True, capture_output=True, text=True, timeout=300)
+    log = Path(next(line[5:] for line in result.stdout.splitlines() if line.startswith("Log: ")))
+    assert override_build.resolve() in log.resolve().parents
+    assert compilation_cache_in(log) == override_cache.resolve()
+    assert json.loads(subprocess.run([str(executable), "pool", "status", "--pool-directory", str(override_pool), "--json"],
+                                    env=environment, check=True, capture_output=True, text=True).stdout)["maximumConcurrentJobs"] == 1
 
     runner_temp = root / "work" / "_temp"
     runner_temp.mkdir(parents=True)
@@ -109,7 +306,6 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit host setup ") as tempora
 
 with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit-runner-") as temporary:
     import io
-    import json
     import tarfile
 
     root = Path(temporary)
@@ -126,7 +322,7 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit-runner-") as temporary:
 import json, sys
 from pathlib import Path
 a=sys.argv
-Path('.runner').write_text(json.dumps({'workFolder':a[a.index('--work')+1], 'labels':a[a.index('--labels')+1]}))
+Path('.runner').write_text(json.dumps({'workFolder':a[a.index('--work')+1], 'labels':a[a.index('--labels')+1]}), encoding='utf-8-sig')
 Path('.env').write_text('')
 """
     with tarfile.open(archive, "w:gz") as target:
@@ -137,16 +333,18 @@ Path('.env').write_text('')
             info.mode = 0o755
             target.addfile(info, io.BytesIO(data))
     environment = {**os.environ, "HOME": str(root), "PATH": str(tools) + os.pathsep + os.environ["PATH"]}
-    installation_root = root / "runners"
+    installation_root = root / "Library/XcodeRunnerKit/runners"
     physical_work = root / "External work data"
     physical_work.mkdir()
     work_alias = root / "work-alias"
     work_alias.symlink_to(physical_work, target_is_directory=True)
-    work = work_alias / "fixture"
-    installer = ["bash", str(scripts / "install-github-runner.sh"), "OWNER/REPO", "fixture", str(archive), str(installation_root), str(work), "xcode-runnerkit,custom-host"]
+    configure(root, work_alias)
+    install_cli(root)
+    work = physical_work / "Work" / "fixture"
+    installer = ["bash", str(scripts / "install-github-runner.sh"), "OWNER/REPO", "fixture", str(archive), "xcode-runnerkit,custom-host"]
     subprocess.run(installer, input="fixture-token\n", text=True, env=environment, check=True, capture_output=True)
     installation = installation_root / "fixture"
-    received = json.loads((installation / ".runner").read_text())
+    received = json.loads((installation / ".runner").read_text(encoding="utf-8-sig"))
     assert received == {"workFolder": str(work.resolve()), "labels": "xcode-runnerkit,custom-host"}
     assert work.is_dir()
     credential_fixture = root / "credential-fixture.config"
@@ -164,7 +362,7 @@ Path('.env').write_text('')
     subprocess.run(["bash", str(hook)], env={**environment, "RUNNER_TEMP": str(temporary_data)}, check=True)
     assert not (temporary_data / "dangling").is_symlink()
 
-    hosted = installer[:3] + ["hosted"] + installer[4:6] + [str(physical_work / "hosted"), "xcode-runnerkit", "host"]
+    hosted = ["bash", str(scripts / "install-github-runner.sh"), "OWNER/REPO", "hosted", str(archive), "xcode-runnerkit"]
     subprocess.run(hosted, input="fixture-token\n", text=True, env=environment, check=True, capture_output=True)
     hosted_directory = installation_root / "hosted"
     assert (hosted_directory / ".xcode-runner-host").exists()
@@ -181,18 +379,19 @@ Path('.env').write_text('')
     assert not (installation / ".service").exists()
     assert (installation / ".service.before-host").read_text().strip() == str(service_plist)
     assert service_plist.with_suffix(".plist.before-host").exists()
-    assert json.loads((installation / ".runner").read_text()) == received
+    assert json.loads((installation / ".runner").read_text(encoding="utf-8-sig")) == received
 
     broken = root / "unavailable"
     broken.symlink_to(root / "missing-volume", target_is_directory=True)
-    failure = subprocess.run(installer[:3] + ["unavailable"] + installer[4:6] + [str(broken / "work")], input="fixture-token\n", text=True, env=environment, capture_output=True)
+    (physical_work / "Work" / "unavailable").symlink_to(broken, target_is_directory=True)
+    failure = subprocess.run(installer[:3] + ["unavailable", str(archive)], input="fixture-token\n", text=True, env=environment, capture_output=True)
     assert failure.returncode != 0 and "mkdir" in failure.stderr
     assert not (installation_root / "unavailable").exists()
-    readonly = root / "readonly-work"
+    readonly = physical_work / "Work" / "readonly"
     readonly.mkdir()
     readonly.chmod(0o555)
     try:
-        failure = subprocess.run(installer[:3] + ["readonly"] + installer[4:6] + [str(readonly)], input="fixture-token\n", text=True, env=environment, capture_output=True)
+        failure = subprocess.run(installer[:3] + ["readonly", str(archive)], input="fixture-token\n", text=True, env=environment, capture_output=True)
         assert failure.returncode != 0 and "mktemp" in failure.stderr
         assert not (installation_root / "readonly").exists()
     finally:
@@ -217,12 +416,15 @@ with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
         "CFBundleExecutable": "xcode-runner-host",
     }))
     env = {**os.environ, "HOME": str(home), "PATH": str(tools) + os.pathsep + os.environ["PATH"]}
-    runners, host, applications = root / "runner installations", root / "host data", root / "applications"
-    command = ["bash", str(scripts / "install-runner-host.sh"), str(app), str(runners), str(host), str(applications)]
+    install_cli(home)
+    runners = home / "Library/XcodeRunnerKit/runners"
+    host = home / "Library/Application Support/XcodeRunnerKit"
+    applications = home / "Applications"
+    command = ["bash", str(scripts / "install-runner-host.sh"), str(app)]
     subprocess.run(command, env=env, check=True, capture_output=True)
     plist = plistlib.loads((home / "Library/LaunchAgents/dev.lynnswap.XcodeRunnerHost.plist").read_bytes())
     assert plist["AssociatedBundleIdentifiers"] == ["dev.lynnswap.XcodeRunnerHost"]
-    assert plist["ProgramArguments"] == [str(applications.resolve() / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host"), "--runners-root", str(runners.resolve()), "--host-root", str(host.resolve()), "--logs-directory", str(host.resolve() / "logs/runners")]
+    assert plist["ProgramArguments"] == [str(applications.resolve() / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host")]
     (app / "Contents/MacOS/xcode-runner-host").write_text("updated executable")
     subprocess.run(command, env=env, check=True, capture_output=True)
     assert (applications / "XcodeRunnerHost.previous.app/Contents/MacOS/xcode-runner-host").read_text() == "first executable"
@@ -232,4 +434,4 @@ with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
     assert failure.returncode != 0 and b"certificate signing identity" in failure.stderr
     assert (applications / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host").read_text() == "updated executable"
 
-print("PASS: cache relocation, cleanup, runner storage, common-host opt-in and migration, app installation, update preservation, and signature requirements")
+print("PASS: unified storage, serialized initial selection, unavailable parent rejection at setup and admitted execution, explicit overrides, managed directory recovery and permissions, existing data preservation, cleanup, physical runner work paths, common-host opt-in, app installation, and signature requirements")

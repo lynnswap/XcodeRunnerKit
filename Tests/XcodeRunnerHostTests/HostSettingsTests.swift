@@ -5,10 +5,7 @@ import Testing
 @MainActor
 struct HostSettingsTests {
     private func model(at root: URL) throws -> HostSettingsModel {
-        try HostSettingsModel(
-            hostRoot: root.appending(path: "Host"), runnersRoot: root.appending(path: "Runners"),
-            logsDirectory: root.appending(path: "Separate logs")
-        )
+        try HostSettingsModel(hostRoot: root.appending(path: "Host"))
     }
 
     @Test func readsDoNotConfigurePoolAndApplyUsesHostRoot() async throws {
@@ -27,9 +24,7 @@ struct HostSettingsTests {
         #expect(settings.poolStatus?.maximumConcurrentJobs == 6)
         #expect(settings.poolStatus?.activeJobCount == 0)
         #expect(settings.poolStatus?.waitingJobCounts.total == 0)
-        #expect(settings.pool.directory == settings.hostRoot.appending(path: "Pool"))
-        #expect(settings.compilationCache == settings.hostRoot.appending(path: "CompilationCache"))
-        #expect(!FileManager.default.fileExists(atPath: settings.logsDirectory.appending(path: "Pool").path()))
+        #expect(settings.pool.directory == root.appending(path: "Host/Pool"))
         try FileManager.default.removeItem(at: root)
     }
 
@@ -169,20 +164,18 @@ struct HostSettingsTests {
         try FileManager.default.removeItem(at: root)
     }
 
-    @Test func runnerStorageComesFromRegistration() throws {
+    @Test func runnerNameComesFromRegistrationAndReportsReadFailures() throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         let directory = root.appending(path: "installation")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let metadata = directory.appending(path: ".runner")
-        try Data(#"{"agentName":"repository-runner","workFolder":"../Work data"}"#.utf8).write(to: metadata)
-        let runner = RunnerSettingsRow.read(directory: directory, state: .running, logsDirectory: root.appending(path: "Logs"))
+        try Data(#"{"agentName":"repository-runner"}"#.utf8).write(to: metadata)
+        let runner = RunnerSettingsRow.read(directory: directory, state: .running)
         #expect(runner.name == "repository-runner")
-        #expect(runner.workDirectory == root.appending(path: "Work data", directoryHint: .isDirectory).standardizedFileURL)
         #expect(runner.configurationError == nil)
         try Data("invalid JSON".utf8).write(to: metadata)
-        let invalid = RunnerSettingsRow.read(directory: directory, state: .failed, logsDirectory: root.appending(path: "Logs"))
+        let invalid = RunnerSettingsRow.read(directory: directory, state: .failed)
         #expect(invalid.configurationError != nil)
-        #expect(invalid.workDirectory == nil)
         #expect(invalid.state == .failed)
         try FileManager.default.removeItem(at: root)
     }
@@ -202,26 +195,9 @@ struct HostSettingsTests {
         try FileManager.default.removeItem(at: root)
     }
 
-    @Test func individualServiceDoesNotUseStaleHostLog() throws {
-        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
-        let directory = root.appending(path: "installation")
-        let logs = root.appending(path: "Host logs")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
-        try Data(#"{"agentName":"repository-runner","workFolder":"_work"}"#.utf8).write(to: directory.appending(path: ".runner"))
-        let formerHostLog = logs.appending(path: "installation.log")
-        try Data("Previous host service log".utf8).write(to: formerHostLog)
-        let individual = RunnerSettingsRow.read(directory: directory, state: .individualService, logsDirectory: logs)
-        #expect(individual.log == nil)
-        #expect(individual.configurationError == nil)
-        let hosted = RunnerSettingsRow.read(directory: directory, state: .running, logsDirectory: logs)
-        #expect(hosted.log == formerHostLog)
-        try FileManager.default.removeItem(at: root)
-    }
-
-    @Test func customHostRootDoesNotDependOnLogLocation() throws {
-        let options = try HostOptions.parse(["--host-root", "/tmp/Host data", "--logs-directory", "/tmp/Service logs"])
-        #expect(options.hostRoot == "/tmp/Host data")
-        #expect(options.logsDirectory == "/tmp/Service logs")
+    @Test func installedPathsComeFromOneHomeDirectory() throws {
+        let options = try HostOptions.parse(["--home-directory", "/tmp/Fixture home"])
+        #expect(options.installation.hostRoot == URL(filePath: "/tmp/Fixture home/Library/Application Support/XcodeRunnerKit"))
+        #expect(options.installation.logsDirectory == options.installation.hostRoot.appending(path: "logs/runners"))
     }
 }

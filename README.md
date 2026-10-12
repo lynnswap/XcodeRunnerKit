@@ -96,6 +96,30 @@ Repeat `--setting NAME=VALUE` for build settings and
 `--developer-directory` selects Xcode without changing the host's
 `xcode-select` setting.
 
+### Installed host storage
+
+Select one job-data parent when setting up the native host:
+
+```sh
+bash Scripts/install-host-tools.sh .build/release/xcode-runner \
+  "$(git rev-parse HEAD)" /path/to/JobData
+"$HOME/Library/Application Support/XcodeRunnerKit/bin/xcode-runner" host storage status --json
+```
+
+The parent contains `Work/<runner-name>`, `CompilationCache`, and
+`Build/<operation-UUID>`. Omitting the directory uses the managed default.
+Internal tools, credentials, execution pool, and service logs have fixed managed
+locations. `host storage configure --directory <path>` initializes the selection
+or confirms the existing location; it preserves data and rejects a different
+location after initialization.
+
+The common host passes its active storage to runner processes at startup.
+Descendant Xcode commands default to its Build directory, shared cache, and
+shared pool. An unused pool starts with capacity four; a saved limit takes
+precedence. Explicit path and pool options override these defaults. Standalone
+CLI operations retain their own defaults. See the
+[native host guide](Documentation/NativeHost.md) for setup and retention.
+
 ### Execution priority
 
 All four Xcode subcommands accept `--priority high|medium|low`, with `medium`
@@ -108,9 +132,9 @@ xcode-runner test --package /path/to/Package --scheme PackageName \
 ```
 
 Priority controls admission to the local shared pool. Jobs already running
-continue, and a command without `--pool-directory` starts immediately regardless
-of its priority. See [shared host capacity](#shared-host-capacity) for ordering
-and cancellation rules. GitHub assigns jobs to runner listeners before the CLI
+continue, and a command with no explicit or inherited host pool starts immediately
+regardless of its priority. See [shared host capacity](#shared-host-capacity) for
+ordering and cancellation rules. GitHub assigns jobs to runner listeners before the CLI
 reaches this pool.
 
 ### Pool management
@@ -356,13 +380,11 @@ env:
 steps:
   - name: Run Xcode tests
     run: |
-      ci_root="$HOME/Library/Application Support/XcodeRunnerKit"
+      ci_root="$XCODE_RUNNER_HOST_ROOT"
       exec "$ci_root/bin/xcode-runner" test \
         --package "$GITHUB_WORKSPACE" --scheme PackageName \
         --destination 'platform=macOS,arch=arm64' \
-        --pool-directory "$ci_root/Pool" --maximum-concurrent-jobs 4 \
-        --priority "$XCODE_JOB_PRIORITY" \
-        --output-directory "$RUNNER_TEMP/XcodeRunnerOutput"
+        --priority "$XCODE_JOB_PRIORITY"
 ```
 
 If every official runner listener is busy, a high-priority GitHub job can still
