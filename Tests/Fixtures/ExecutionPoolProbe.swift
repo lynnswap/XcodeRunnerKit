@@ -24,9 +24,10 @@ struct ExecutionPoolProbe {
             return
         }
         let capacity = Int(values[3])!
+        let priority = values.count > 4 ? HostExecutionPool.Priority(rawValue: values[4])! : .normal
         let pool = try HostExecutionPool(directory: root.appending(path: "pool"), initialCapacity: capacity)
         let task = Task {
-            try await pool.withSlot {
+            try await pool.withSlot(priority: priority) {
                 try "\(getpid())".write(to: root.appending(path: identifier + ".started"), atomically: true, encoding: .utf8)
                 while !FileManager.default.fileExists(atPath: root.appending(path: identifier + ".release").path) {
                     try await Task.sleep(for: .milliseconds(20))

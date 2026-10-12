@@ -4,6 +4,56 @@ import Testing
 @testable import XcodeRunnerKit
 
 struct XcodeRunnerKitTests {
+    @Test func runnerPassesOperationPriorityToTheSharedPool() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pool = try HostExecutionPool(directory: root.appending(path: "pool"), initialCapacity: 1)
+        let executable = try script("touch \"$STARTED_PATH\"; while [ ! -e \"$RELEASE_PATH\" ]; do sleep 0.02; done", at: root)
+        var configuredRunner = XcodeRunner(executableURL: executable)
+        configuredRunner.executionPool = pool
+        let runner = configuredRunner
+        var configuredLow = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "low-output"))
+        configuredLow.environment = [
+            "STARTED_PATH": root.appending(path: "low-started").path,
+            "RELEASE_PATH": root.appending(path: "low-release").path,
+        ]
+        let low = configuredLow
+        var configuredHigh = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "high-output"))
+        configuredHigh.environment = [
+            "STARTED_PATH": root.appending(path: "high-started").path,
+            "RELEASE_PATH": root.appending(path: "high-release").path,
+        ]
+        let high = configuredHigh
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            defer { group.cancelAll() }
+            group.addTask {
+                try await pool.withSlot {
+                    try Data().write(to: root.appending(path: "blocker-started"))
+                    while !FileManager.default.fileExists(atPath: root.appending(path: "blocker-release").path) {
+                        try await Task.sleep(for: .milliseconds(20))
+                    }
+                }
+            }
+            try await waitForFile(root.appending(path: "blocker-started"))
+            group.addTask { _ = try await runner.run(.build, request: low, priority: .low) }
+            try await waitForWaitingCount(1, at: .low, in: pool)
+            group.addTask { _ = try await runner.run(.build, request: high, priority: .high) }
+            try await waitForWaitingCount(1, at: .high, in: pool)
+            try Data().write(to: root.appending(path: "blocker-release"))
+            try await waitForFile(root.appending(path: "high-started"))
+            #expect(!FileManager.default.fileExists(atPath: root.appending(path: "low-started").path))
+            try Data().write(to: root.appending(path: "high-release"))
+            try await waitForFile(root.appending(path: "low-started"))
+            try Data().write(to: root.appending(path: "low-release"))
+            try await group.waitForAll()
+        }
+        let status = try #require(try await pool.status())
+        #expect(status.activeJobCount == 0)
+        #expect(status.waitingJobCounts.total == 0)
+        #expect(HostExecutionPool.Priority.allCases.allSatisfy { status.waitingJobCounts[$0] == 0 })
+    }
+
     @Test func capturesOutputAndPreservesArgumentsWithSpaces() async throws {
         let root = URL.temporaryDirectory.appending(path: "Runner tests " + UUID().uuidString, directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -256,5 +306,23 @@ struct XcodeRunnerKitTests {
         try ("#!/bin/sh\n" + body + "\n").write(to: url, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path(percentEncoded: false))
         return url
+    }
+
+    private func waitForFile(_ url: URL) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(10))
+        while !FileManager.default.fileExists(atPath: url.path), clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(FileManager.default.fileExists(atPath: url.path), "The tool did not become ready.")
+    }
+
+    private func waitForWaitingCount(_ count: Int, at priority: HostExecutionPool.Priority, in pool: HostExecutionPool) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(10))
+        while try await pool.status()?.waitingJobCounts[priority] != count, clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(try await pool.status()?.waitingJobCounts[priority] == count)
     }
 }
