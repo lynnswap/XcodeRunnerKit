@@ -85,16 +85,12 @@ extension HostInstallation {
             }
         }
         let registrations = try hostedRegistrationBackups(storage: source, changingStorage: true)
-        let physicalSources = try sourceDirectories.map { location -> URL? in
-            guard manager.fileExists(atPath: location.path(percentEncoded: false)) else { return nil }
-            return try location.resolvingSymlinksInPath().compilerCanonicalURL()
-        }
+        let physicalSources = try sourceDirectories.map { try copySource(at: $0)?.directory }
         let runnerWorkCopies = try registrations.compactMap { registration -> (name: String, source: URL)? in
             let name = registration.file.deletingLastPathComponent().lastPathComponent
             let work = source.workDirectory.appending(path: name)
-            guard manager.fileExists(atPath: work.path(percentEncoded: false)),
-                  try work.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true else { return nil }
-            return (name, try work.resolvingSymlinksInPath().compilerCanonicalURL())
+            guard let source = try copySource(at: work), source.isSymbolicLink else { return nil }
+            return (name, source.directory)
         }
         for copiedDirectory in physicalSources.compactMap({ $0 }) + runnerWorkCopies.map({ $0.source }) {
             var relationship = FileManager.URLRelationship.other
@@ -179,6 +175,17 @@ extension HostInstallation {
         }
     }
 
+    private func copySource(at location: URL) throws -> (directory: URL, isSymbolicLink: Bool)? {
+        let values: URLResourceValues
+        do { values = try location.resourceValues(forKeys: [.isSymbolicLinkKey]) }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile { return nil }
+        let physical = location.resolvingSymlinksInPath()
+        guard try physical.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
+            throw StorageMigrationError("A work, cache, or build folder could not be accessed. Restore access to the original folder before changing storage.")
+        }
+        return (try physical.compilerCanonicalURL(), values.isSymbolicLink == true)
+    }
+
     private func registrationObject(_ data: Data) throws -> [String: Any] {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw StorageMigrationError("A runner registration could not be read.")
@@ -207,9 +214,9 @@ extension HostInstallation {
                     throw StorageMigrationError("\(directory.lastPathComponent) still has an individual runner service. Remove that service before changing host storage.")
                 }
                 if let path = object["workFolder"] as? String, path.hasPrefix("/") {
-                    var relationship = FileManager.URLRelationship.other
-                    try manager.getRelationship(&relationship, ofDirectoryAt: storage.workDirectory, toItemAt: URL(filePath: path))
-                    if relationship != .other {
+                    let managed = normalizedPathComponents(of: storage.workDirectory)
+                    let individual = normalizedPathComponents(of: URL(filePath: path))
+                    if individual.starts(with: managed) {
                         throw StorageMigrationError("An individual runner service uses the current storage folder. Stop and remove that service before changing host storage.")
                     }
                 }
@@ -227,6 +234,13 @@ extension HostInstallation {
             backups.append(RegistrationBackup(file: file, data: data))
         }
         return backups
+    }
+
+    private func normalizedPathComponents(of url: URL) -> [String] {
+        // Resolve existing prefixes before appending a missing work-folder suffix.
+        url.standardizedFileURL.pathComponents.dropFirst().reduce(URL(filePath: "/")) {
+            $0.appending(path: $1).resolvingSymlinksInPath()
+        }.pathComponents
     }
 
     private func validateHostedWorkDirectories(storage: Storage) throws {

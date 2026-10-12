@@ -145,6 +145,38 @@ struct HostStorageMigrationTests {
         #expect(try Data(contentsOf: physicalCache.appending(path: "output")) == Data("cached output".utf8))
     }
 
+    @Test(arguments: ["CompilationCache", "Work/runner-one"])
+    func unavailableCopyAliasPreservesPendingChangeUntilTargetReturns(_ relativePath: String) async throws {
+        let (root, installation, source) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let registration = try runner("runner-one", installation: installation, storage: source)
+        let file = registration.appending(path: ".runner")
+        let original = try Data(contentsOf: file)
+        let alias = source.directory.appending(path: relativePath)
+        try FileManager.default.removeItem(at: alias)
+        let physical = root.appending(path: "Linked data")
+        try FileManager.default.createDirectory(at: physical, withIntermediateDirectories: false)
+        let content = Data("retained linked output".utf8)
+        try content.write(to: physical.appending(path: "output"))
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: physical)
+        let unavailable = root.appending(path: "Disconnected data")
+        try FileManager.default.moveItem(at: physical, to: unavailable)
+        let target = try await choose(root.appending(path: "Second"), installation: installation)
+        await #expect(throws: (any Error).self) { try await installation.prepareStorageForLaunch() }
+        #expect(try installation.storage()?.directory == source.directory)
+        #expect(try installation.requestedStorageDirectory() == target)
+        #expect(try Data(contentsOf: file) == original)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: target.path(percentEncoded: false)).isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: installation.hostRoot.appending(path: "storage-migration.json").path(percentEncoded: false)))
+        #expect(try alias.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true)
+        #expect(try Data(contentsOf: unavailable.appending(path: "output")) == content)
+        try FileManager.default.moveItem(at: unavailable, to: physical)
+        let migrated = try await installation.prepareStorageForLaunch()
+        #expect(migrated.directory == target)
+        #expect(try Data(contentsOf: target.appending(path: relativePath).appending(path: "output")) == content)
+        #expect(try Data(contentsOf: physical.appending(path: "output")) == content)
+    }
+
     @Test func runnerWorkAliasUsesItsPhysicalLocationAndMigratesItsContents() async throws {
         let (root, installation, source) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -208,9 +240,27 @@ struct HostStorageMigrationTests {
         let outside = HostInstallation.Storage(directory: root.appending(path: "Individual storage"))
         let individual = try runner("individual", installation: installation, storage: outside, hosted: false)
         try Data().write(to: individual.appending(path: ".service"))
-        let original = try Data(contentsOf: individual.appending(path: ".runner"))
+        let file = individual.appending(path: ".runner")
+        var object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        let workAlias = root.appending(path: "Managed work alias")
+        try FileManager.default.createSymbolicLink(at: workAlias, withDestinationURL: source.workDirectory)
+        for work in [source.workDirectory, workAlias] {
+            object["workFolder"] = work.appending(path: "unavailable-individual").path(percentEncoded: false)
+            try JSONSerialization.data(withJSONObject: object).write(to: file)
+            await #expect(throws: (any Error).self) { try await installation.prepareStorageForLaunch() }
+            #expect(try installation.storage()?.directory == source.directory)
+            #expect(try FileManager.default.contentsOfDirectory(atPath: target.path(percentEncoded: false)).isEmpty)
+        }
+        object["workFolder"] = source.directory.appending(path: "Work elsewhere/individual").path(percentEncoded: false)
+        try JSONSerialization.data(withJSONObject: object).write(to: file)
+        try FileManager.default.removeItem(at: outside.directory)
+        let original = try Data(contentsOf: file)
         #expect(try await installation.prepareStorageForLaunch().directory == target)
-        #expect(try Data(contentsOf: individual.appending(path: ".runner")) == original)
+        #expect(try Data(contentsOf: file) == original)
+        try FileManager.default.removeItem(at: target.appending(path: "Work"))
+        let third = try await choose(root.appending(path: "Third"), installation: installation)
+        #expect(try await installation.prepareStorageForLaunch().directory == third)
+        #expect(try Data(contentsOf: file) == original)
     }
 
     @Test func registrationWriteFailureRestoresPriorChangesAndPreservesSource() async throws {
