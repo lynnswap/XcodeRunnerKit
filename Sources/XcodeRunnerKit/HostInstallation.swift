@@ -32,7 +32,9 @@ package struct HostInstallation: Sendable {
 
         fileprivate func prepare() throws {
             for location in [workDirectory, compilationCacheDirectory, buildDirectory] {
-                try FileManager.default.createDirectory(at: location, withIntermediateDirectories: true)
+                try FileManager.default.createDirectory(
+                    at: location, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]
+                )
                 let probe = location.appending(path: ".host-storage-\(UUID().uuidString)")
                 try Data().write(to: probe, options: .withoutOverwriting)
                 try FileManager.default.removeItem(at: probe)
