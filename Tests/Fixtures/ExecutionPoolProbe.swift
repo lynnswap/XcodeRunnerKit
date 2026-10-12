@@ -24,7 +24,7 @@ struct ExecutionPoolProbe {
             return
         }
         let capacity = Int(values[3])!
-        let priority = values.count > 4 ? HostExecutionPool.Priority(rawValue: values[4])! : .normal
+        let priority = values.count > 4 ? HostExecutionPool.Priority(rawValue: values[4])! : .medium
         let pool = try HostExecutionPool(directory: root.appending(path: "pool"), initialCapacity: capacity)
         let task = Task {
             try await pool.withSlot(priority: priority) {
