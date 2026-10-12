@@ -7,6 +7,7 @@ import Foundation
 /// operations; a caller's capacity initializes an empty pool.
 /// Do not remove the directory or its lock files while jobs are running.
 public struct HostExecutionPool: Sendable {
+    /// The shared directory, with symlinks resolved when the pool is created.
     public let directory: URL
     private let initialCapacity: Int
 
@@ -17,7 +18,7 @@ public struct HostExecutionPool: Sendable {
         guard initialCapacity > 0 else {
             throw ConfigurationError.invalidCapacity
         }
-        self.directory = directory
+        self.directory = directory.resolvingSymlinksInPath()
         self.initialCapacity = initialCapacity
     }
 
