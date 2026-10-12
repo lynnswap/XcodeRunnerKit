@@ -243,9 +243,12 @@ New registrations use the physical `Work/<runner-name>` path under the selected
 parent. If an earlier registration uses a different work path, reconfigure it
 explicitly while it is stopped. Setup does not relocate running registrations.
 
-Setup creates these directories, checks write access, and preserves their
-existing contents and permissions. New managed directories have owner-only
-permissions. Repeating setup with the same parent updates tools without
+Initial setup can create the selected parent and its managed directories. It
+checks write access and preserves existing contents and permissions. New managed
+directories have owner-only permissions. Later setup and host startup require
+the saved parent to exist; they can recreate missing managed subdirectories but
+do not recreate an unavailable parent. Restore the parent or mount its volume
+before retrying. Repeating setup with the same parent updates tools without
 moving data. Selecting a different parent after initialization fails before
 changing the active configuration; the initializer does not migrate live data.
 An existing cache alias is preserved, including its target.

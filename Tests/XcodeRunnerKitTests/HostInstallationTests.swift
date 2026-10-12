@@ -67,7 +67,12 @@ struct HostInstallationTests {
         let installation = HostInstallation(homeDirectory: root.appending(path: "Home"))
         let active = try installation.initializeStorage(at: root.appending(path: "Active"))
         let environment = installation.environment(for: active).merging(["HOME": "/different/home"]) { _, value in value }
-        let later = try installation.saveStorageDirectory(root.appending(path: "Later"))
+        let laterDirectory = root.appending(path: "Later")
+        #expect(throws: (any Error).self) { try installation.saveStorageDirectory(laterDirectory) }
+        #expect(!FileManager.default.fileExists(atPath: laterDirectory.path(percentEncoded: false)))
+        #expect(try installation.storage()?.directory == active.directory)
+        try FileManager.default.createDirectory(at: laterDirectory, withIntermediateDirectories: false)
+        let later = try installation.saveStorageDirectory(laterDirectory)
         let configuration = try HostInstallation.hostedConfiguration(environment: environment)
         let inherited = try #require(configuration)
         #expect(inherited.storage.directory == active.directory)

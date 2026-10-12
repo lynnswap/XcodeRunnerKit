@@ -314,7 +314,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
 
     private func reconcile() async throws {
         let directories = try FileManager.default.contentsOfDirectory(
-            at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+            at: root, includingPropertiesForKeys: [.isDirectoryKey]
         )
         let requested = try Set(directories.filter {
             try $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true

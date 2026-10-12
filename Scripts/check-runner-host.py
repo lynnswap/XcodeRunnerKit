@@ -88,7 +88,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     host_root = home/'Library/Application Support/XcodeRunnerKit'
     runners = home/'Library/XcodeRunnerKit/runners'
     runners.mkdir(parents=True)
-    first = fixture(runners, 'first')
+    first = fixture(runners, '.hidden-first')
     excluded = fixture(runners, 'individual')
     (excluded / '.service').touch()
     arguments = [executable, '--home-directory', str(home)]
@@ -97,7 +97,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
                                 env={**os.environ, 'PATH':str(Path(executable).parent)+os.pathsep+os.environ['PATH']},
                                 stdout=log, stderr=log)
         try:
-            wait_for(lambda:(first/'pid.json').exists(), 'First runner did not start')
+            wait_for(lambda:(first/'pid.json').exists(), 'Hidden runner did not start')
             first_pid = json.loads((first/'pid.json').read_text())['pid']
             first_environment = json.loads((first/'pid.json').read_text())
             assert first_environment['storage'] == str((host_root/'Storage').resolve())
@@ -310,4 +310,4 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost storage change ') as tempora
         finally:
             stop_host(host, runners)
 
-print('PASS: runner lifecycle, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')
+print('PASS: runner lifecycle, hidden runner discovery, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')
