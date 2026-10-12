@@ -56,7 +56,7 @@ struct XcodeRunnerKitTests {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let marker = root.appending(path: "ready")
-        let executable = try script("sleep 120 &\nchild=$!\nprintf '%s %s\\n' \"$$\" \"$child\" > \"$READY_PATH\"\nwait \"$child\"", at: root)
+        let executable = try script("sleep 120 &\nchild=$!\nprintf '%s %s\\n' \"$$\" \"$child\" > \"$READY_PATH.tmp\"\nmv \"$READY_PATH.tmp\" \"$READY_PATH\"\nwait \"$child\"", at: root)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root)
         request.environment["READY_PATH"] = marker.path(percentEncoded: false)
         var runner = XcodeRunner(executableURL: executable)
