@@ -9,8 +9,22 @@ struct ExecutionPoolProbe {
         let values = CommandLine.arguments
         let root = URL(filePath: values[1])
         let identifier = values[2]
+        if identifier == "status" || identifier == "update" {
+            do {
+                let pool = try HostExecutionPool(directory: root.appending(path: "pool"), initialCapacity: 4)
+                if identifier == "update" {
+                    try await pool.updateMaximumConcurrentJobs(to: Int(values[3])!)
+                }
+                let data = try JSONEncoder().encode(try await pool.status())
+                try FileHandle.standardOutput.write(contentsOf: data)
+            } catch {
+                try? FileHandle.standardError.write(contentsOf: Data("\(error)\n".utf8))
+                exit(1)
+            }
+            return
+        }
         let capacity = Int(values[3])!
-        let pool = try HostExecutionPool(directory: root.appending(path: "pool"), maximumConcurrentJobs: capacity)
+        let pool = try HostExecutionPool(directory: root.appending(path: "pool"), initialCapacity: capacity)
         let task = Task {
             try await pool.withSlot {
                 try "\(getpid())".write(to: root.appending(path: identifier + ".started"), atomically: true, encoding: .utf8)

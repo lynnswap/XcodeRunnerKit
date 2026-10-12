@@ -85,7 +85,7 @@ struct RunnerCommand: AsyncParsableCommand {
         var runner = XcodeRunner(developerDirectory: developerDirectory.map(Self.url))
         if let poolDirectory, let maximumConcurrentJobs {
             runner.executionPool = try HostExecutionPool(
-                directory: Self.url(poolDirectory), maximumConcurrentJobs: maximumConcurrentJobs
+                directory: Self.url(poolDirectory), initialCapacity: maximumConcurrentJobs
             )
         } else if poolDirectory != nil || maximumConcurrentJobs != nil {
             throw ValidationError("Specify both --pool-directory and --maximum-concurrent-jobs.")
