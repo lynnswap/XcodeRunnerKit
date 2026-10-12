@@ -10,7 +10,7 @@ struct Pool: AsyncParsableCommand {
 
     struct Status: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Show the saved capacity and active job count without initializing the pool."
+            abstract: "Show capacity, active jobs, and waiting jobs by priority without initializing the pool."
         )
 
         @OptionGroup private var options: PoolOptions
@@ -23,7 +23,7 @@ struct Pool: AsyncParsableCommand {
             if json {
                 let encoder = JSONEncoder()
                 encoder.outputFormatting = [.sortedKeys]
-                let data = try encoder.encode(status.map(PoolStatus.init))
+                let data = try encoder.encode(status)
                 try FileHandle.standardOutput.write(contentsOf: data + Data("\n".utf8))
             } else {
                 printStatus(status)
@@ -60,16 +60,6 @@ private struct PoolOptions: ParsableArguments {
     }
 }
 
-private struct PoolStatus: Encodable {
-    let maximumConcurrentJobs: Int
-    let activeJobCount: Int
-
-    init(_ status: HostExecutionPool.Status) {
-        maximumConcurrentJobs = status.maximumConcurrentJobs
-        activeJobCount = status.activeJobCount
-    }
-}
-
 private func printStatus(_ status: HostExecutionPool.Status?) {
     guard let status else {
         print("Pool is not configured.")
@@ -77,4 +67,6 @@ private func printStatus(_ status: HostExecutionPool.Status?) {
     }
     print("Maximum concurrent jobs: \(status.maximumConcurrentJobs)")
     print("Active jobs: \(status.activeJobCount)")
+    let waiting = status.waitingJobCounts
+    print("Waiting jobs: \(waiting.total) (high: \(waiting.high), medium: \(waiting.medium), low: \(waiting.low))")
 }

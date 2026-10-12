@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify pool administration and the existing Xcode command interface."""
+"""Verify pool administration, admission priorities, and Xcode commands."""
 import argparse
 import json
 from pathlib import Path
@@ -11,6 +11,11 @@ import time
 
 REPO = Path(__file__).resolve().parents[1]
 ACTIONS = ("build", "build-for-testing", "test", "test-without-building")
+
+
+def expected_status(capacity, active, high=0, medium=0, low=0):
+    return {"maximumConcurrentJobs": capacity, "activeJobCount": active,
+            "waitingJobCounts": {"high": high, "medium": medium, "low": low}}
 
 
 def wait_for(predicate, timeout=10):
@@ -66,7 +71,9 @@ def main():
         assert not pool.exists(), "Status initialized an unconfigured pool"
         assert "not configured" in command("pool", "status", "--pool-directory", pool).stdout
         configure(6)
-        assert status() == {"maximumConcurrentJobs": 6, "activeJobCount": 0}
+        assert status() == expected_status(6, 0)
+        assert "Waiting jobs: 0 (high: 0, medium: 0, low: 0)" in command(
+            "pool", "status", "--pool-directory", pool).stdout
 
         probe = root / "pool-probe"
         subprocess.run([
@@ -97,28 +104,73 @@ def main():
             for index in range(6):
                 start(f"active-{index}")
             wait_for(lambda: all(started(f"active-{index}") for index in range(6)))
-            assert status() == {"maximumConcurrentJobs": 6, "activeJobCount": 6}
+            assert status() == expected_status(6, 6)
             start("waiter")
+            wait_for(lambda: status() == expected_status(6, 6, medium=1))
             configured = configure(4)
             assert "Maximum concurrent jobs: 4" in configured.stdout
             assert "Active jobs: 6" in configured.stdout
-            assert status() == {"maximumConcurrentJobs": 4, "activeJobCount": 6}
+            assert "Waiting jobs: 1 (high: 0, medium: 1, low: 0)" in configured.stdout
+            assert status() == expected_status(4, 6, medium=1)
             assert all(jobs[f"active-{index}"].poll() is None for index in range(6))
             assert not started("waiter"), "Shrinking the pool started a queued job"
             release("active-0")
             release("active-1")
-            assert status() == {"maximumConcurrentJobs": 4, "activeJobCount": 4}
+            assert status() == expected_status(4, 4, medium=1)
             assert not started("waiter"), "A queued job bypassed the reduced capacity"
             release("active-2")
             wait_for(lambda: started("waiter"))
-            assert status() == {"maximumConcurrentJobs": 4, "activeJobCount": 4}
+            assert status() == expected_status(4, 4)
             saved = status()
             for value in ("0", "-1", "invalid"):
                 configure(value, success=False)
                 assert status() == saved
             for name in ("active-3", "active-4", "active-5", "waiter"):
                 release(name)
-            assert status() == {"maximumConcurrentJobs": 4, "activeJobCount": 0}
+            assert status() == expected_status(4, 0)
+
+            package = root / "BuildProbe"
+            shutil.copytree(REPO / "Tests/Fixtures/BuildProbe", package,
+                            ignore=shutil.ignore_patterns(".build", ".swiftpm"))
+            compiler = root / "gated-clang"
+            compiler.write_text('''#!/bin/bash
+set -euo pipefail
+touch "$CLI_PRIORITY_GATE.started"
+while [[ ! -e "$CLI_PRIORITY_GATE.release" ]]; do sleep 0.02; done
+exec "$(xcrun --find clang)" "$@"
+''')
+            compiler.chmod(0o755)
+            configure(1)
+            start("priority-blocker")
+            wait_for(lambda: started("priority-blocker"))
+            waiting_counts = {"high": 0, "medium": 0, "low": 0}
+            for priority in ("low", "medium", "high"):
+                output = open(root / (priority + ".log"), "wb")
+                logs.append(output)
+                # Omit the medium flag to verify the default through actual admission.
+                priority_arguments = [] if priority == "medium" else ["--priority", priority]
+                jobs[priority] = subprocess.Popen([
+                    executable, "build", "--package", str(package), "--scheme", "BuildProbe",
+                    "--destination", "platform=macOS,arch=arm64",
+                    "--output-directory", str(root / (priority + "-output")),
+                    "--pool-directory", str(pool), "--maximum-concurrent-jobs", "2",
+                    "--setting", f"CC={compiler}",
+                    "--environment", f"CLI_PRIORITY_GATE={root / priority}",
+                    *priority_arguments, "--", "-jobs", "2",
+                ], stdout=output, stderr=subprocess.STDOUT)
+                waiting_counts[priority] += 1
+                wait_for(lambda: status() == expected_status(1, 1, **waiting_counts))
+                assert jobs[priority].poll() is None, (root / (priority + ".log")).read_text()
+            waiting_text = command("pool", "status", "--pool-directory", pool).stdout
+            assert "Waiting jobs: 3 (high: 1, medium: 1, low: 1)" in waiting_text
+            assert all(not (root / (value + "-output")).exists() for value in ("high", "medium", "low"))
+            release("priority-blocker")
+            for priority, later in (("high", ("medium", "low")), ("medium", ("low",)), ("low", ())):
+                wait_for(lambda: (root / (priority + ".started")).exists(), timeout=60)
+                assert all(not (root / (value + "-output")).exists() for value in later), "Wrong CLI admission order"
+                (root / (priority + ".release")).touch()
+                assert jobs[priority].wait(timeout=300) == 0, (root / (priority + ".log")).read_text()
+            assert status() == expected_status(1, 0)
         finally:
             for job in jobs.values():
                 if job.poll() is None:
@@ -140,7 +192,12 @@ def main():
         command("pool", "configure", "--maximum-concurrent-jobs", "4", success=False)
         for action in ACTIONS:
             help_text = command(action, "--help").stdout
-            assert "--scheme" in help_text and "--compilation-cache" in help_text
+            assert all(option in help_text for option in ("--scheme", "--compilation-cache", "--priority"))
+            assert "GitHub dispatch is unaffected" in " ".join(help_text.split())
+            for invalid in ("normal", "HIGH", ""):
+                result = command(action, "--package", root / "Missing", "--scheme", "Fixture",
+                                 "--priority", invalid, success=False)
+                assert "Expected high, medium, or low for --priority" in result.stderr
             result = command(action, "--package", root / "Missing", "--scheme", "Fixture",
                              "--destination", "platform=macOS,arch=arm64",
                              "--output-directory", root / "Output",
@@ -151,32 +208,35 @@ def main():
                              "--setting", "CLI_PROBE_SETTING=accepted",
                              "--environment", "CLI_PROBE_ENVIRONMENT=accepted",
                              "--pool-directory", pool, "--maximum-concurrent-jobs", "2",
+                             "--priority", "low",
                              "--simulator-runtime", "missing-device-type",
                              "--", "-parallel-testing-enabled", "NO", "-jobs", "2",
                              success=False)
             assert "Specify both --simulator-runtime and --simulator-device-type." in result.stderr
 
-        package = root / "BuildProbe"
-        shutil.copytree(REPO / "Tests/Fixtures/BuildProbe", package,
-                        ignore=shutil.ignore_patterns(".build", ".swiftpm"))
         for source_option in ("--workspace", "--project"):
             result = command("test", source_option, package, "--package", package,
                              "--scheme", "BuildProbe", success=False)
             assert "Specify exactly one" in result.stderr
-        for action in ("build-for-testing", "test-without-building", "build", "test"):
+        for action, priority in (("build-for-testing", "high"), ("test-without-building", "low"),
+                                 ("build", "medium"), ("test", None)):
+            priority_arguments = ["--priority", priority] if priority else []
+            pool_arguments = [] if action == "build" else [
+                "--pool-directory", pool, "--maximum-concurrent-jobs", "2"]
             result = command(action, "--package", package, "--scheme", "BuildProbe",
                              "--destination", "platform=macOS,arch=arm64",
                              "--derived-data", root / "FixtureDerivedData",
                              "--output-directory", root / "FixtureOutput",
-                             "--pool-directory", pool, "--maximum-concurrent-jobs", "2",
+                             *pool_arguments,
                              "--setting", "CLI_PROBE_SETTING=accepted",
                              "--environment", "TEST_RUNNER_PROBE_MODE=success",
+                             *priority_arguments,
                              "--", "-parallel-testing-enabled", "NO", "-jobs", "2",
                              timeout=300)
             assert "Log: " in result.stdout and "Result bundle: " in result.stdout
             if action in ("test", "test-without-building"):
                 assert "BuildProbe payload ready" in result.stdout
-        print("PASS: CLI status/configure, live shrink, invalid input, command help, existing Xcode actions")
+        print("PASS: CLI status/configure, live shrink, priority admission and counts, invalid input, existing Xcode actions")
 
 
 if __name__ == "__main__":
