@@ -3,15 +3,19 @@ import ArgumentParser
 import Darwin
 import Foundation
 import Subprocess
+import SwiftUI
 
-private struct HostOptions: ParsableCommand {
+struct HostOptions: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "xcode-runner-host",
-        abstract: "Host opted-in GitHub Actions runners in a windowless macOS app."
+        abstract: "Host opted-in GitHub Actions runners in a macOS menu bar app."
     )
 
     @Option(help: "Directory containing runner installations.")
     var runnersRoot = URL.homeDirectory.appending(path: "Library/XcodeRunnerKit/runners").path(percentEncoded: false)
+
+    @Option(help: "Directory containing the shared execution pool and compilation cache.")
+    var hostRoot = URL.homeDirectory.appending(path: "Library/Application Support/XcodeRunnerKit").path(percentEncoded: false)
 
     @Option(help: .hidden) var serviceDirectory: String?
     @Option(help: .hidden) var parentProcessID: Int32?
@@ -40,7 +44,8 @@ private enum RunnerHostApplication {
             }
             let host = try RunnerHost(
                 root: URL(filePath: options.runnersRoot, directoryHint: .isDirectory),
-                logs: URL(filePath: options.logsDirectory, directoryHint: .isDirectory)
+                logs: URL(filePath: options.logsDirectory, directoryHint: .isDirectory),
+                hostRoot: URL(filePath: options.hostRoot, directoryHint: .isDirectory)
             )
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
@@ -123,16 +128,25 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private let logs: URL
     private let lockDescriptor: Int32
     private let executable: URL
-    private var runners: [URL: Task<Void, Never>] = [:]
+    private struct HostedRunner {
+        let task: Task<Void, Never>
+        var state: RunnerServiceState
+    }
+    private var runners: [URL: HostedRunner] = [:]
+    private let settings: HostSettingsModel
+    private var statusItem: NSStatusItem?
+    private var poolMenuItem: NSMenuItem?
+    private var settingsWindow: NSWindow?
     private var monitoring: Task<Void, Never>?
     private var signals: [any DispatchSourceSignal] = []
     private var stopping = false
     private var stopped = false
     private var terminationReplyPending = false
 
-    init(root: URL, logs: URL) throws {
+    init(root: URL, logs: URL, hostRoot: URL) throws {
         self.root = root.resolvingSymlinksInPath()
         self.logs = logs
+        self.settings = try HostSettingsModel(hostRoot: hostRoot, runnersRoot: root, logsDirectory: logs)
         guard let executable = Bundle.main.executableURL else {
             throw ValidationError("Cannot locate the runner host executable.")
         }
@@ -157,6 +171,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     deinit { close(lockDescriptor) }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installStatusItem()
+        settings.hostState = "Running"
         for number in [SIGTERM, SIGINT] {
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
@@ -166,6 +182,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         }
         monitoring = Task {
             while !Task.isCancelled {
+                await settings.refreshPoolStatus()
+                updatePoolMenuItem()
                 do {
                     try await reconcile()
                     try await Task.sleep(for: .seconds(2))
@@ -173,12 +191,69 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                     break
                 } catch {
                     print("Runner host scan failed: \(error)")
+                    settings.runnerScanError = "Could not refresh runner services: \(error.localizedDescription)"
                     do { try await Task.sleep(for: .seconds(2)) }
                     catch { break }
                 }
             }
         }
         print("Runner host started for \(root.path(percentEncoded: false)).")
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showSettings(nil)
+        return true
+    }
+
+    private func installStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let image = NSImage(systemSymbolName: "hammer.circle", accessibilityDescription: "XcodeRunnerHost")
+        image?.isTemplate = true
+        item.button?.image = image
+        item.button?.toolTip = "XcodeRunnerHost"
+        let menu = NSMenu()
+        let poolItem = NSMenuItem(title: "Checking execution pool…", action: nil, keyEquivalent: "")
+        menu.addItem(poolItem)
+        menu.addItem(.separator())
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+        menu.addItem(.separator())
+        let quitItem = NSMenuItem(title: "Quit XcodeRunnerHost", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quitItem.target = NSApplication.shared
+        menu.addItem(quitItem)
+        item.menu = menu
+        statusItem = item
+        poolMenuItem = poolItem
+    }
+
+    private func updatePoolMenuItem() {
+        if let status = settings.poolStatus {
+            poolMenuItem?.title = "\(status.activeJobCount) running · Limit \(status.maximumConcurrentJobs)"
+        } else {
+            poolMenuItem?.title = settings.poolError == nil ? "Execution pool not configured" : "Execution pool unavailable"
+        }
+    }
+
+    @objc private func showSettings(_ sender: Any?) {
+        if settingsWindow == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 640, height: 680),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered, defer: false
+            )
+            window.title = "XcodeRunnerHost Settings"
+            window.isReleasedWhenClosed = false
+            window.contentMinSize = NSSize(width: 540, height: 420)
+            window.contentView = NSHostingView(rootView: HostSettingsView(model: settings))
+            window.setFrameAutosaveName("XcodeRunnerHostSettings")
+            window.center()
+            settingsWindow = window
+        }
+        NSApplication.shared.activate()
+        settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -191,11 +266,12 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private func beginShutdown() {
         guard !stopping else { return }
         stopping = true
+        settings.hostState = "Stopping"
         monitoring?.cancel()
         Task {
-            for task in runners.values { task.cancel() }
+            for runner in runners.values { runner.task.cancel() }
             await monitoring?.value
-            for task in runners.values { await task.value }
+            for runner in runners.values { await runner.task.value }
             stopped = true
             print("Runner host stopped.")
             if terminationReplyPending {
@@ -216,7 +292,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 && FileManager.default.fileExists(atPath: $0.appending(path: ".runner").path(percentEncoded: false))
         })
         for directory in runners.keys.filter({ !requested.contains($0) }) {
-            let task = runners.removeValue(forKey: directory)
+            let task = runners.removeValue(forKey: directory)?.task
             task?.cancel()
             await task?.value
         }
@@ -226,7 +302,12 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 print("Skipped \(directory.lastPathComponent): uninstall its individual service before opting in.")
                 continue
             }
-            runners[directory] = Task { await serve(directory) }
+            runners[directory] = HostedRunner(task: Task { await serve(directory) }, state: .starting)
+        }
+        settings.runnerScanError = nil
+        settings.runners = requested.sorted { $0.lastPathComponent < $1.lastPathComponent }.map { directory in
+            let state = runners[directory]?.state ?? .individualService
+            return RunnerSettingsRow.read(directory: directory, state: state, logsDirectory: logs)
         }
     }
 
@@ -292,6 +373,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         let descriptor = open(log.path(percentEncoded: false), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else {
             print("Could not open log for \(name): \(NSError(domain: NSPOSIXErrorDomain, code: Int(errno))).")
+            runners[directory]?.state = .failed
             return
         }
         defer { close(descriptor) }
@@ -317,6 +399,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 output: .fileDescriptor(.init(rawValue: descriptor), closeAfterSpawningProcess: false),
                 error: .fileDescriptor(.init(rawValue: descriptor), closeAfterSpawningProcess: false)
             ) { execution in
+                self.runners[directory]?.state = .running
                 try await Self.cleanUpServiceGroupAfterExit(execution.processIdentifier.value)
             }
             if Task.isCancelled {
@@ -324,8 +407,10 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             } else {
                 print("\(name) service stopped. Inspect its service log before restarting the host.")
             }
+            runners[directory]?.state = .stopped
         } catch {
             print("\(name) service ended: \(error)")
+            runners[directory]?.state = .failed
         }
     }
 }

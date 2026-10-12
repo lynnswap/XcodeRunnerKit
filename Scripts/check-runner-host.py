@@ -67,7 +67,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     first = fixture(runners, 'first')
     excluded = fixture(runners, 'individual')
     (excluded / '.service').touch()
-    arguments = [executable, '--runners-root', str(runners), '--logs-directory', str(root/'logs')]
+    arguments = [executable, '--runners-root', str(runners), '--host-root', str(root/'host'), '--logs-directory', str(root/'logs')]
     with (root/'host.log').open('w') as log:
         host = subprocess.Popen([Path(executable).name]+arguments[1:], cwd=root,
                                 env={**os.environ, 'PATH':str(Path(executable).parent)+os.pathsep+os.environ['PATH']},
@@ -173,6 +173,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     finally:
         subprocess.run(['launchctl','bootout',target],check=True)
     wait_for(lambda:not alive(restarted['pid']), 'Runner survived service removal')
+    assert not (root/'host/Pool').exists(), 'Host status reads configured an unused pool'
 
     subprocess.run(['bash',str(scripts/'build-runner-host.sh'),'-',str(root/'packaging'),executable],check=True,capture_output=True)
     tools = root/'tools'
