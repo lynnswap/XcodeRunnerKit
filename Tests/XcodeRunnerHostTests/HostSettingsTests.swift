@@ -25,7 +25,7 @@ struct HostSettingsTests {
         #expect(settings.poolStatus?.maximumConcurrentJobs == 6)
         #expect(settings.poolStatus?.activeJobCount == 0)
         #expect(settings.poolStatus?.waitingJobCounts.total == 0)
-        #expect(settings.pool.directory == root.appending(path: "Host/Pool"))
+        #expect(settings.pool.directory == settings.installation.poolDirectory)
         try FileManager.default.removeItem(at: root)
     }
 

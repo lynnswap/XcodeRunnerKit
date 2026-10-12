@@ -127,7 +127,7 @@ Click the hammer icon in the menu bar and choose **Settings…**. The window sho
 - One storage folder for checkouts, build results, and the shared compiler
   cache. Choose a parent folder once; the host manages its subdirectories.
 
-![Host settings with six running jobs, a limit of four, and jobs waiting at each priority.](Images/HostSettings.png)
+![Host settings with one storage folder, a shared execution limit, and local runner service status.](Images/HostSettings.png)
 
 Enter a positive whole number and choose **Apply** to change the execution
 limit without restarting the host or runners. Decreasing from six to four
