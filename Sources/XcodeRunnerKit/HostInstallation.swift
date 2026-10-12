@@ -65,7 +65,7 @@ package struct HostInstallation: Sendable {
     package func saveStorageDirectory(_ directory: URL) throws -> Storage {
         let requested = Storage(directory: directory)
         try requested.prepare()
-        let storage = Storage(directory: try requested.directory.compilerCanonicalURL())
+        let storage = Storage(directory: try requested.directory.resolvingSymlinksInPath().compilerCanonicalURL())
         try FileManager.default.createDirectory(at: hostRoot, withIntermediateDirectories: true)
         try Data(storage.directory.path(percentEncoded: false).utf8).write(to: storageRecord, options: .atomic)
         return storage

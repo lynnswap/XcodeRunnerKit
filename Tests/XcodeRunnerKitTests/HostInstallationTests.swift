@@ -40,6 +40,27 @@ struct HostInstallationTests {
         #expect(try Data(contentsOf: retained) == Data("checkout".utf8))
     }
 
+    @Test func initialSelectionStoresThePhysicalParentOfAnAlias() throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root.appending(path: "Home"))
+        let directory = root.appending(path: "Existing job data")
+        let cache = directory.appending(path: "CompilationCache")
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        let retained = cache.appending(path: "retained")
+        try Data("cached result".utf8).write(to: retained)
+        let alias = root.appending(path: "Chosen alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: directory)
+
+        let storage = try installation.initializeStorage(at: alias)
+        let physicalDirectory = try directory.compilerCanonicalURL()
+        #expect(storage.directory == physicalDirectory)
+        #expect(try installation.storage()?.directory == physicalDirectory)
+        #expect(installation.environment(for: storage)["XCODE_RUNNER_HOST_STORAGE_DIRECTORY"] == physicalDirectory.path(percentEncoded: false))
+        #expect(storage.compilationCacheDirectory == physicalDirectory.appending(path: "CompilationCache"))
+        #expect(try Data(contentsOf: retained) == Data("cached result".utf8))
+    }
+
     @Test func runningHostEnvironmentKeepsItsActualStorageSnapshot() throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

@@ -147,7 +147,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         self.root = root.resolvingSymlinksInPath()
         self.logs = logs
         self.environment = installation.environment(for: storage)
-        self.settings = try HostSettingsModel(hostRoot: installation.hostRoot, runnersRoot: root, logsDirectory: logs)
+        self.settings = try HostSettingsModel(hostRoot: installation.hostRoot)
         guard let executable = Bundle.main.executableURL else {
             throw ValidationError("Cannot locate the runner host executable.")
         }
@@ -316,7 +316,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         settings.runnerScanError = nil
         settings.runners = requested.sorted { $0.lastPathComponent < $1.lastPathComponent }.map { directory in
             let state = runners[directory]?.state ?? .individualService
-            return RunnerSettingsRow.read(directory: directory, state: state, logsDirectory: logs)
+            return RunnerSettingsRow.read(directory: directory, state: state)
         }
     }
 
