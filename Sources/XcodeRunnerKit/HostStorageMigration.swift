@@ -75,11 +75,6 @@ extension HostInstallation {
     private func migrateStorage(from source: Storage, to directory: URL) throws -> Storage {
         let manager = FileManager.default
         let target = Storage(directory: try directory.resolvingSymlinksInPath().compilerCanonicalURL())
-        var relationship = FileManager.URLRelationship.other
-        try manager.getRelationship(&relationship, ofDirectoryAt: source.directory, toItemAt: target.directory)
-        guard relationship == .other else {
-            throw StorageMigrationError("Choose a storage folder outside the current storage folder.")
-        }
         let sourceDirectories = [source.workDirectory, source.compilationCacheDirectory, source.buildDirectory]
         let names = ["Work", "CompilationCache", "Build"]
         for name in names {
@@ -89,6 +84,26 @@ extension HostInstallation {
             }
         }
         let registrations = try hostedRegistrationBackups(storage: source, changingStorage: true)
+        let physicalSources = try sourceDirectories.map { location -> URL? in
+            guard manager.fileExists(atPath: location.path(percentEncoded: false)) else { return nil }
+            return try location.resolvingSymlinksInPath().compilerCanonicalURL()
+        }
+        let runnerWorkCopies = try registrations.compactMap { registration -> (name: String, source: URL)? in
+            let name = registration.file.deletingLastPathComponent().lastPathComponent
+            let work = source.workDirectory.appending(path: name)
+            guard manager.fileExists(atPath: work.path(percentEncoded: false)),
+                  try work.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true else { return nil }
+            return (name, try work.resolvingSymlinksInPath().compilerCanonicalURL())
+        }
+        for copiedDirectory in physicalSources.compactMap({ $0 }) + runnerWorkCopies.map({ $0.source }) {
+            var relationship = FileManager.URLRelationship.other
+            try manager.getRelationship(
+                &relationship, ofDirectoryAt: copiedDirectory, toItemAt: target.directory
+            )
+            guard relationship == .other else {
+                throw StorageMigrationError("Choose a storage folder outside the work, cache, and build folders being copied.")
+            }
+        }
         let token = UUID().uuidString
         let journal = MigrationJournal(
             source: source.directory, target: target.directory,
@@ -99,27 +114,17 @@ extension HostInstallation {
         var didCommit = false
         do {
             try manager.createDirectory(at: journal.staging, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-            for (name, location) in zip(names, sourceDirectories) {
+            for (name, physical) in zip(names, physicalSources) {
                 try Task.checkCancellation()
                 let staged = journal.staging.appending(path: name)
-                if manager.fileExists(atPath: location.path(percentEncoded: false)) {
-                    let physical = try location.resolvingSymlinksInPath().compilerCanonicalURL()
-                    try manager.getRelationship(&relationship, ofDirectoryAt: physical, toItemAt: target.directory)
-                    guard relationship == .other else {
-                        throw StorageMigrationError("Choose a storage folder outside the existing \(name) folder.")
-                    }
+                if let physical {
                     try manager.copyItem(at: physical, to: staged)
                     try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: staged.path(percentEncoded: false))
                     if name == "Work" {
-                        for registration in registrations {
-                            let runnerName = registration.file.deletingLastPathComponent().lastPathComponent
-                            let copiedWork = staged.appending(path: runnerName)
-                            if manager.fileExists(atPath: copiedWork.path(percentEncoded: false)),
-                               try copiedWork.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true {
-                                let originalWork = source.workDirectory.appending(path: runnerName).resolvingSymlinksInPath()
-                                try manager.removeItem(at: copiedWork)
-                                try manager.copyItem(at: originalWork, to: copiedWork)
-                            }
+                        for work in runnerWorkCopies {
+                            let copiedWork = staged.appending(path: work.name)
+                            try manager.removeItem(at: copiedWork)
+                            try manager.copyItem(at: work.source, to: copiedWork)
                         }
                     }
                 } else {
