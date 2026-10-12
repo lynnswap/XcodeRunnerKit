@@ -323,6 +323,8 @@ struct HostStorageMigrationTests {
         let directory = try runner("runner-one", installation: installation, storage: source)
         let file = directory.appending(path: ".runner")
         let original = try Data(contentsOf: file)
+        let content = Data("retained checkout".utf8)
+        try content.write(to: source.workDirectory.appending(path: "runner-one/source"))
         let target = try await choose(root.appending(path: "Second"), installation: installation)
         let token = UUID().uuidString
         let copy = target.appending(path: "Work")
@@ -333,13 +335,71 @@ struct HostStorageMigrationTests {
             "staging": target.appending(path: ".xcode-runner-migration-\(token)").absoluteString,
             "token": token, "registrations": [["file": file.absoluteString, "data": original.base64EncodedString()]],
         ]
-        try JSONSerialization.data(withJSONObject: journal).write(to: installation.hostRoot.appending(path: "storage-migration.json"))
+        let record = installation.hostRoot.appending(path: "storage-migration.json")
+        let recorded = try JSONSerialization.data(withJSONObject: journal)
+        try recorded.write(to: record)
         try Data(#"{"workFolder":"interrupted"}"#.utf8).write(to: file)
         _ = try await installation.requestStorageDirectory(source.directory)
+        let unavailable = root.appending(path: "Disconnected destination")
+        try FileManager.default.moveItem(at: target, to: unavailable)
+        await #expect(throws: (any Error).self) { try await installation.prepareStorageForLaunch() }
+        #expect(try Data(contentsOf: file) == original)
+        #expect(try installation.storage()?.directory == source.directory)
+        #expect(try installation.requestedStorageDirectory() == source.directory)
+        #expect(try Data(contentsOf: record) == recorded)
+        #expect(try String(contentsOf: unavailable.appending(path: "Work/.xcode-runner-migration-\(token)"), encoding: .utf8) == token)
+        try FileManager.default.moveItem(at: unavailable, to: target)
         await #expect(throws: (any Error).self) { try await installation.prepareStorageForLaunch() }
         #expect(try Data(contentsOf: file) == original)
         #expect(try installation.storage()?.directory == source.directory)
         #expect(!FileManager.default.fileExists(atPath: copy.path(percentEncoded: false)))
+        #expect(!FileManager.default.fileExists(atPath: record.path(percentEncoded: false)))
         #expect(try await installation.prepareStorageForLaunch().directory == source.directory)
+        _ = try await installation.requestStorageDirectory(target)
+        let migrated = try await installation.prepareStorageForLaunch()
+        #expect(migrated.directory == target)
+        #expect(try Data(contentsOf: migrated.workDirectory.appending(path: "runner-one/source")) == content)
+    }
+
+    @Test func committedMigrationRetainsCleanupRecordUntilDestinationReturns() async throws {
+        let (root, installation, source) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = try runner("runner-one", installation: installation, storage: source)
+        let file = directory.appending(path: ".runner")
+        let original = try Data(contentsOf: file)
+        let content = Data("retained cache output".utf8)
+        try content.write(to: source.compilationCacheDirectory.appending(path: "output"))
+        let target = try await choose(root.appending(path: "Second"), installation: installation)
+        _ = try await installation.prepareStorageForLaunch()
+        let committedRegistration = try Data(contentsOf: file)
+        let token = UUID().uuidString
+        let ownershipName = ".xcode-runner-migration-\(token)"
+        for name in ["Work", "CompilationCache", "Build"] {
+            try Data(token.utf8).write(to: target.appending(path: name).appending(path: ownershipName))
+        }
+        let journal: [String: Any] = [
+            "source": source.directory.absoluteString, "target": target.absoluteString,
+            "staging": target.appending(path: ".xcode-runner-migration-\(token)").absoluteString,
+            "token": token, "registrations": [["file": file.absoluteString, "data": original.base64EncodedString()]],
+        ]
+        let record = installation.hostRoot.appending(path: "storage-migration.json")
+        let recorded = try JSONSerialization.data(withJSONObject: journal)
+        try recorded.write(to: record)
+        let unavailable = root.appending(path: "Disconnected destination")
+        try FileManager.default.moveItem(at: target, to: unavailable)
+        await #expect(throws: (any Error).self) { try await installation.prepareStorageForLaunch() }
+        #expect(try installation.storage()?.directory == target)
+        #expect(try installation.requestedStorageDirectory() == target)
+        #expect(try Data(contentsOf: file) == committedRegistration)
+        #expect(try Data(contentsOf: record) == recorded)
+        try FileManager.default.moveItem(at: unavailable, to: target)
+        #expect(try await installation.prepareStorageForLaunch().directory == target)
+        #expect(!FileManager.default.fileExists(atPath: record.path(percentEncoded: false)))
+        for name in ["Work", "CompilationCache", "Build"] {
+            #expect(!FileManager.default.fileExists(atPath: target.appending(path: name).appending(path: ownershipName).path(percentEncoded: false)))
+        }
+        #expect(try Data(contentsOf: file) == committedRegistration)
+        #expect(try Data(contentsOf: source.compilationCacheDirectory.appending(path: "output")) == content)
+        #expect(try Data(contentsOf: target.appending(path: "CompilationCache/output")) == content)
     }
 }

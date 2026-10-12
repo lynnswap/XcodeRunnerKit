@@ -259,8 +259,8 @@ extension HostInstallation {
         }
         for name in journal.directoryNames {
             let directory = journal.target.appending(path: name)
-            guard FileManager.default.fileExists(atPath: directory.path(percentEncoded: false)) else { continue }
             do {
+                guard try migrationItemExists(at: directory) else { continue }
                 let token = try String(contentsOf: directory.appending(path: journal.ownershipName), encoding: .utf8)
                 guard token == journal.token else {
                     throw StorageMigrationError("The destination \(name) folder could not be identified as this host's copy.")
@@ -268,12 +268,20 @@ extension HostInstallation {
                 try removeOwnedCopy(at: directory)
             } catch { failures.append(error.localizedDescription) }
         }
-        if FileManager.default.fileExists(atPath: journal.staging.path(percentEncoded: false)) {
-            do { try removeOwnedCopy(at: journal.staging) }
-            catch { failures.append(error.localizedDescription) }
-        }
+        do {
+            if try migrationItemExists(at: journal.staging) { try removeOwnedCopy(at: journal.staging) }
+        } catch { failures.append(error.localizedDescription) }
+        do { try Storage(directory: journal.target).requireAvailableParent() }
+        catch { failures.append(error.localizedDescription) }
         guard failures.isEmpty else { throw StorageMigrationError(failures.joined(separator: " ")) }
         try FileManager.default.removeItem(at: migrationRecord)
+    }
+
+    private func migrationItemExists(at location: URL) throws -> Bool {
+        do {
+            _ = try FileManager.default.attributesOfItem(atPath: location.path(percentEncoded: false))
+            return true
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return false }
     }
 
     private func removeOwnedCopy(at directory: URL) throws {
@@ -297,13 +305,13 @@ extension HostInstallation {
     private func cleanCommittedMigration(_ journal: MigrationJournal) throws {
         for name in journal.directoryNames {
             let token = journal.target.appending(path: name).appending(path: journal.ownershipName)
-            if FileManager.default.fileExists(atPath: token.path(percentEncoded: false)) {
-                try FileManager.default.removeItem(at: token)
-            }
+            do { try FileManager.default.removeItem(at: token) }
+            catch let error as CocoaError where error.code == .fileNoSuchFile { continue }
         }
-        if FileManager.default.fileExists(atPath: journal.staging.path(percentEncoded: false)) {
+        if try migrationItemExists(at: journal.staging) {
             try FileManager.default.removeItem(at: journal.staging)
         }
+        try Storage(directory: journal.target).requireAvailableParent()
         try FileManager.default.removeItem(at: migrationRecord)
     }
 }
