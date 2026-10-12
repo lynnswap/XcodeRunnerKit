@@ -132,6 +132,14 @@ def main():
             package = root / "BuildProbe"
             shutil.copytree(REPO / "Tests/Fixtures/BuildProbe", package,
                             ignore=shutil.ignore_patterns(".build", ".swiftpm"))
+            compiler = root / "gated-clang"
+            compiler.write_text('''#!/bin/bash
+set -euo pipefail
+touch "$CLI_PRIORITY_GATE.started"
+while [[ ! -e "$CLI_PRIORITY_GATE.release" ]]; do sleep 0.02; done
+exec "$(xcrun --find clang)" "$@"
+''')
+            compiler.chmod(0o755)
             configure(1)
             start("priority-blocker")
             wait_for(lambda: started("priority-blocker"))
@@ -146,6 +154,8 @@ def main():
                     "--destination", "platform=macOS,arch=arm64",
                     "--output-directory", str(root / (priority + "-output")),
                     "--pool-directory", str(pool), "--maximum-concurrent-jobs", "2",
+                    "--setting", f"CC={compiler}",
+                    "--environment", f"CLI_PRIORITY_GATE={root / priority}",
                     *priority_arguments, "--", "-jobs", "2",
                 ], stdout=output, stderr=subprocess.STDOUT)
                 waiting_counts[priority] += 1
@@ -156,8 +166,9 @@ def main():
             assert all(not (root / (value + "-output")).exists() for value in ("high", "normal", "low"))
             release("priority-blocker")
             for priority, later in (("high", ("normal", "low")), ("normal", ("low",)), ("low", ())):
-                wait_for(lambda: (root / (priority + "-output")).exists(), timeout=60)
+                wait_for(lambda: (root / (priority + ".started")).exists(), timeout=60)
                 assert all(not (root / (value + "-output")).exists() for value in later), "Wrong CLI admission order"
+                (root / (priority + ".release")).touch()
                 assert jobs[priority].wait(timeout=300) == 0, (root / (priority + ".log")).read_text()
             assert status() == expected_status(1, 0)
         finally:
