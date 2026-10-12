@@ -32,7 +32,9 @@ struct HostStorageMigrationTests {
     @Test func unchangedStoragePreparesMissingManagedDirectoriesBeforeRunnerStartup() async throws {
         let (root, installation, source) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.removeItem(at: source.directory)
+        for directory in [source.workDirectory, source.compilationCacheDirectory, source.buildDirectory] {
+            try FileManager.default.removeItem(at: directory)
+        }
         let prepared = try await installation.prepareStorageForLaunch()
         #expect(prepared.directory == source.directory)
         for directory in [prepared.workDirectory, prepared.compilationCacheDirectory, prepared.buildDirectory] {
@@ -65,7 +67,7 @@ struct HostStorageMigrationTests {
     @Test func savedSelectionDoesNotChangeRunningStorageAndCopiesOnNextLaunch() async throws {
         let (root, installation, source) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
-        let registration = try runner("runner-one", installation: installation, storage: source)
+        let registration = try runner(".hidden-one", installation: installation, storage: source)
         let original = try Data(contentsOf: registration.appending(path: ".runner"))
         let credentials = try Data(contentsOf: registration.appending(path: ".credentials"))
         for directory in [source.workDirectory, source.compilationCacheDirectory, source.buildDirectory] {
@@ -94,7 +96,7 @@ struct HostStorageMigrationTests {
         let updated = try Data(contentsOf: registration.appending(path: ".runner"))
         #expect(updated.starts(with: [0xEF, 0xBB, 0xBF]))
         let object = try #require(JSONSerialization.jsonObject(with: updated) as? [String: Any])
-        #expect(object["workFolder"] as? String == migrated.workDirectory.appending(path: "runner-one").path(percentEncoded: false))
+        #expect(object["workFolder"] as? String == migrated.workDirectory.appending(path: ".hidden-one").path(percentEncoded: false))
         #expect(object["agentId"] as? Int == 12)
         #expect((object["unknownSetting"] as? [String: Bool])?["retained"] == true)
         #expect(try Data(contentsOf: registration.appending(path: ".credentials")) == credentials)

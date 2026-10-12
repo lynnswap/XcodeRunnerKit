@@ -189,7 +189,7 @@ extension HostInstallation {
         let manager = FileManager.default
         let directories: [URL]
         do {
-            directories = try manager.contentsOfDirectory(at: runnersRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+            directories = try manager.contentsOfDirectory(at: runnersRoot, includingPropertiesForKeys: [.isDirectoryKey])
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return [] }
         var backups: [RegistrationBackup] = []
         for directory in directories where try directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true {
