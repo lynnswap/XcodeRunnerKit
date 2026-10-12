@@ -71,6 +71,8 @@ struct HostStorageMigrationTests {
         for directory in [source.workDirectory, source.compilationCacheDirectory, source.buildDirectory] {
             try Data("retained job data".utf8).write(to: directory.appending(path: "data"))
         }
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: source.compilationCacheDirectory.path(percentEncoded: false))
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: source.compilationCacheDirectory.path(percentEncoded: false)) }
         let environment = installation.environment(for: source)
         let target = try await choose(root.appending(path: "Second"), installation: installation)
         try Data("unrelated files".utf8).write(to: target.appending(path: "unrelated"))
@@ -84,7 +86,11 @@ struct HostStorageMigrationTests {
         for name in ["Work", "CompilationCache", "Build"] {
             #expect(try Data(contentsOf: source.directory.appending(path: name).appending(path: "data")) == Data("retained job data".utf8))
             #expect(try Data(contentsOf: target.appending(path: name).appending(path: "data")) == Data("retained job data".utf8))
+            let attributes = try FileManager.default.attributesOfItem(atPath: target.appending(path: name).path(percentEncoded: false))
+            #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
         }
+        let originalCacheAttributes = try FileManager.default.attributesOfItem(atPath: source.compilationCacheDirectory.path(percentEncoded: false))
+        #expect((originalCacheAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o555)
         let updated = try Data(contentsOf: registration.appending(path: ".runner"))
         #expect(updated.starts(with: [0xEF, 0xBB, 0xBF]))
         let object = try #require(JSONSerialization.jsonObject(with: updated) as? [String: Any])

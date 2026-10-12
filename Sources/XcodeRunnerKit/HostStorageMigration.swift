@@ -98,7 +98,7 @@ extension HostInstallation {
         try JSONEncoder().encode(journal).write(to: migrationRecord, options: .atomic)
         var didCommit = false
         do {
-            try manager.createDirectory(at: journal.staging, withIntermediateDirectories: false)
+            try manager.createDirectory(at: journal.staging, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             for (name, location) in zip(names, sourceDirectories) {
                 try Task.checkCancellation()
                 let staged = journal.staging.appending(path: name)
@@ -109,6 +109,7 @@ extension HostInstallation {
                         throw StorageMigrationError("Choose a storage folder outside the existing \(name) folder.")
                     }
                     try manager.copyItem(at: physical, to: staged)
+                    try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: staged.path(percentEncoded: false))
                     if name == "Work" {
                         for registration in registrations {
                             let runnerName = registration.file.deletingLastPathComponent().lastPathComponent
@@ -122,7 +123,7 @@ extension HostInstallation {
                         }
                     }
                 } else {
-                    try manager.createDirectory(at: staged, withIntermediateDirectories: false)
+                    try manager.createDirectory(at: staged, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
                 }
                 try Data(token.utf8).write(to: staged.appending(path: journal.ownershipName), options: .withoutOverwriting)
                 try manager.moveItem(at: staged, to: target.directory.appending(path: name))
