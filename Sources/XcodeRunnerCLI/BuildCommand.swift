@@ -119,6 +119,7 @@ struct BuildOptions: ParsableArguments {
         request.buildSettings = try Self.assignments(settings)
         request.arguments = additionalArguments
         var runner = XcodeRunner(developerDirectory: developerDirectory.map(Self.url))
+        runner.hostStorage = host?.storage
         if let poolDirectory, let maximumConcurrentJobs {
             runner.executionPool = try HostExecutionPool(
                 directory: Self.url(poolDirectory), initialCapacity: maximumConcurrentJobs

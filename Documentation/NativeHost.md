@@ -229,6 +229,9 @@ workflow flags. An unused host pool starts with capacity four; its saved limit
 takes precedence thereafter. Explicit `--output-directory`,
 `--compilation-cache`, and pool options still override these defaults. Standalone
 CLI commands retain their own defaults and do not read host configuration.
+Operations using managed paths require the saved parent to remain available
+when creating artifacts, including after waiting in the shared pool. If it has
+disappeared, the operation fails without recreating the parent.
 
 Keep removable storage mounted while the services run, and allow the initial
 **XcodeRunnerHost** volume-access prompt in the GUI session. Work directories

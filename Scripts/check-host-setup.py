@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 scripts = Path(__file__).resolve().parent
 executable = Path(sys.argv[1]).resolve()
@@ -23,6 +24,14 @@ def storage_status(home):
     result = subprocess.run([str(executable), "host", "storage", "status", "--json"],
                             env={**os.environ, "HOME": str(home)}, check=True, capture_output=True, text=True)
     return json.loads(result.stdout)
+
+
+def wait_for(predicate, description, timeout=30):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError(description)
+        time.sleep(0.02)
 
 
 def install_cli(home):
@@ -90,6 +99,85 @@ with tempfile.TemporaryDirectory(prefix="Host storage concurrent initialization 
                 process.wait(timeout=10)
 
 
+with tempfile.TemporaryDirectory(prefix="Hosted CLI unavailable storage ") as temporary:
+    root = Path(temporary)
+    home = root / "home"
+    storage = root / "Job data"
+    layout = json.loads(configure(home, storage).stdout)
+    offline = root / "Offline job data"
+    environment = {**os.environ, "HOME": str(home),
+                   "XCODE_RUNNER_HOST_STORAGE_DIRECTORY": layout["storageDirectory"],
+                   "XCODE_RUNNER_HOST_ROOT": layout["hostRoot"]}
+    package = root / "BuildProbe"
+    shutil.copytree(scripts.parent / "Tests/Fixtures/BuildProbe", package,
+                    ignore=shutil.ignore_patterns(".build", ".swiftpm"))
+    build = [str(executable), "build", "--package", str(package), "--scheme", "BuildProbe",
+             "--destination", "platform=macOS,arch=arm64", "--", "-jobs", "2"]
+    storage.rename(offline)
+    failure = subprocess.run(build, env=environment, capture_output=True, timeout=30)
+    assert failure.returncode != 0, "A hosted operation accepted its unavailable storage parent"
+    assert not storage.exists(), "A hosted operation recreated its unavailable storage parent"
+    assert not list((offline / "Build").iterdir())
+    assert storage_status(home) == layout
+    offline.rename(storage)
+
+    probe = root / "pool-probe"
+    subprocess.run(["xcrun", "swiftc", "-parse-as-library", "-swift-version", "6",
+                    str(scripts.parent / "Sources/XcodeRunnerKit/HostExecutionPool.swift"),
+                    str(scripts.parent / "Tests/Fixtures/ExecutionPoolProbe.swift"),
+                    "-o", str(probe)], check=True)
+    admission = root / "Admission"
+    admission.mkdir()
+    pool = admission / "pool"
+
+    def pool_status():
+        result = subprocess.run([str(executable), "pool", "status", "--pool-directory", str(pool), "--json"],
+                                env=environment, check=True, capture_output=True, text=True)
+        return json.loads(result.stdout)
+
+    pool_arguments = ["--pool-directory", str(pool), "--maximum-concurrent-jobs", "1"]
+    blocker = subprocess.Popen([str(probe), str(admission), "blocker", "1"],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    queued = None
+    try:
+        wait_for(lambda: (admission / "blocker.started").exists(), "Pool blocker did not acquire its slot")
+        queued = subprocess.Popen(build[:-3] + pool_arguments + build[-3:], env=environment,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        wait_for(lambda: pool_status()["waitingJobCounts"]["medium"] == 1,
+                 "Hosted operation did not wait for the pool")
+        assert queued.poll() is None
+        assert not list((storage / "Build").iterdir())
+        storage.rename(offline)
+        (admission / "blocker.release").touch()
+        stdout, stderr = blocker.communicate(timeout=30)
+        assert blocker.returncode == 0, (stdout, stderr)
+        stdout, stderr = queued.communicate(timeout=30)
+        assert queued.returncode != 0, (stdout, stderr)
+        assert not storage.exists(), "A queued operation recreated its unavailable storage parent"
+        assert not list((offline / "Build").iterdir())
+        status = pool_status()
+        assert status["activeJobCount"] == 0 and not any(status["waitingJobCounts"].values())
+    finally:
+        for process in (queued, blocker):
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate()
+
+    override_build = root / "Override Build"
+    override_cache = root / "Override Cache"
+    result = subprocess.run(build[:-3] + ["--output-directory", str(override_build),
+                            "--compilation-cache", str(override_cache), *pool_arguments, *build[-3:]],
+                            env=environment, check=True, capture_output=True, text=True, timeout=300)
+    log = Path(next(line[5:] for line in result.stdout.splitlines() if line.startswith("Log: ")))
+    assert override_build.resolve() in log.resolve().parents
+    assert compilation_cache_in(log) == override_cache.resolve()
+    assert not storage.exists(), "Explicit paths changed the unavailable managed parent"
+
+
 with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit host setup ") as temporary:
     root = Path(temporary)
     home = root / "home"
@@ -152,6 +240,7 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit host setup ") as tempora
                           "XCODE_RUNNER_HOST_ROOT": str(host.resolve())}
     build = [str(executable), "build", "--package", str(package), "--scheme", "BuildProbe",
              "--destination", "platform=macOS,arch=arm64", "--", "-jobs", "2"]
+    shutil.rmtree(storage / "Build")
     result = subprocess.run(build, env=hosted_environment, check=True, capture_output=True, text=True, timeout=300)
     log = Path(next(line[5:] for line in result.stdout.splitlines() if line.startswith("Log: ")))
     assert (storage / "Build").resolve() in log.parents
@@ -345,4 +434,4 @@ with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
     assert failure.returncode != 0 and b"certificate signing identity" in failure.stderr
     assert (applications / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host").read_text() == "updated executable"
 
-print("PASS: unified storage, serialized initial selection, unavailable parent rejection, managed directory recovery and permissions, existing data preservation, cleanup, physical runner work paths, common-host opt-in, app installation, and signature requirements")
+print("PASS: unified storage, serialized initial selection, unavailable parent rejection at setup and admitted execution, explicit overrides, managed directory recovery and permissions, existing data preservation, cleanup, physical runner work paths, common-host opt-in, app installation, and signature requirements")
