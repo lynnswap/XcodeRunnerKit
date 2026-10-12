@@ -86,14 +86,40 @@ Run an application's tests on an existing Simulator:
   -- -parallel-testing-enabled NO -jobs 4
 ```
 
-The executable accepts `build`, `build-for-testing`, `test`, and
+The Xcode subcommands are `build`, `build-for-testing`, `test`, and
 `test-without-building`. Specify exactly one of `--workspace`, `--project`,
 or `--package`. Forward additional Xcode arguments after `--`.
+Use `pool status` and `pool configure` to manage shared host capacity.
 
 Repeat `--setting NAME=VALUE` for build settings and
 `--environment NAME=VALUE` for child environment values.
 `--developer-directory` selects Xcode without changing the host's
 `xcode-select` setting.
+
+### Pool management
+
+Inspect or change a pool while jobs run:
+
+```sh
+xcode-runner pool status --pool-directory /path/to/shared-pool
+xcode-runner pool configure --pool-directory /path/to/shared-pool --maximum-concurrent-jobs 4
+xcode-runner pool status --pool-directory /path/to/shared-pool --json
+```
+
+`pool configure` initializes a new pool or updates its saved capacity. Jobs
+already running continue; queued jobs use the new limit. See
+[shared host capacity](#shared-host-capacity) for the execution rules.
+
+`pool status` reports the saved `maximumConcurrentJobs` and `activeJobCount`.
+With `--json`, a configured pool produces an object with those two fields;
+an unconfigured pool produces `null` without creating its directory.
+
+Check CLI administration and the existing Xcode command interface:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer \
+python3 Scripts/check-pool-cli.py /absolute/path/to/xcode-runner
+```
 
 ## Job-owned iOS Simulators
 
