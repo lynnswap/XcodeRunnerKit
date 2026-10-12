@@ -156,9 +156,11 @@ parent folder instead. Unrelated files in the chosen parent are kept.
 If storage cannot be prepared, the host opens Settings with **Needs attention**
 and leaves runner services stopped. The error describes what needs to be
 corrected. Choose and save another folder if necessary, then restart the host
-to retry. A failed change restores original runner settings where possible
-and reports any restoration failure. An interrupted change is restored before
-another attempt; its error remains visible until the next successful launch.
+to retry. A failure before the new storage selection is committed restores
+original runner settings and reports any restoration failure. If cleanup fails
+after commit, the new storage stays active and cleanup is retried before
+runner services start. An interrupted change is restored before another
+attempt; its error remains visible until the next successful launch.
 
 Register another runner with optional custom labels:
 
