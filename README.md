@@ -98,7 +98,7 @@ Repeat `--setting NAME=VALUE` for build settings and
 
 ### Execution priority
 
-All four Xcode subcommands accept `--priority high|normal|low`, with `normal`
+All four Xcode subcommands accept `--priority high|medium|low`, with `medium`
 as the default:
 
 ```sh
@@ -131,7 +131,7 @@ already running continue; queued jobs use the new limit. See
 at each priority. With `--json`, a configured pool produces:
 
 ```json
-{"maximumConcurrentJobs":4,"activeJobCount":4,"waitingJobCounts":{"high":1,"normal":2,"low":1}}
+{"maximumConcurrentJobs":4,"activeJobCount":4,"waitingJobCounts":{"high":1,"medium":2,"low":1}}
 ```
 
 An unconfigured pool produces `null` without creating its directory. The text
@@ -343,8 +343,8 @@ on isolated hosted runners rather than a Mac that holds private credentials.
 ### Choose priorities in consumer workflows
 
 A trusted consumer workflow can choose a priority from its event. This example
-uses `high` for pull requests, `normal` for pushes, and `low` for other events,
-including scheduled and manual runs. XcodeRunnerKit reads the explicit CLI flag;
+uses `high` for pull requests, `low` for pushes and scheduled runs, and `medium`
+for manual runs and other events. XcodeRunnerKit reads the explicit CLI flag;
 it does not inspect GitHub events.
 
 Set the environment value on the consumer job and add the test step after its
@@ -352,7 +352,7 @@ checkout and dependency setup:
 
 ```yaml
 env:
-  XCODE_JOB_PRIORITY: ${{ github.event_name == 'pull_request' && 'high' || github.event_name == 'push' && 'normal' || 'low' }}
+  XCODE_JOB_PRIORITY: ${{ github.event_name == 'pull_request' && 'high' || (github.event_name == 'push' || github.event_name == 'schedule') && 'low' || 'medium' }}
 steps:
   - name: Run Xcode tests
     run: |

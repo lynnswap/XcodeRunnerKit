@@ -13,9 +13,9 @@ REPO = Path(__file__).resolve().parents[1]
 ACTIONS = ("build", "build-for-testing", "test", "test-without-building")
 
 
-def expected_status(capacity, active, high=0, normal=0, low=0):
+def expected_status(capacity, active, high=0, medium=0, low=0):
     return {"maximumConcurrentJobs": capacity, "activeJobCount": active,
-            "waitingJobCounts": {"high": high, "normal": normal, "low": low}}
+            "waitingJobCounts": {"high": high, "medium": medium, "low": low}}
 
 
 def wait_for(predicate, timeout=10):
@@ -72,7 +72,7 @@ def main():
         assert "not configured" in command("pool", "status", "--pool-directory", pool).stdout
         configure(6)
         assert status() == expected_status(6, 0)
-        assert "Waiting jobs: 0 (high: 0, normal: 0, low: 0)" in command(
+        assert "Waiting jobs: 0 (high: 0, medium: 0, low: 0)" in command(
             "pool", "status", "--pool-directory", pool).stdout
 
         probe = root / "pool-probe"
@@ -106,17 +106,17 @@ def main():
             wait_for(lambda: all(started(f"active-{index}") for index in range(6)))
             assert status() == expected_status(6, 6)
             start("waiter")
-            wait_for(lambda: status() == expected_status(6, 6, normal=1))
+            wait_for(lambda: status() == expected_status(6, 6, medium=1))
             configured = configure(4)
             assert "Maximum concurrent jobs: 4" in configured.stdout
             assert "Active jobs: 6" in configured.stdout
-            assert "Waiting jobs: 1 (high: 0, normal: 1, low: 0)" in configured.stdout
-            assert status() == expected_status(4, 6, normal=1)
+            assert "Waiting jobs: 1 (high: 0, medium: 1, low: 0)" in configured.stdout
+            assert status() == expected_status(4, 6, medium=1)
             assert all(jobs[f"active-{index}"].poll() is None for index in range(6))
             assert not started("waiter"), "Shrinking the pool started a queued job"
             release("active-0")
             release("active-1")
-            assert status() == expected_status(4, 4, normal=1)
+            assert status() == expected_status(4, 4, medium=1)
             assert not started("waiter"), "A queued job bypassed the reduced capacity"
             release("active-2")
             wait_for(lambda: started("waiter"))
@@ -143,12 +143,12 @@ exec "$(xcrun --find clang)" "$@"
             configure(1)
             start("priority-blocker")
             wait_for(lambda: started("priority-blocker"))
-            waiting_counts = {"high": 0, "normal": 0, "low": 0}
-            for priority in ("low", "normal", "high"):
+            waiting_counts = {"high": 0, "medium": 0, "low": 0}
+            for priority in ("low", "medium", "high"):
                 output = open(root / (priority + ".log"), "wb")
                 logs.append(output)
-                # Omit the normal flag to verify the default through actual admission.
-                priority_arguments = [] if priority == "normal" else ["--priority", priority]
+                # Omit the medium flag to verify the default through actual admission.
+                priority_arguments = [] if priority == "medium" else ["--priority", priority]
                 jobs[priority] = subprocess.Popen([
                     executable, "build", "--package", str(package), "--scheme", "BuildProbe",
                     "--destination", "platform=macOS,arch=arm64",
@@ -162,10 +162,10 @@ exec "$(xcrun --find clang)" "$@"
                 wait_for(lambda: status() == expected_status(1, 1, **waiting_counts))
                 assert jobs[priority].poll() is None, (root / (priority + ".log")).read_text()
             waiting_text = command("pool", "status", "--pool-directory", pool).stdout
-            assert "Waiting jobs: 3 (high: 1, normal: 1, low: 1)" in waiting_text
-            assert all(not (root / (value + "-output")).exists() for value in ("high", "normal", "low"))
+            assert "Waiting jobs: 3 (high: 1, medium: 1, low: 1)" in waiting_text
+            assert all(not (root / (value + "-output")).exists() for value in ("high", "medium", "low"))
             release("priority-blocker")
-            for priority, later in (("high", ("normal", "low")), ("normal", ("low",)), ("low", ())):
+            for priority, later in (("high", ("medium", "low")), ("medium", ("low",)), ("low", ())):
                 wait_for(lambda: (root / (priority + ".started")).exists(), timeout=60)
                 assert all(not (root / (value + "-output")).exists() for value in later), "Wrong CLI admission order"
                 (root / (priority + ".release")).touch()
@@ -194,10 +194,10 @@ exec "$(xcrun --find clang)" "$@"
             help_text = command(action, "--help").stdout
             assert all(option in help_text for option in ("--scheme", "--compilation-cache", "--priority"))
             assert "GitHub dispatch is unaffected" in " ".join(help_text.split())
-            for invalid in ("highest", "HIGH", ""):
+            for invalid in ("normal", "HIGH", ""):
                 result = command(action, "--package", root / "Missing", "--scheme", "Fixture",
                                  "--priority", invalid, success=False)
-                assert "Expected high, normal, or low for --priority" in result.stderr
+                assert "Expected high, medium, or low for --priority" in result.stderr
             result = command(action, "--package", root / "Missing", "--scheme", "Fixture",
                              "--destination", "platform=macOS,arch=arm64",
                              "--output-directory", root / "Output",
@@ -219,7 +219,7 @@ exec "$(xcrun --find clang)" "$@"
                              "--scheme", "BuildProbe", success=False)
             assert "Specify exactly one" in result.stderr
         for action, priority in (("build-for-testing", "high"), ("test-without-building", "low"),
-                                 ("build", "normal"), ("test", None)):
+                                 ("build", "medium"), ("test", None)):
             priority_arguments = ["--priority", priority] if priority else []
             pool_arguments = [] if action == "build" else [
                 "--pool-directory", pool, "--maximum-concurrent-jobs", "2"]
