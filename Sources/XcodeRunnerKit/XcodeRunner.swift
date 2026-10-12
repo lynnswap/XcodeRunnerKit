@@ -23,13 +23,15 @@ public struct XcodeRunner: Sendable {
     ///
     /// Cancellation terminates the operation's process group. Failures retain
     /// artifact locations in XcodeBuildFailure, including incomplete output.
+    /// Priority orders waiting operations when an executionPool is configured.
     public func run(
         _ action: XcodeBuildAction,
         request: XcodeBuildRequest,
+        priority: HostExecutionPool.Priority = .normal,
         onOutput: (@Sendable (Data) throws -> Void)? = nil
     ) async throws -> XcodeBuildResult {
         if let executionPool {
-            return try await executionPool.withSlot {
+            return try await executionPool.withSlot(priority: priority) {
                 try await runManaged(action, request: request, onOutput: onOutput)
             }
         }
