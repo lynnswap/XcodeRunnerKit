@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Check unified job storage and installers without starting a GUI service."""
 import json
+import fcntl
 import os
 from pathlib import Path
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -319,9 +321,13 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit-runner-") as temporary:
     launchctl.chmod(0o755)
     archive = root / "runner.tar.gz"
     config = """#!/usr/bin/env python3
-import json, sys
+import json, os, sys, time
 from pathlib import Path
 a=sys.argv
+if gate := os.environ.get('XRK_FIXTURE_CONFIG_GATE'):
+    gate = Path(gate)
+    (gate / 'entered').touch()
+    while not (gate / 'release').exists(): time.sleep(0.02)
 Path('.runner').write_text(json.dumps({'workFolder':a[a.index('--work')+1], 'labels':a[a.index('--labels')+1]}), encoding='utf-8-sig')
 Path('.env').write_text('')
 """
@@ -381,6 +387,156 @@ Path('.env').write_text('')
     assert service_plist.with_suffix(".plist.before-host").exists()
     assert json.loads((installation / ".runner").read_text(encoding="utf-8-sig")) == received
 
+    storage_probe_source = root / "StorageProbe.swift"
+    storage_probe_source.write_text('''import Foundation
+@main enum StorageProbe {
+    static func main() async throws {
+        let arguments = CommandLine.arguments
+        let installation = HostInstallation(homeDirectory: URL(filePath: arguments[2]))
+        if arguments[1] == "request" {
+            _ = try await installation.requestStorageDirectory(URL(filePath: arguments[3]))
+        } else {
+            if arguments.count > 3 { try Data().write(to: URL(filePath: arguments[3])) }
+            let storage = try await installation.prepareStorageForLaunch()
+            print(storage.directory.path(percentEncoded: false))
+        }
+    }
+}
+''')
+    storage_probe = root / "storage-probe"
+    subprocess.run(["xcrun", "swiftc", "-parse-as-library", "-swift-version", "6",
+                    "-package-name", "XcodeRunnerKit",
+                    *[str(scripts.parent / "Sources/XcodeRunnerKit" / name) for name in
+                      ("HostInstallation.swift", "HostStorageMigration.swift", "CompilationCache.swift")],
+                    str(storage_probe_source), "-o", str(storage_probe)], check=True)
+
+    def request_storage(home, target):
+        subprocess.run([str(storage_probe), "request", str(home), str(target)],
+                       check=True, capture_output=True, text=True, timeout=30)
+
+    # Registration owns storage from layout selection through publishing its host marker.
+    first_home = root / "registration-first-home"
+    source = root / "Registration first source"
+    target = root / "Registration first target"
+    target.mkdir()
+    configure(first_home, source)
+    install_cli(first_home)
+    request_storage(first_home, target)
+    gate = root / "registration-gate"
+    gate.mkdir()
+    runner_name = "registration-first"
+    first_environment = {**environment, "HOME": str(first_home), "XRK_FIXTURE_CONFIG_GATE": str(gate)}
+    registration = subprocess.Popen(installer[:3] + [runner_name, str(archive)],
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, env=first_environment, start_new_session=True)
+    migration = None
+    try:
+        registration.stdin.write("fixture-token\n")
+        registration.stdin.flush()
+        wait_for(lambda: (gate / "entered").exists(), "Runner configuration did not reach its gate")
+        retained = source / "Work" / runner_name / "retained"
+        retained.write_text("runner work data")
+        started = root / "registration-first-migration-started"
+        migration = subprocess.Popen([str(storage_probe), "prepare", str(first_home), str(started)],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                     start_new_session=True)
+        wait_for(started.exists, "Storage preparation did not start")
+        lock_path = first_home / "Library/Application Support/XcodeRunnerKit/storage.lock"
+        with lock_path.open("r+") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                raise AssertionError("Runner configuration released its storage transaction before opt-in")
+        assert migration.poll() is None and storage_status(first_home)["storageDirectory"] == str(source.resolve())
+        assert not (target / "Work").exists()
+        (gate / "release").touch()
+        stdout, stderr = registration.communicate(timeout=30)
+        assert registration.returncode == 0, (stdout, stderr)
+        stdout, stderr = migration.communicate(timeout=30)
+        assert migration.returncode == 0, (stdout, stderr)
+        runner = first_home / "Library/XcodeRunnerKit/runners" / runner_name
+        record = json.loads((runner / ".runner").read_text(encoding="utf-8-sig"))
+        assert record["workFolder"] == str((target / "Work" / runner_name).resolve())
+        assert (runner / ".xcode-runner-host").exists()
+        assert (target / "Work" / runner_name / "retained").read_text() == "runner work data"
+        assert retained.read_text() == "runner work data"
+        assert storage_status(first_home)["storageDirectory"] == str(target.resolve())
+    finally:
+        for process in (registration, migration):
+            if process is not None and process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate(timeout=10)
+
+    # A queued registration obtains the committed layout after the migration transaction.
+    second_home = root / "migration-first-home"
+    source = root / "Migration first source"
+    target = root / "Migration first target"
+    target.mkdir()
+    layout = json.loads(configure(second_home, source).stdout)
+    install_cli(second_home)
+    request_storage(second_home, target)
+    runner_name = "migration-first"
+    second_environment = {**environment, "HOME": str(second_home)}
+    unhosted = second_home / "Library/XcodeRunnerKit/runners/unhosted"
+    unhosted.mkdir(parents=True)
+    old_work = source / "Work" / unhosted.name
+    old_work.mkdir()
+    original_registration = ('\ufeff' + json.dumps({"workFolder": str(old_work.resolve())})).encode()
+    (unhosted / ".runner").write_bytes(original_registration)
+    (unhosted / "bin").mkdir()
+    (unhosted / "bin/runsvc.sh").write_text("#!/bin/bash\nexit 0\n")
+    (unhosted / "runsvc.sh").write_text("original service script")
+    activation = None
+    with (Path(layout["hostRoot"]) / "storage.lock").open("r+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        registration = subprocess.Popen(installer[:3] + [runner_name, str(archive)],
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        text=True, env=second_environment, start_new_session=True)
+        try:
+            registration.stdin.write("fixture-token\n")
+            registration.stdin.flush()
+            activation = subprocess.Popen(["bash", str(scripts / "enable-hosted-runner.sh"), str(unhosted)],
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                          env=second_environment, start_new_session=True)
+            subprocess.run([str(storage_probe), "prepare", str(second_home)],
+                           env={**second_environment, "XCODE_RUNNER_STORAGE_LOCK_DESCRIPTOR": str(lock.fileno())},
+                           pass_fds=(lock.fileno(),), check=True, capture_output=True, text=True, timeout=30)
+            assert registration.poll() is None
+            assert activation.poll() is None
+            assert not (source / "Work" / runner_name).exists()
+            assert not (target / "Work" / runner_name).exists()
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            stdout, stderr = registration.communicate(timeout=30)
+            assert registration.returncode == 0, (stdout, stderr)
+            runner = second_home / "Library/XcodeRunnerKit/runners" / runner_name
+            record = json.loads((runner / ".runner").read_text(encoding="utf-8-sig"))
+            assert record["workFolder"] == str((target / "Work" / runner_name).resolve())
+            assert (runner / ".xcode-runner-host").exists()
+            assert not (source / "Work" / runner_name).exists()
+            stdout, stderr = activation.communicate(timeout=30)
+            assert activation.returncode != 0 and "Reconfigure this runner with --work" in stderr, (stdout, stderr)
+            assert str((target / "Work" / unhosted.name).resolve()) in stderr
+            assert not (unhosted / ".xcode-runner-host").exists()
+            assert not (unhosted / ".service").exists()
+            assert (unhosted / ".runner").read_bytes() == original_registration
+            assert (unhosted / "runsvc.sh").read_text() == "original service script"
+            assert not (unhosted / "runsvc.sh.new").exists()
+        finally:
+            for process in (registration, activation):
+                if process is not None and process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=10)
+
+    unrelated = root / "unrelated-lock"
+    with unrelated.open("w+") as wrong_lock:
+        failure = subprocess.run(["bash", str(scripts / "enable-hosted-runner.sh"), str(installation)],
+                                 env={**environment, "XCODE_RUNNER_STORAGE_LOCK_DESCRIPTOR": str(wrong_lock.fileno())},
+                                 pass_fds=(wrong_lock.fileno(),), capture_output=True, text=True, timeout=30)
+    assert failure.returncode != 0 and "does not match" in failure.stderr
+    assert json.loads((installation / ".runner").read_text(encoding="utf-8-sig")) == received
+
     broken = root / "unavailable"
     broken.symlink_to(root / "missing-volume", target_is_directory=True)
     (physical_work / "Work" / "unavailable").symlink_to(broken, target_is_directory=True)
@@ -434,4 +590,4 @@ with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
     assert failure.returncode != 0 and b"certificate signing identity" in failure.stderr
     assert (applications / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host").read_text() == "updated executable"
 
-print("PASS: unified storage, serialized initial selection, unavailable parent rejection at setup and admitted execution, explicit overrides, managed directory recovery and permissions, existing data preservation, cleanup, physical runner work paths, common-host opt-in, app installation, and signature requirements")
+print("PASS: unified storage, serialized initial selection and runner registration/startup migration, unavailable parent rejection at setup and admitted execution, explicit overrides, managed directory recovery and permissions, existing data preservation, cleanup, physical runner work paths, common-host opt-in, app installation, and signature requirements")

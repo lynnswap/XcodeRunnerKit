@@ -124,6 +124,10 @@ Click the hammer icon in the menu bar and choose **Settings…**. The window sho
   submitted through other runner processes.
 - Opted-in runners and the state of their local service processes. GitHub
   connection and job status remain available on GitHub.
+- One storage folder for checkouts, build results, and the shared compiler
+  cache. Choose a parent folder once; the host manages its subdirectories.
+
+![Host settings with one storage folder, a shared execution limit, and local runner service status.](Images/HostSettings.png)
 
 Enter a positive whole number and choose **Apply** to change the execution
 limit without restarting the host or runners. Decreasing from six to four
@@ -134,8 +138,39 @@ Reading the window does not configure an unused pool; **Apply** explicitly
 creates its saved limit if necessary.
 
 Closing the settings window leaves the host and runners running.
-Select the job-data parent during initial setup;
-the initializer preserves an existing selection rather than moving live data.
+
+### Change the storage folder
+
+In **Storage**, choose a parent folder with **Choose…**, then choose **Save**.
+Saving keeps running jobs and their storage unchanged. The same field shows
+the saved selection, which takes effect on the next host launch.
+
+Before restarting the host, drain its jobs and stop other tools that use its
+checkouts, build results, or compiler cache. The host copies its `Work`,
+`CompilationCache`, and `Build` directories before starting runner services.
+It updates opted-in runners' work directories, preserves registration
+credentials, and keeps the original files. Existing managed subdirectories
+in a new destination are preserved by refusing the change; choose another
+parent folder instead. Unrelated files in the chosen parent are kept.
+
+Migration copies checkout files without rewriting Git configuration. After
+draining jobs and before restarting the host, update custom path-dependent Git
+authentication settings for the new physical `Work` location, including
+`includeIf.gitdir` conditions and included file paths. `actions/checkout`
+configures its own credentials on each checkout. The private dependency
+helper's keys and mirror configuration remain under the fixed host root.
+
+If storage cannot be prepared, the host opens Settings with **Needs attention**
+and leaves runner services stopped. The error describes what needs to be
+corrected. Choose and save another folder if necessary, then restart the host
+to retry a destination error. If the original storage is unavailable, restore
+its access before retrying. If the active storage record cannot be read, repair
+that record or its read access first; saving a different folder cannot recover
+an unknown source location. A failure before the new storage selection is
+committed restores original runner settings and reports any restoration
+failure. If cleanup fails after commit, the new storage stays active and cleanup is retried before
+runner services start. An interrupted change is restored before another
+attempt; its error remains visible until the next successful launch.
 
 Register another runner with optional custom labels:
 
@@ -145,7 +180,9 @@ bash Scripts/install-github-runner.sh OWNER/REPO runner-name /path/to/runner.tar
   "xcode-runnerkit"
 ```
 
-To move an existing runner, drain its jobs, then run:
+To enable the common host for an existing runner, its registered work folder
+must already use the configured storage's `Work/<runner-name>` location as a
+physical absolute path. Drain its jobs, then run:
 
 ```sh
 bash Scripts/enable-hosted-runner.sh "$HOME/Library/XcodeRunnerKit/runners/runner-name"
@@ -156,6 +193,10 @@ and registration credentials, and creates `.xcode-runner-host` as the opt-in
 marker. It backs up the service path and plist with a `.before-host` suffix.
 The host discovers changes within two seconds. A runner with an individual
 `.service` is excluded to avoid starting duplicate listeners.
+For runners registered with other work locations, use the
+[main installer](#register-repository-runners) with a new installation name.
+It registers the managed work location; preserve any existing checkout data
+until that new runner is ready.
 Setup waits for the previous service's processes to exit before enabling host
 discovery. Keep `stop-runner-service.py` beside the setup scripts when copying
 them to another Mac.

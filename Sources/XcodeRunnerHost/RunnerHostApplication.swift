@@ -41,8 +41,7 @@ private enum RunnerHostApplication {
                 withExtendedLifetime(service) { dispatchMain() }
             }
             let installation = options.installation
-            let storage = try installation.initializeStorage()
-            let host = try RunnerHost(installation: installation, storage: storage)
+            let host = try RunnerHost(installation: installation)
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
             application.delegate = host
@@ -124,7 +123,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private let logs: URL
     private let lockDescriptor: Int32
     private let executable: URL
-    private let environment: [String: String]
+    private let installation: HostInstallation
+    private var environment: [String: String] = [:]
     private struct HostedRunner {
         let task: Task<Void, Never>
         var state: RunnerServiceState
@@ -136,18 +136,19 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var monitoring: Task<Void, Never>?
     private var poolMonitoring: Task<Void, Never>?
+    private var storagePreparation: Task<Void, Never>?
     private var signals: [any DispatchSourceSignal] = []
     private var stopping = false
     private var stopped = false
     private var terminationReplyPending = false
 
-    init(installation: HostInstallation, storage: HostInstallation.Storage) throws {
+    init(installation: HostInstallation) throws {
         let root = installation.runnersRoot
         let logs = installation.logsDirectory
         self.root = root.resolvingSymlinksInPath()
         self.logs = logs
-        self.environment = installation.environment(for: storage)
-        self.settings = try HostSettingsModel(hostRoot: installation.hostRoot)
+        self.installation = installation
+        self.settings = try HostSettingsModel(installation: installation)
         guard let executable = Bundle.main.executableURL else {
             throw ValidationError("Cannot locate the runner host executable.")
         }
@@ -173,7 +174,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installStatusItem()
-        settings.hostState = "Running"
+        settings.hostState = "Preparing storage"
         for number in [SIGTERM, SIGINT] {
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
@@ -181,6 +182,33 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             source.resume()
             signals.append(source)
         }
+        storagePreparation = Task {
+            do {
+                let storage = try await installation.prepareStorageForLaunch()
+                try Task.checkCancellation()
+                environment = installation.environment(for: storage)
+                settings.storageDidBecomeAvailable(storage)
+                settings.hostState = "Running"
+                startRunnerMonitoring()
+            } catch {
+                guard !Task.isCancelled else { return }
+                settings.storagePreparationFailed(error)
+                print("Runner storage preparation failed: \(error)")
+                showSettings(nil)
+            }
+        }
+        poolMonitoring = Task {
+            while !Task.isCancelled {
+                await settings.refreshPoolStatus()
+                updatePoolMenuItem()
+                do { try await Task.sleep(for: .seconds(2)) }
+                catch { break }
+            }
+        }
+        print("Runner host started for \(root.path(percentEncoded: false)).")
+    }
+
+    private func startRunnerMonitoring() {
         monitoring = Task {
             while !Task.isCancelled {
                 do {
@@ -196,15 +224,6 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 }
             }
         }
-        poolMonitoring = Task {
-            while !Task.isCancelled {
-                await settings.refreshPoolStatus()
-                updatePoolMenuItem()
-                do { try await Task.sleep(for: .seconds(2)) }
-                catch { break }
-            }
-        }
-        print("Runner host started for \(root.path(percentEncoded: false)).")
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -276,8 +295,10 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         settings.hostState = "Stopping"
         monitoring?.cancel()
         poolMonitoring?.cancel()
+        storagePreparation?.cancel()
         Task {
             for runner in runners.values { runner.task.cancel() }
+            await storagePreparation?.value
             await monitoring?.value
             await poolMonitoring?.value
             for runner in runners.values { await runner.task.value }

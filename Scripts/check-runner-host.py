@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Check the actual host process against service fixtures and a launchd job."""
 import json
+import fcntl
 import os
 from pathlib import Path
 import plistlib
+import pty
+import shutil
 import signal
 import subprocess
 import sys
@@ -11,6 +14,7 @@ import tempfile
 import time
 
 executable = str(Path(sys.argv[1]).resolve())
+cli = Path(executable).with_name('xcode-runner')
 scripts = Path(__file__).resolve().parent
 
 
@@ -49,7 +53,10 @@ def stop_host(host, runners):
 def fixture(root, name):
     directory = root / name
     directory.mkdir()
-    (directory / '.runner').write_text('{}')
+    home = root.parents[2]
+    work = home/'Library/Application Support/XcodeRunnerKit/Storage/Work'/name
+    work.mkdir(parents=True, exist_ok=True)
+    (directory / '.runner').write_text(json.dumps({'agentName': name, 'workFolder': str(work.resolve())}))
     (directory / '.xcode-runner-host').touch()
     (directory / 'worker.py').write_text('''import json, os, signal, time
 from pathlib import Path
@@ -83,15 +90,20 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     root = Path(temporary)
     home = root / 'home'
     host_root = home/'Library/Application Support/XcodeRunnerKit'
+    installed_cli = host_root/'bin/xcode-runner'
+    installed_cli.parent.mkdir(parents=True)
+    shutil.copy2(cli, installed_cli)
     runners = home/'Library/XcodeRunnerKit/runners'
     runners.mkdir(parents=True)
     first = fixture(runners, '.hidden-first')
     excluded = fixture(runners, 'individual')
     (excluded / '.service').touch()
     arguments = [executable, '--home-directory', str(home)]
+    environment = {**os.environ, 'HOME':str(home),
+                   'PATH':str(Path(executable).parent)+os.pathsep+os.environ['PATH']}
     with (root/'host.log').open('w') as log:
         host = subprocess.Popen([Path(executable).name]+arguments[1:], cwd=root,
-                                env={**os.environ, 'PATH':str(Path(executable).parent)+os.pathsep+os.environ['PATH']},
+                                env=environment,
                                 stdout=log, stderr=log)
         try:
             wait_for(lambda:(first/'pid.json').exists(), 'Hidden runner did not start')
@@ -125,7 +137,8 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
             try:
                 wait_for(lambda:(legacy/'pid.json').exists(), 'Individual service did not start')
                 legacy_pid = json.loads((legacy/'pid.json').read_text())['pid']
-                migration = subprocess.Popen(['bash',str(scripts/'enable-hosted-runner.sh'),str(legacy)],stdout=log,stderr=log)
+                migration = subprocess.Popen(['bash',str(scripts/'enable-hosted-runner.sh'),str(legacy)],
+                                             env=environment, stdout=log,stderr=log)
                 wait_for(lambda:(legacy/'stopping').exists(), 'Individual service did not start shutdown')
                 assert alive(legacy_pid) and not (legacy/'.xcode-runner-host').exists()
                 assert migration.wait(timeout=20) == 0
@@ -200,6 +213,83 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     assert rejected.returncode != 0 and b'certificate signing identity' in rejected.stderr
     assert not (root/'home/Applications').exists()
 
+with tempfile.TemporaryDirectory(prefix='RunnerHost blocked storage ') as temporary:
+    root = Path(temporary)
+    home = root/'home'
+    host_root = home/'Library/Application Support/XcodeRunnerKit'
+    runners = home/'Library/XcodeRunnerKit/runners'
+    runners.mkdir(parents=True)
+    environment = {**os.environ, 'HOME':str(home)}
+    subprocess.run([str(cli), 'host', 'storage', 'configure', '--json'],
+                   env=environment, check=True, capture_output=True)
+    first = fixture(runners, 'first')
+    registration = (first/'.runner').read_bytes()
+    active_record = (host_root/'storage-directory').read_bytes()
+    source = Path(active_record.decode())
+    retained = [source/name/'retained' for name in ('Work', 'CompilationCache', 'Build')]
+    for file in retained: file.write_text('preserved job data')
+    destination = root/'Next job data'
+    destination.mkdir()
+    requested = str(destination.resolve()).encode()
+    (host_root/'requested-storage-directory').write_bytes(requested)
+    ready = root/'storage-held'
+    holder = subprocess.Popen([sys.executable, '-c', '''import fcntl, sys, time
+from pathlib import Path
+with open(sys.argv[1], 'a+b') as coordinator:
+    fcntl.flock(coordinator, fcntl.LOCK_EX)
+    Path(sys.argv[2]).touch()
+    while True: time.sleep(1)
+''', str(host_root/'storage.lock'), str(ready)])
+    master = slave = None
+    host = None
+    try:
+        wait_for(ready.exists, 'External process did not hold the storage coordinator')
+        master, slave = pty.openpty()
+        os.set_blocking(master, False)
+        host = subprocess.Popen([executable, '--home-directory', str(home)],
+                                env=environment, stdout=slave, stderr=slave)
+        os.close(slave)
+        slave = None
+        output = bytearray()
+        with (root/'host.log').open('wb') as log:
+            def host_started():
+                try:
+                    chunk = os.read(master, 65536)
+                except BlockingIOError:
+                    return False
+                output.extend(chunk)
+                log.write(chunk)
+                log.flush()
+                return b'Runner host started for ' in output
+            wait_for(host_started, 'Host did not announce startup while storage was locked')
+            assert host.poll() is None and not (first/'pid.json').exists()
+            host.send_signal(signal.SIGTERM)
+            assert host.wait(timeout=5) == 0, bytes(output)
+        assert holder.poll() is None, 'Stopping the waiting host stopped the lock holder'
+        with (host_root/'storage.lock').open('r+') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                raise AssertionError('The storage coordinator was released during host shutdown')
+        assert (host_root/'storage-directory').read_bytes() == active_record
+        assert (host_root/'requested-storage-directory').read_bytes() == requested
+        assert (first/'.runner').read_bytes() == registration
+        assert not (first/'pid.json').exists()
+        assert not (host_root/'storage-migration.json').exists()
+        assert not list(destination.iterdir())
+        assert all(file.read_text() == 'preserved job data' for file in retained)
+        assert not list(source.rglob('.xcode-runner-migration-*'))
+    finally:
+        if host is not None and host.poll() is None:
+            host.kill()
+            host.wait(timeout=10)
+        for descriptor in (master, slave):
+            if descriptor is not None: os.close(descriptor)
+        holder.terminate()
+        holder.wait(timeout=10)
+
 with tempfile.TemporaryDirectory(prefix='RunnerHost blocked pool ') as temporary:
     root = Path(temporary)
     home = root/'home'
@@ -245,4 +335,66 @@ with open(sys.argv[1], 'a+b') as coordinator:
         holder.wait(timeout=10)
     assert not (pool/'capacity').exists(), 'Host status reads configured an unused pool'
 
-print('PASS: multiple runners, separate service groups, hidden runner discovery, individual-service exclusion, singleton, graceful shutdown, host/helper crash cleanup, immediate service exit, restart, and discovery/removal/shutdown while the pool coordinator is locked')
+with tempfile.TemporaryDirectory(prefix='RunnerHost storage change ') as temporary:
+    root = Path(temporary)
+    home = root/'home'
+    host_root = home/'Library/Application Support/XcodeRunnerKit'
+    runners = home/'Library/XcodeRunnerKit/runners'
+    runners.mkdir(parents=True)
+    first = fixture(runners, 'first')
+    credential = b'unchanged registration credentials'
+    (first/'.credentials').write_bytes(credential)
+    arguments = [executable, '--home-directory', str(home)]
+    with (root/'host.log').open('w') as log:
+        host = subprocess.Popen(arguments, stdout=log, stderr=log)
+        try:
+            wait_for(lambda:(first/'pid.json').exists(), 'Storage fixture runner did not start')
+            original_process = json.loads((first/'pid.json').read_text())
+            original_registration = (first/'.runner').read_bytes()
+            source = Path((host_root/'storage-directory').read_text())
+            for name in ['Work', 'CompilationCache', 'Build']:
+                (source/name/'retained').write_text('preserved job data')
+            destination = root/'New job data'
+            destination.mkdir()
+            (host_root/'requested-storage-directory').write_text(str(destination.resolve()))
+            time.sleep(3)
+            assert alive(original_process['pid']), 'Saving a storage selection stopped an active runner'
+            assert (first/'.runner').read_bytes() == original_registration
+            assert (host_root/'storage-directory').read_text() == str(source)
+            stop_host(host, runners)
+            assert not alive(original_process['pid'])
+            (first/'pid.json').unlink()
+            host = subprocess.Popen(arguments, stdout=log, stderr=log)
+            wait_for(lambda:(first/'pid.json').exists(), 'Runner did not start after storage migration')
+            migrated_process = json.loads((first/'pid.json').read_text())
+            assert migrated_process['storage'] == str(destination.resolve())
+            registration = json.loads((first/'.runner').read_text(encoding='utf-8-sig'))
+            assert registration['workFolder'] == str((destination/'Work/first').resolve())
+            assert (first/'.credentials').read_bytes() == credential
+            for name in ['Work', 'CompilationCache', 'Build']:
+                assert (source/name/'retained').read_text() == 'preserved job data'
+                assert (destination/name/'retained').read_text() == 'preserved job data'
+            collision = root/'Occupied storage'
+            (collision/'Work').mkdir(parents=True)
+            (collision/'Work/foreign').write_text('keep existing data')
+            (host_root/'requested-storage-directory').write_text(str(collision.resolve()))
+            stop_host(host, runners)
+            (first/'pid.json').unlink()
+            host = subprocess.Popen(arguments, stdout=log, stderr=log)
+            time.sleep(3)
+            assert host.poll() is None, 'Storage failure exited the host instead of keeping settings available'
+            assert not (first/'pid.json').exists(), 'A listener started after storage migration failed'
+            assert (host_root/'storage-directory').read_text() == str(destination.resolve())
+            assert (collision/'Work/foreign').read_text() == 'keep existing data'
+            replacement = root/'Replacement storage'
+            replacement.mkdir()
+            (host_root/'requested-storage-directory').write_text(str(replacement.resolve()))
+            stop_host(host, runners)
+            host = subprocess.Popen(arguments, stdout=log, stderr=log)
+            wait_for(lambda:(first/'pid.json').exists(), 'Saving another folder did not recover the next host launch')
+            assert json.loads((first/'pid.json').read_text())['storage'] == str(replacement.resolve())
+            assert (replacement/'Work/retained').read_text() == 'preserved job data'
+        finally:
+            stop_host(host, runners)
+
+print('PASS: runner lifecycle, hidden runner discovery, prompt shutdown while storage is locked, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')

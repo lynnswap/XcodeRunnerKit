@@ -1,11 +1,12 @@
 import Foundation
 import Testing
+import XcodeRunnerKit
 @testable import XcodeRunnerHost
 
 @MainActor
 struct HostSettingsTests {
     private func model(at root: URL) throws -> HostSettingsModel {
-        try HostSettingsModel(hostRoot: root.appending(path: "Host"))
+        try HostSettingsModel(installation: HostInstallation(homeDirectory: root.appending(path: "Home")))
     }
 
     @Test func readsDoNotConfigurePoolAndApplyUsesHostRoot() async throws {
@@ -24,7 +25,7 @@ struct HostSettingsTests {
         #expect(settings.poolStatus?.maximumConcurrentJobs == 6)
         #expect(settings.poolStatus?.activeJobCount == 0)
         #expect(settings.poolStatus?.waitingJobCounts.total == 0)
-        #expect(settings.pool.directory == root.appending(path: "Host/Pool"))
+        #expect(settings.pool.directory == settings.installation.poolDirectory)
         try FileManager.default.removeItem(at: root)
     }
 
@@ -199,5 +200,95 @@ struct HostSettingsTests {
         let options = try HostOptions.parse(["--home-directory", "/tmp/Fixture home"])
         #expect(options.installation.hostRoot == URL(filePath: "/tmp/Fixture home/Library/Application Support/XcodeRunnerKit"))
         #expect(options.installation.logsDirectory == options.installation.hostRoot.appending(path: "logs/runners"))
+    }
+
+    @Test func storageSaveKeepsRunningSnapshotAndDisplaysOnePendingFolder() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root.appending(path: "Home"))
+        let active = try installation.initializeStorage(at: root.appending(path: "Active"))
+        let settings = try HostSettingsModel(installation: installation)
+        settings.storageDidBecomeAvailable(active)
+        settings.hostState = "Running"
+        let next = root.appending(path: "Next")
+        try FileManager.default.createDirectory(at: next, withIntermediateDirectories: true)
+        let alias = root.appending(path: "Chosen folder")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: next)
+        let physicalNext = URL(filePath: try #require(next.resourceValues(forKeys: [.canonicalPathKey]).canonicalPath))
+        settings.storageDirectoryInput = alias.path(percentEncoded: false)
+        await settings.saveStorageSelection()
+        #expect(settings.storageSaveError == nil)
+        #expect(settings.activeStorage?.directory == active.directory)
+        #expect(try installation.storage()?.directory == active.directory)
+        #expect(settings.savedStorageDirectory == (try installation.requestedStorageDirectory()))
+        #expect(settings.savedStorageDirectory == physicalNext)
+        #expect(settings.storageDirectoryInput == physicalNext.path(percentEncoded: false))
+        #expect(settings.storageMessage == "Saved for the next host launch. Running jobs continue using their current storage.")
+        #expect(settings.hostState == "Running")
+    }
+
+    @Test func storageSavePreservesSelectionsUntilCurrentConfigurationIsRepaired() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root.appending(path: "Home"))
+        let active = try installation.initializeStorage(at: root.appending(path: "Active"))
+        let settings = try HostSettingsModel(installation: installation)
+        settings.storageDidBecomeAvailable(active)
+        settings.hostState = "Running"
+        let previous = root.appending(path: "Previous selection")
+        let next = root.appending(path: "Next selection")
+        for folder in [previous, next] {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        settings.storageDirectoryInput = previous.path(percentEncoded: false)
+        await settings.saveStorageSelection()
+        #expect(settings.storageSaveError == nil)
+        let saved = try #require(settings.savedStorageDirectory)
+        let activeRecord = installation.hostRoot.appending(path: "storage-directory")
+        let pendingRecord = installation.hostRoot.appending(path: "requested-storage-directory")
+        let originalActive = try Data(contentsOf: activeRecord)
+        let originalPending = try Data(contentsOf: pendingRecord)
+        let malformed = Data("invalid current storage setting".utf8)
+        try malformed.write(to: activeRecord, options: .atomic)
+
+        settings.storageDirectoryInput = next.path(percentEncoded: false)
+        await settings.saveStorageSelection()
+        #expect(settings.storageSaveError != nil)
+        #expect(settings.savedStorageDirectory == saved)
+        #expect(settings.storageDirectoryInput == next.path(percentEncoded: false))
+        #expect(settings.activeStorage?.directory == active.directory)
+        #expect(settings.hostState == "Running")
+        #expect(try Data(contentsOf: activeRecord) == malformed)
+        #expect(try Data(contentsOf: pendingRecord) == originalPending)
+
+        try originalActive.write(to: activeRecord, options: .atomic)
+        await settings.saveStorageSelection()
+        let physicalNext = URL(filePath: try #require(next.resourceValues(forKeys: [.canonicalPathKey]).canonicalPath))
+        #expect(settings.storageSaveError == nil)
+        #expect(settings.savedStorageDirectory == physicalNext)
+        #expect(try installation.requestedStorageDirectory() == physicalNext)
+        #expect(settings.storageDirectoryInput == physicalNext.path(percentEncoded: false))
+        #expect(try Data(contentsOf: activeRecord) == originalActive)
+        #expect(try installation.storage()?.directory == active.directory)
+    }
+
+    @Test func storageSelectionRemainsUsableAfterStartupFailure() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let settings = try model(at: root)
+        settings.storagePreparationFailed(CocoaError(.fileWriteNoPermission))
+        #expect(settings.hostState == "Needs attention")
+        #expect(settings.storageError != nil)
+        settings.storageDirectoryInput = "relative/folder"
+        await settings.saveStorageSelection()
+        #expect(settings.storageSaveError != nil)
+        let next = root.appending(path: "Next")
+        try FileManager.default.createDirectory(at: next, withIntermediateDirectories: true)
+        settings.storageDirectoryInput = next.path(percentEncoded: false)
+        await settings.saveStorageSelection()
+        #expect(settings.storageSaveError == nil)
+        #expect(settings.storageError != nil)
+        #expect(settings.activeStorage == nil)
+        #expect(settings.hostState == "Needs attention")
     }
 }
