@@ -227,9 +227,10 @@ extension HostInstallation {
                 if hosted {
                     throw StorageMigrationError("\(directory.lastPathComponent) still has an individual runner service. Remove that service before changing host storage.")
                 }
-                if let path = object["workFolder"] as? String, path.hasPrefix("/") {
+                if let path = object["workFolder"] as? String {
                     let managed = normalizedPathComponents(of: storage.workDirectory)
-                    let individual = normalizedPathComponents(of: URL(filePath: path))
+                    let work = path.hasPrefix("/") ? URL(filePath: path) : directory.appending(path: path)
+                    let individual = normalizedPathComponents(of: work)
                     if individual.starts(with: managed) {
                         throw StorageMigrationError("An individual runner service uses the current storage folder. Stop and remove that service before changing host storage.")
                     }

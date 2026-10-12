@@ -315,11 +315,25 @@ struct HostStorageMigrationTests {
         var object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
         let workAlias = root.appending(path: "Managed work alias")
         try FileManager.default.createSymbolicLink(at: workAlias, withDestinationURL: source.workDirectory)
-        for work in [source.workDirectory, workAlias] {
-            object["workFolder"] = work.appending(path: "unavailable-individual").path(percentEncoded: false)
+        let managedIndividualWork = source.workDirectory.appending(path: "individual")
+        try FileManager.default.createDirectory(at: managedIndividualWork, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(at: individual.appending(path: "_work"), withDestinationURL: managedIndividualWork)
+        let retained = Data("individual checkout".utf8)
+        try retained.write(to: managedIndividualWork.appending(path: "source"))
+        let hostedMetadata = try Data(contentsOf: registration.appending(path: ".runner"))
+        let overlappingWorkFolders = [source.workDirectory, workAlias].map {
+            $0.appending(path: "unavailable-individual").path(percentEncoded: false)
+        } + ["_work"]
+        for workFolder in overlappingWorkFolders {
+            object["workFolder"] = workFolder
             try JSONSerialization.data(withJSONObject: object).write(to: file)
+            let original = try Data(contentsOf: file)
             await #expect(throws: (any Error).self) { try await installation.prepareStorageForLaunch() }
             #expect(try installation.storage()?.directory == source.directory)
+            #expect(try installation.requestedStorageDirectory() == target)
+            #expect(try Data(contentsOf: file) == original)
+            #expect(try Data(contentsOf: registration.appending(path: ".runner")) == hostedMetadata)
+            #expect(try Data(contentsOf: managedIndividualWork.appending(path: "source")) == retained)
             #expect(try FileManager.default.contentsOfDirectory(atPath: target.path(percentEncoded: false)).isEmpty)
         }
         object["workFolder"] = source.directory.appending(path: "Work elsewhere/individual").path(percentEncoded: false)
