@@ -15,10 +15,11 @@ extension HostInstallation {
     }
 
     @concurrent package func requestStorageDirectory(_ directory: URL) async throws -> URL {
-        guard try directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
+        let resolved = directory.resolvingSymlinksInPath()
+        guard try resolved.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
             throw StorageMigrationError("Choose an existing folder for storage.")
         }
-        let physical = try directory.resolvingSymlinksInPath().compilerCanonicalURL()
+        let physical = try resolved.compilerCanonicalURL()
         try FileManager.default.createDirectory(at: hostRoot, withIntermediateDirectories: true)
         try Data(physical.path(percentEncoded: false).utf8).write(to: requestedStorageRecord, options: .atomic)
         return physical
@@ -80,7 +81,7 @@ extension HostInstallation {
         let names = ["Work", "CompilationCache", "Build"]
         for name in names {
             let destination = target.directory.appending(path: name)
-            if manager.fileExists(atPath: destination.path(percentEncoded: false)) {
+            if try migrationItemExists(at: destination) {
                 throw StorageMigrationError("The chosen folder already contains \(name). Choose a different folder so existing files are preserved.")
             }
         }
@@ -201,12 +202,12 @@ extension HostInstallation {
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return [] }
         var backups: [RegistrationBackup] = []
         for directory in directories where try directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true {
-            let hosted = manager.fileExists(atPath: directory.appending(path: ".xcode-runner-host").path(percentEncoded: false))
-            let individual = manager.fileExists(atPath: directory.appending(path: ".service").path(percentEncoded: false))
+            let hosted = try migrationItemExists(at: directory.appending(path: ".xcode-runner-host"))
+            let individual = try migrationItemExists(at: directory.appending(path: ".service"))
             guard hosted || individual else { continue }
             if individual && !changingStorage { continue }
             let file = directory.appending(path: ".runner")
-            guard manager.fileExists(atPath: file.path(percentEncoded: false)) else { continue }
+            guard try migrationItemExists(at: file) else { continue }
             let data = try Data(contentsOf: file)
             let object = try registrationObject(data)
             if individual {

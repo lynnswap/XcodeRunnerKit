@@ -224,8 +224,20 @@ struct HostStorageMigrationTests {
         #expect(try installation.storage()?.directory == source.directory)
         #expect(try Data(contentsOf: registration.appending(path: ".runner")) == original)
         #expect(try Data(contentsOf: target.appending(path: "Work/foreign")) == Data("foreign checkout".utf8))
+        let brokenTarget = try await choose(root.appending(path: "Existing link destination"), installation: installation)
+        let brokenWork = brokenTarget.appending(path: "Work")
+        let linkedPath = root.appending(path: "Unavailable foreign checkout").path(percentEncoded: false)
+        try FileManager.default.createSymbolicLink(atPath: brokenWork.path(percentEncoded: false), withDestinationPath: linkedPath)
+        await #expect(throws: (any Error).self) { try await installation.prepareStorageForLaunch() }
+        #expect(try installation.storage()?.directory == source.directory)
+        #expect(try installation.requestedStorageDirectory() == brokenTarget)
+        #expect(try Data(contentsOf: registration.appending(path: ".runner")) == original)
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: brokenWork.path(percentEncoded: false)) == linkedPath)
+        #expect(!FileManager.default.fileExists(atPath: installation.hostRoot.appending(path: "storage-migration.json").path(percentEncoded: false)))
         let third = try await choose(root.appending(path: "Third"), installation: installation)
         #expect(try await installation.prepareStorageForLaunch().directory == third)
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: brokenWork.path(percentEncoded: false)) == linkedPath)
+        #expect(try Data(contentsOf: target.appending(path: "Work/foreign")) == Data("foreign checkout".utf8))
     }
 
     @Test func individualServicesAreExcludedAndHostedAmbiguityPreventsMigration() async throws {
@@ -288,6 +300,18 @@ struct HostStorageMigrationTests {
                               target.appending(path: "CompilationCache/Results.xcresult/.read-only")] {
                 try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path(percentEncoded: false))
             }
+        }
+        let firstPermissions = try #require(FileManager.default.attributesOfItem(atPath: first.path(percentEncoded: false))[.posixPermissions] as? NSNumber)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: first.path(percentEncoded: false))
+        defer { try? FileManager.default.setAttributes([.posixPermissions: firstPermissions], ofItemAtPath: first.path(percentEncoded: false)) }
+        await #expect(throws: (any Error).self) { try await installation.prepareStorageForLaunch() }
+        #expect(try installation.storage()?.directory == source.directory)
+        #expect(try installation.requestedStorageDirectory() == target)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: target.path(percentEncoded: false)).isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: installation.hostRoot.appending(path: "storage-migration.json").path(percentEncoded: false)))
+        try FileManager.default.setAttributes([.posixPermissions: firstPermissions], ofItemAtPath: first.path(percentEncoded: false))
+        for (directory, data) in zip([first, second], originals) {
+            #expect(try Data(contentsOf: directory.appending(path: ".runner")) == data)
         }
         try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: second.appending(path: ".runner").path(percentEncoded: false))
         try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: second.path(percentEncoded: false))
