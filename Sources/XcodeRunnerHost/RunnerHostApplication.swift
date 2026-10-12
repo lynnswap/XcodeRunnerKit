@@ -138,6 +138,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private var poolMenuItem: NSMenuItem?
     private var settingsWindow: NSWindow?
     private var monitoring: Task<Void, Never>?
+    private var poolMonitoring: Task<Void, Never>?
     private var signals: [any DispatchSourceSignal] = []
     private var stopping = false
     private var stopped = false
@@ -182,8 +183,6 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         }
         monitoring = Task {
             while !Task.isCancelled {
-                await settings.refreshPoolStatus()
-                updatePoolMenuItem()
                 do {
                     try await reconcile()
                     try await Task.sleep(for: .seconds(2))
@@ -195,6 +194,14 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                     do { try await Task.sleep(for: .seconds(2)) }
                     catch { break }
                 }
+            }
+        }
+        poolMonitoring = Task {
+            while !Task.isCancelled {
+                await settings.refreshPoolStatus()
+                updatePoolMenuItem()
+                do { try await Task.sleep(for: .seconds(2)) }
+                catch { break }
             }
         }
         print("Runner host started for \(root.path(percentEncoded: false)).")
@@ -268,9 +275,11 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         stopping = true
         settings.hostState = "Stopping"
         monitoring?.cancel()
+        poolMonitoring?.cancel()
         Task {
             for runner in runners.values { runner.task.cancel() }
             await monitoring?.value
+            await poolMonitoring?.value
             for runner in runners.values { await runner.task.value }
             stopped = true
             print("Runner host stopped.")
