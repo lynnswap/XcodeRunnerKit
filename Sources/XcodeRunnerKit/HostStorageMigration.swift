@@ -74,9 +74,7 @@ extension HostInstallation {
 
     private func migrateStorage(from source: Storage, to directory: URL) throws -> Storage {
         let manager = FileManager.default
-        guard try source.directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
-            throw StorageMigrationError("The current storage folder is unavailable. Restore access before changing storage.")
-        }
+        try source.requireAvailableParent()
         let target = Storage(directory: try directory.resolvingSymlinksInPath().compilerCanonicalURL())
         let sourceDirectories = [source.workDirectory, source.compilationCacheDirectory, source.buildDirectory]
         let names = ["Work", "CompilationCache", "Build"]
