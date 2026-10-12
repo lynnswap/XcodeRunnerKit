@@ -4,6 +4,7 @@ import Darwin
 import Foundation
 import Subprocess
 import SwiftUI
+import XcodeRunnerKit
 
 struct HostOptions: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -11,18 +12,15 @@ struct HostOptions: ParsableCommand {
         abstract: "Host opted-in GitHub Actions runners in a macOS menu bar app."
     )
 
-    @Option(help: "Directory containing runner installations.")
-    var runnersRoot = URL.homeDirectory.appending(path: "Library/XcodeRunnerKit/runners").path(percentEncoded: false)
-
-    @Option(help: "Directory containing the shared execution pool and compilation cache.")
-    var hostRoot = URL.homeDirectory.appending(path: "Library/Application Support/XcodeRunnerKit").path(percentEncoded: false)
+    @Option(help: .hidden) var homeDirectory: String?
 
     @Option(help: .hidden) var serviceDirectory: String?
     @Option(help: .hidden) var parentProcessID: Int32?
     @Option(help: .hidden) var ownershipDescriptor: Int32?
 
-    @Option(help: "Directory for runner service logs.")
-    var logsDirectory = URL.homeDirectory.appending(path: "Library/Application Support/XcodeRunnerKit/logs/runners").path(percentEncoded: false)
+    var installation: HostInstallation {
+        HostInstallation(homeDirectory: homeDirectory.map { URL(filePath: $0) } ?? HostInstallation.defaultHomeDirectory)
+    }
 }
 
 @main
@@ -42,11 +40,9 @@ private enum RunnerHostApplication {
                 service.start()
                 withExtendedLifetime(service) { dispatchMain() }
             }
-            let host = try RunnerHost(
-                root: URL(filePath: options.runnersRoot, directoryHint: .isDirectory),
-                logs: URL(filePath: options.logsDirectory, directoryHint: .isDirectory),
-                hostRoot: URL(filePath: options.hostRoot, directoryHint: .isDirectory)
-            )
+            let installation = options.installation
+            let storage = try installation.initializeStorage()
+            let host = try RunnerHost(installation: installation, storage: storage)
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
             application.delegate = host
@@ -128,6 +124,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private let logs: URL
     private let lockDescriptor: Int32
     private let executable: URL
+    private let environment: [String: String]
     private struct HostedRunner {
         let task: Task<Void, Never>
         var state: RunnerServiceState
@@ -144,10 +141,13 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private var stopped = false
     private var terminationReplyPending = false
 
-    init(root: URL, logs: URL, hostRoot: URL) throws {
+    init(installation: HostInstallation, storage: HostInstallation.Storage) throws {
+        let root = installation.runnersRoot
+        let logs = installation.logsDirectory
         self.root = root.resolvingSymlinksInPath()
         self.logs = logs
-        self.settings = try HostSettingsModel(hostRoot: hostRoot, runnersRoot: root, logsDirectory: logs)
+        self.environment = installation.environment(for: storage)
+        self.settings = try HostSettingsModel(hostRoot: installation.hostRoot, runnersRoot: root, logsDirectory: logs)
         guard let executable = Bundle.main.executableURL else {
             throw ValidationError("Cannot locate the runner host executable.")
         }
@@ -401,7 +401,9 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                     "--parent-process-id", String(getpid()),
                     "--ownership-descriptor", String(lockDescriptor),
                 ]),
-                environment: .inherit,
+                environment: .inherit.updating(Dictionary(uniqueKeysWithValues: environment.map {
+                    (Subprocess.Environment.Key(stringLiteral: $0.key), Optional($0.value))
+                })),
                 workingDirectory: .init(directory.path(percentEncoded: false)),
                 platformOptions: options,
                 input: .none,

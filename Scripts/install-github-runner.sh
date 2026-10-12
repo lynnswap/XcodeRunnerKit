@@ -2,18 +2,13 @@
 set -euo pipefail
 umask 077
 
-repository=${1:?Usage: install-github-runner.sh OWNER/REPO NAME ARCHIVE [RUNNERS_ROOT] [WORK_DIRECTORY] [LABELS] [SERVICE_MODE]; registration token on stdin}
+repository=${1:?Usage: install-github-runner.sh OWNER/REPO NAME ARCHIVE [LABELS]; registration token on stdin}
 runner_name=${2:?Specify a unique runner name}
 archive=${3:?Specify actions-runner-osx-arm64-2.338.0.tar.gz}
-runners_root=${4:-"$HOME/Library/XcodeRunnerKit/runners"}
-work_directory=${5:-_work}
-labels=${6:-xcode-runnerkit}
-service_mode=${7:-individual}
+labels=${4:-xcode-runnerkit}
+if [[ $# -gt 4 ]]; then echo "Usage: install-github-runner.sh OWNER/REPO NAME ARCHIVE [LABELS]" >&2; exit 2; fi
 script_directory="$(cd "$(dirname "$0")" && pwd)"
-case "$service_mode" in individual|host) ;; *) echo "SERVICE_MODE must be individual or host." >&2; exit 1;; esac
-if [[ "$service_mode" == host ]]; then
-    test -r "$script_directory/enable-hosted-runner.sh"
-fi
+test -r "$script_directory/enable-hosted-runner.sh"
 case "$runner_name" in ""|"."|".."|*/*) echo "Runner name must be one path component." >&2; exit 1;; esac
 
 # Verified against the official actions/runner v2.338.0 release asset digest.
@@ -24,7 +19,9 @@ if [[ "$actual" != "$expected" ]]; then
     echo "Runner archive checksum does not match the pinned release." >&2
     exit 1
 fi
-runners_root="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$runners_root")"
+layout=$("$HOME/Library/Application Support/XcodeRunnerKit/bin/xcode-runner" host storage configure --json)
+runners_root=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["runnersRoot"])' <<< "$layout")
+work_root=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["workDirectory"])' <<< "$layout")
 directory="$runners_root/$runner_name"
 # The official runner's default shell template does not quote its script path.
 case "$directory" in *[[:space:]]*) echo "Runner installation paths must not contain whitespace." >&2; exit 1;; esac
@@ -32,10 +29,7 @@ if [[ -f "$directory/.runner" ]]; then
     echo "Runner already configured at $directory; use its service commands or remove its registration before reinstalling." >&2
     exit 1
 fi
-case "$work_directory" in
-    /*) work_path="$work_directory";;
-    *) work_path="$directory/$work_directory";;
-esac
+work_path="$work_root/$runner_name"
 mkdir -p "$work_path"
 work_directory="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$work_path")"
 probe=$(mktemp "$work_directory/.xcode-runnerkit-setup.XXXXXX")
@@ -53,15 +47,5 @@ cd "$directory"
     --name "$runner_name" --labels "$labels" --work "$work_directory"
 unset registration_token
 printf 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=%s/cleanup-runner-temp.sh\n' "$hooks_directory" >> .env
-if [[ "$service_mode" == host ]]; then
-    bash "$script_directory/enable-hosted-runner.sh" "$directory"
-    printf 'Registered %s for %s with the common host.\n' "$runner_name" "$repository"
-    exit 0
-fi
-./svc.sh install
-plist=$(cat .service)
-if ! launchctl bootstrap "gui/$(id -u)" "$plist"; then
-    echo "Runner is registered and its service is installed at $plist, but service startup failed. Log in to the CI user's GUI session and start the installed service." >&2
-    exit 1
-fi
-printf 'Registered %s for %s; service %s\n' "$runner_name" "$repository" "$plist"
+bash "$script_directory/enable-hosted-runner.sh" "$directory"
+printf 'Registered %s for %s with the common host.\n' "$runner_name" "$repository"

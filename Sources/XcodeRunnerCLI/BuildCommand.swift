@@ -45,7 +45,7 @@ struct BuildOptions: ParsableArguments {
     @Option var package: String?
     @Option var scheme: String
     @Option var destination = "platform=macOS"
-    @Option var outputDirectory = "XcodeRunnerOutput"
+    @Option var outputDirectory: String?
     @Option var derivedData: String?
     @Option var developerDirectory: String?
     @Option(help: "Shared compiler CAS directory; DerivedData remains isolated.")
@@ -62,6 +62,17 @@ struct BuildOptions: ParsableArguments {
     var poolDirectory: String?
     @Option(help: "Capacity for a new shared pool. Existing pools use their saved capacity. Required with --pool-directory.")
     var maximumConcurrentJobs: Int?
+    @Option(
+        help: "Local admission priority with --pool-directory: high, normal, or low (default: normal). Running jobs continue; GitHub dispatch is unaffected.",
+        completion: .list(HostExecutionPool.Priority.allCases.map(\.rawValue)),
+        transform: { value in
+            guard let priority = HostExecutionPool.Priority(rawValue: value) else {
+                throw ValidationError("Expected high, normal, or low for --priority: " + value)
+            }
+            return priority
+        }
+    )
+    var priority: HostExecutionPool.Priority = .normal
     @Option(name: .customLong("setting"), help: "A build setting in NAME=VALUE form. May be repeated.")
     var settings: [String] = []
     @Option(name: .customLong("environment"), help: "A child environment value in NAME=VALUE form. May be repeated.")
@@ -70,6 +81,7 @@ struct BuildOptions: ParsableArguments {
     var additionalArguments: [String] = []
 
     func run(_ action: XcodeBuildAction) async throws {
+        let host = try HostInstallation.hostedConfiguration()
         let sources: [XcodeBuildSource] = [
             workspace.map { .workspace(Self.url($0)) },
             project.map { .project(Self.url($0)) },
@@ -80,11 +92,11 @@ struct BuildOptions: ParsableArguments {
         }
         var request = XcodeBuildRequest(
             source: source, scheme: scheme, destination: destination,
-            outputDirectory: Self.url(outputDirectory)
+            outputDirectory: outputDirectory.map(Self.url) ?? host?.storage.buildDirectory ?? Self.url("XcodeRunnerOutput")
         )
         request.derivedDataDirectory = derivedData.map(Self.url)
-        if let compilationCache {
-            var cache = CompilationCache(directory: Self.url(compilationCache))
+        if let cacheDirectory = compilationCache.map(Self.url) ?? host?.storage.compilationCacheDirectory {
+            var cache = CompilationCache(directory: cacheDirectory)
             cache.enablesDiagnosticRemarks = cacheDiagnostics
             cache.prefixMappings = try Self.assignments(prefixMappings).sorted(by: { $0.key < $1.key }).map {
                 CompilationCache.PrefixMapping(
@@ -113,10 +125,13 @@ struct BuildOptions: ParsableArguments {
             )
         } else if poolDirectory != nil || maximumConcurrentJobs != nil {
             throw ValidationError("Specify both --pool-directory and --maximum-concurrent-jobs.")
+        } else if let host {
+            runner.executionPool = try HostExecutionPool(directory: host.poolDirectory, initialCapacity: 4)
         }
         let configuredRunner = runner
+        let executionPriority = priority
         let task = Task {
-            try await configuredRunner.run(action, request: request) { data in
+            try await configuredRunner.run(action, request: request, priority: executionPriority) { data in
                 try FileHandle.standardOutput.write(contentsOf: data)
             }
         }

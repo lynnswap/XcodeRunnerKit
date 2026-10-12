@@ -199,9 +199,9 @@ struct HostSettingsTests {
         try FileManager.default.removeItem(at: root)
     }
 
-    @Test func customHostRootDoesNotDependOnLogLocation() throws {
-        let options = try HostOptions.parse(["--host-root", "/tmp/Host data", "--logs-directory", "/tmp/Service logs"])
-        #expect(options.hostRoot == "/tmp/Host data")
-        #expect(options.logsDirectory == "/tmp/Service logs")
+    @Test func installedPathsComeFromOneHomeDirectory() throws {
+        let options = try HostOptions.parse(["--home-directory", "/tmp/Fixture home"])
+        #expect(options.installation.hostRoot == URL(filePath: "/tmp/Fixture home/Library/Application Support/XcodeRunnerKit"))
+        #expect(options.installation.logsDirectory == options.installation.hostRoot.appending(path: "logs/runners"))
     }
 }
