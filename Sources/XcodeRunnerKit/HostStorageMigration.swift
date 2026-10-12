@@ -20,7 +20,7 @@ extension HostInstallation {
             throw StorageMigrationError("Choose an existing folder for storage.")
         }
         let physical = try resolved.compilerCanonicalURL()
-        try withStorageLock {
+        try await withStorageLock {
             _ = try activeStorageForChange()
             try Data(physical.path(percentEncoded: false).utf8).write(to: requestedStorageRecord, options: .atomic)
         }
@@ -29,7 +29,7 @@ extension HostInstallation {
 
     // The host calls this only after obtaining ownership of its runners, before starting services.
     @concurrent package func prepareStorageForLaunch() async throws -> Storage {
-        try withStorageLock { try prepareStorageWhileLocked() }
+        try await withStorageLock { try prepareStorageWhileLocked() }
     }
 
     private func activeStorageForChange() throws -> Storage? {

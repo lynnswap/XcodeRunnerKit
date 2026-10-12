@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Check the actual host process against service fixtures and a launchd job."""
 import json
+import fcntl
 import os
 from pathlib import Path
 import plistlib
+import pty
 import shutil
 import signal
 import subprocess
@@ -211,6 +213,83 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     assert rejected.returncode != 0 and b'certificate signing identity' in rejected.stderr
     assert not (root/'home/Applications').exists()
 
+with tempfile.TemporaryDirectory(prefix='RunnerHost blocked storage ') as temporary:
+    root = Path(temporary)
+    home = root/'home'
+    host_root = home/'Library/Application Support/XcodeRunnerKit'
+    runners = home/'Library/XcodeRunnerKit/runners'
+    runners.mkdir(parents=True)
+    environment = {**os.environ, 'HOME':str(home)}
+    subprocess.run([str(cli), 'host', 'storage', 'configure', '--json'],
+                   env=environment, check=True, capture_output=True)
+    first = fixture(runners, 'first')
+    registration = (first/'.runner').read_bytes()
+    active_record = (host_root/'storage-directory').read_bytes()
+    source = Path(active_record.decode())
+    retained = [source/name/'retained' for name in ('Work', 'CompilationCache', 'Build')]
+    for file in retained: file.write_text('preserved job data')
+    destination = root/'Next job data'
+    destination.mkdir()
+    requested = str(destination.resolve()).encode()
+    (host_root/'requested-storage-directory').write_bytes(requested)
+    ready = root/'storage-held'
+    holder = subprocess.Popen([sys.executable, '-c', '''import fcntl, sys, time
+from pathlib import Path
+with open(sys.argv[1], 'a+b') as coordinator:
+    fcntl.flock(coordinator, fcntl.LOCK_EX)
+    Path(sys.argv[2]).touch()
+    while True: time.sleep(1)
+''', str(host_root/'storage.lock'), str(ready)])
+    master = slave = None
+    host = None
+    try:
+        wait_for(ready.exists, 'External process did not hold the storage coordinator')
+        master, slave = pty.openpty()
+        os.set_blocking(master, False)
+        host = subprocess.Popen([executable, '--home-directory', str(home)],
+                                env=environment, stdout=slave, stderr=slave)
+        os.close(slave)
+        slave = None
+        output = bytearray()
+        with (root/'host.log').open('wb') as log:
+            def host_started():
+                try:
+                    chunk = os.read(master, 65536)
+                except BlockingIOError:
+                    return False
+                output.extend(chunk)
+                log.write(chunk)
+                log.flush()
+                return b'Runner host started for ' in output
+            wait_for(host_started, 'Host did not announce startup while storage was locked')
+            assert host.poll() is None and not (first/'pid.json').exists()
+            host.send_signal(signal.SIGTERM)
+            assert host.wait(timeout=5) == 0, bytes(output)
+        assert holder.poll() is None, 'Stopping the waiting host stopped the lock holder'
+        with (host_root/'storage.lock').open('r+') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                raise AssertionError('The storage coordinator was released during host shutdown')
+        assert (host_root/'storage-directory').read_bytes() == active_record
+        assert (host_root/'requested-storage-directory').read_bytes() == requested
+        assert (first/'.runner').read_bytes() == registration
+        assert not (first/'pid.json').exists()
+        assert not (host_root/'storage-migration.json').exists()
+        assert not list(destination.iterdir())
+        assert all(file.read_text() == 'preserved job data' for file in retained)
+        assert not list(source.rglob('.xcode-runner-migration-*'))
+    finally:
+        if host is not None and host.poll() is None:
+            host.kill()
+            host.wait(timeout=10)
+        for descriptor in (master, slave):
+            if descriptor is not None: os.close(descriptor)
+        holder.terminate()
+        holder.wait(timeout=10)
+
 with tempfile.TemporaryDirectory(prefix='RunnerHost blocked pool ') as temporary:
     root = Path(temporary)
     home = root/'home'
@@ -318,4 +397,4 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost storage change ') as tempora
         finally:
             stop_host(host, runners)
 
-print('PASS: runner lifecycle, hidden runner discovery, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')
+print('PASS: runner lifecycle, hidden runner discovery, prompt shutdown while storage is locked, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')

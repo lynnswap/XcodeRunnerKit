@@ -103,31 +103,55 @@ package struct HostInstallation: Sendable {
     }
 
     package func withStorageLock<Result>(_ operation: () throws -> Result) throws -> Result {
+        let descriptors = try storageLockDescriptors()
+        defer { close(descriptors.owned) }
+        while flock(descriptors.locking, LOCK_EX) != 0 {
+            if errno != EINTR { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        }
+        return try operation()
+    }
+
+    @concurrent package func withStorageLock<Result: Sendable>(
+        _ operation: @Sendable () throws -> Result
+    ) async throws -> Result {
+        try Task.checkCancellation()
+        let descriptors = try storageLockDescriptors()
+        defer { close(descriptors.owned) }
+        while flock(descriptors.locking, LOCK_EX | LOCK_NB) != 0 {
+            let code = errno
+            guard code == EWOULDBLOCK || code == EINTR else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try Task.checkCancellation()
+        return try operation()
+    }
+
+    private func storageLockDescriptors() throws -> (owned: Int32, locking: Int32) {
         try FileManager.default.createDirectory(at: hostRoot, withIntermediateDirectories: true)
         let lock = hostRoot.appending(path: "storage.lock")
         let descriptor = open(lock.path(percentEncoded: false), O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
-        defer { close(descriptor) }
-        let lockingDescriptor: Int32
-        if let inherited = ProcessInfo.processInfo.environment["XCODE_RUNNER_STORAGE_LOCK_DESCRIPTOR"] {
-            // The installer holds this open file description across nested configure and opt-in calls.
-            guard let inherited = Int32(inherited) else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL)) }
-            var ownStatus = stat()
-            var inheritedStatus = stat()
-            guard fstat(descriptor, &ownStatus) == 0, fstat(inherited, &inheritedStatus) == 0 else {
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        do {
+            if let inherited = ProcessInfo.processInfo.environment["XCODE_RUNNER_STORAGE_LOCK_DESCRIPTOR"] {
+                // The installer holds this open file description across nested configure and opt-in calls.
+                guard let inherited = Int32(inherited) else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL)) }
+                var ownStatus = stat()
+                var inheritedStatus = stat()
+                guard fstat(descriptor, &ownStatus) == 0, fstat(inherited, &inheritedStatus) == 0 else {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+                guard ownStatus.st_dev == inheritedStatus.st_dev, ownStatus.st_ino == inheritedStatus.st_ino else {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
+                }
+                return (descriptor, inherited)
             }
-            guard ownStatus.st_dev == inheritedStatus.st_dev, ownStatus.st_ino == inheritedStatus.st_ino else {
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
-            }
-            lockingDescriptor = inherited
-        } else {
-            lockingDescriptor = descriptor
+            return (descriptor, descriptor)
+        } catch {
+            close(descriptor)
+            throw error
         }
-        while flock(lockingDescriptor, LOCK_EX) != 0 {
-            if errno != EINTR { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
-        }
-        return try operation()
     }
 
     package func environment(for storage: Storage) -> [String: String] {
