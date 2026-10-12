@@ -26,6 +26,7 @@ struct HostSettingsTests {
         #expect(settings.saveError == nil)
         #expect(settings.poolStatus?.maximumConcurrentJobs == 6)
         #expect(settings.poolStatus?.activeJobCount == 0)
+        #expect(settings.poolStatus?.waitingJobCounts.total == 0)
         #expect(settings.pool.directory == settings.hostRoot.appending(path: "Pool"))
         #expect(settings.compilationCache == settings.hostRoot.appending(path: "CompilationCache"))
         #expect(!FileManager.default.fileExists(atPath: settings.logsDirectory.appending(path: "Pool").path()))
@@ -113,6 +114,58 @@ struct HostSettingsTests {
         for job in jobs { try await job.job.value }
         await settings.refreshPoolStatus()
         #expect(settings.poolStatus?.activeJobCount == 0)
+        try FileManager.default.removeItem(at: root)
+    }
+
+    @Test func refreshShowsSharedWaitingCountsByPriority() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        let settings = try model(at: root)
+        await settings.refreshPoolStatus()
+        settings.capacityInput = "1"
+        await settings.applyCapacity()
+        let started = AsyncStream<Void>.makeStream()
+        let finish = AsyncStream<Void>.makeStream()
+        let active = Task {
+            try await settings.pool.withSlot {
+                started.continuation.yield()
+                for await _ in finish.stream { break }
+            }
+        }
+        var events = started.stream.makeAsyncIterator()
+        await events.next()
+        let high = Task { try await settings.pool.withSlot(priority: .high) {} }
+        let normal = Task { try await settings.pool.withSlot(priority: .normal) {} }
+        let low = Task { try await settings.pool.withSlot(priority: .low) {} }
+        defer {
+            finish.continuation.finish()
+            for job in [active, high, normal, low] { job.cancel() }
+        }
+        for _ in 0..<100 {
+            await settings.refreshPoolStatus()
+            if settings.poolStatus?.waitingJobCounts.total == 3 { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(settings.poolStatus?.activeJobCount == 1)
+        #expect(settings.poolStatus?.waitingJobCounts.high == 1)
+        #expect(settings.poolStatus?.waitingJobCounts.normal == 1)
+        #expect(settings.poolStatus?.waitingJobCounts.low == 1)
+        #expect(settings.capacityInput == "1")
+
+        normal.cancel()
+        do {
+            try await normal.value
+            Issue.record("The cancelled waiting job completed without cancellation.")
+        } catch is CancellationError {}
+        await settings.refreshPoolStatus()
+        #expect(settings.poolStatus?.waitingJobCounts.high == 1)
+        #expect(settings.poolStatus?.waitingJobCounts.normal == 0)
+        #expect(settings.poolStatus?.waitingJobCounts.low == 1)
+
+        finish.continuation.finish()
+        for job in [active, high, low] { try await job.value }
+        await settings.refreshPoolStatus()
+        #expect(settings.poolStatus?.activeJobCount == 0)
+        #expect(settings.poolStatus?.waitingJobCounts.total == 0)
         try FileManager.default.removeItem(at: root)
     }
 
