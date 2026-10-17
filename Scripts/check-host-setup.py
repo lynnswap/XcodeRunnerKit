@@ -314,7 +314,7 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit-runner-") as temporary:
     tools = root / "tools"
     tools.mkdir()
     checksum = tools / "shasum"
-    checksum.write_text("#!/bin/bash\necho df4cebda25c86a886ed204e49fee63f5c2e7cec5f447b5c98440a826bbdf9df2 fixture\n")
+    checksum.write_text("#!/bin/bash\necho ${XRK_FIXTURE_ARCHIVE_SHA256:-df4cebda25c86a886ed204e49fee63f5c2e7cec5f447b5c98440a826bbdf9df2} fixture\n")
     checksum.chmod(0o755)
     launchctl = tools / "launchctl"
     launchctl.write_text("#!/bin/bash\nexit 0\n")
@@ -375,6 +375,17 @@ Path('.env').write_text('')
     assert not (hosted_directory / ".service").exists()
     assert (hosted_directory / "runsvc.sh").is_file()
     assert (hosted_directory / ".runner").is_file()
+
+    release_digest = "a" * 64
+    release_environment = {**environment, "XRK_FIXTURE_ARCHIVE_SHA256": release_digest}
+    released = installer[:3] + ["release-digest", str(archive), "xcode-runnerkit", release_digest]
+    subprocess.run(released, input="fixture-token\n", text=True, env=release_environment, check=True, capture_output=True)
+    assert (installation_root / "release-digest" / ".xcode-runner-host").exists()
+    rejected = installer[:3] + ["wrong-digest", str(archive), "xcode-runnerkit", "b" * 64]
+    failure = subprocess.run(rejected, input="fixture-token\n", text=True, env=release_environment, capture_output=True)
+    assert failure.returncode != 0 and "does not match the expected release digest" in failure.stderr
+    assert not (installation_root / "wrong-digest").exists()
+    assert not (physical_work / "Work" / "wrong-digest").exists()
 
     service_plist = root / "individual.plist"
     import plistlib
@@ -567,6 +578,9 @@ with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
     app = root / "input" / "XcodeRunnerHost.app"
     (app / "Contents/MacOS").mkdir(parents=True)
     (app / "Contents/MacOS/xcode-runner-host").write_text("first executable")
+    setup = app / "Contents/Resources/HostSetup"
+    setup.mkdir(parents=True)
+    (setup / "install-github-runner.sh").write_text("first setup script")
     (app / "Contents/Info.plist").write_bytes(plistlib.dumps({
         "CFBundleIdentifier": "dev.lynnswap.XcodeRunnerHost",
         "CFBundleExecutable": "xcode-runner-host",
@@ -581,10 +595,14 @@ with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
     plist = plistlib.loads((home / "Library/LaunchAgents/dev.lynnswap.XcodeRunnerHost.plist").read_bytes())
     assert plist["AssociatedBundleIdentifiers"] == ["dev.lynnswap.XcodeRunnerHost"]
     assert plist["ProgramArguments"] == [str(applications.resolve() / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host")]
+    assert (applications / "XcodeRunnerHost.app/Contents/Resources/HostSetup/install-github-runner.sh").read_text() == "first setup script"
     (app / "Contents/MacOS/xcode-runner-host").write_text("updated executable")
+    (setup / "install-github-runner.sh").write_text("updated setup script")
     subprocess.run(command, env=env, check=True, capture_output=True)
     assert (applications / "XcodeRunnerHost.previous.app/Contents/MacOS/xcode-runner-host").read_text() == "first executable"
     assert (applications / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host").read_text() == "updated executable"
+    assert (applications / "XcodeRunnerHost.previous.app/Contents/Resources/HostSetup/install-github-runner.sh").read_text() == "first setup script"
+    assert (applications / "XcodeRunnerHost.app/Contents/Resources/HostSetup/install-github-runner.sh").read_text() == "updated setup script"
     (tools / "codesign").write_text("#!/bin/bash\nif [[ \"$1\" == -dv ]]; then echo Signature=adhoc >&2; fi\n")
     failure = subprocess.run(command, env=env, capture_output=True)
     assert failure.returncode != 0 and b"certificate signing identity" in failure.stderr

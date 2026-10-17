@@ -7,17 +7,17 @@ install_github_runner() {
     runner_name=${2:?Specify a unique runner name}
     archive=${3:?Specify actions-runner-osx-arm64-2.338.0.tar.gz}
     labels=${4:-xcode-runnerkit}
-    if [[ $# -gt 4 ]]; then echo "Usage: install-github-runner.sh OWNER/REPO NAME ARCHIVE [LABELS]" >&2; exit 2; fi
+    if [[ $# -gt 5 ]]; then echo "Usage: install-github-runner.sh OWNER/REPO NAME ARCHIVE [LABELS] [SHA256]" >&2; exit 2; fi
     script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     test -r "$script_directory/enable-hosted-runner.sh"
     case "$runner_name" in ""|"."|".."|*/*) echo "Runner name must be one path component." >&2; exit 1;; esac
 
     # Verified against the official actions/runner v2.338.0 release asset digest.
-    expected=df4cebda25c86a886ed204e49fee63f5c2e7cec5f447b5c98440a826bbdf9df2
+    expected=${5:-df4cebda25c86a886ed204e49fee63f5c2e7cec5f447b5c98440a826bbdf9df2}
     actual=$(shasum -a 256 "$archive")
     actual=${actual%% *}
     if [[ "$actual" != "$expected" ]]; then
-        echo "Runner archive checksum does not match the pinned release." >&2
+        echo "Runner archive checksum does not match the expected release digest." >&2
         exit 1
     fi
     layout=$("$HOME/Library/Application Support/XcodeRunnerKit/bin/xcode-runner" host storage configure --json)

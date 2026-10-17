@@ -13,8 +13,15 @@ else
     executable="$(swift build -c release --show-bin-path)/xcode-runner-host"
 fi
 app="$output/XcodeRunnerHost.app"
-mkdir -p "$app/Contents/MacOS"
+setup="$app/Contents/Resources/HostSetup"
+mkdir -p "$app/Contents/MacOS" "$setup"
 install -m 755 "$executable" "$app/Contents/MacOS/xcode-runner-host"
+for name in install-github-runner.sh enable-hosted-runner.sh cleanup-runner-temp.sh; do
+    install -m 755 "$script_directory/$name" "$setup/$name"
+done
+for name in lock-host-storage.py stop-runner-service.py cleanup-runner-temp.py; do
+    install -m 644 "$script_directory/$name" "$setup/$name"
+done
 python3 - "$app/Contents/Info.plist" <<'PY'
 from pathlib import Path
 import plistlib, sys

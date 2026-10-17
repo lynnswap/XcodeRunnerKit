@@ -44,6 +44,7 @@ struct RunnerSettingsRow: Identifiable, Sendable {
 final class HostSettingsModel {
     let installation: HostInstallation
     let pool: HostExecutionPool
+    let github: GitHubHostSettings
     var hostState = "Starting"
     var runners: [RunnerSettingsRow] = []
     var runnerScanError: String?
@@ -64,6 +65,7 @@ final class HostSettingsModel {
         self.installation = installation
         // Reading status does not initialize the pool. Only Apply or a job can do that.
         self.pool = try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4)
+        self.github = GitHubHostSettings(installation: installation, pool: pool)
         do {
             savedStorageDirectory = try installation.requestedStorageDirectory() ?? installation.storage()?.directory
             storageDirectoryInput = savedStorageDirectory?.path(percentEncoded: false) ?? ""
@@ -83,6 +85,7 @@ final class HostSettingsModel {
 
     func storageDidBecomeAvailable(_ storage: HostInstallation.Storage) {
         activeStorage = storage
+        github.storageIsReady = true
         storageError = nil
         if savedStorageDirectory == nil {
             savedStorageDirectory = storage.directory
@@ -91,6 +94,7 @@ final class HostSettingsModel {
     }
 
     func storagePreparationFailed(_ error: any Error) {
+        github.storageIsReady = false
         storageError = "Could not prepare storage: \(error.localizedDescription)"
         hostState = "Needs attention"
     }
@@ -164,7 +168,7 @@ final class HostSettingsModel {
     }
 
     func applyCapacity() async {
-        guard hasLoadedPoolStatus, !isSaving else { return }
+        guard hasLoadedPoolStatus, !isSaving, !github.isSynchronizing, !github.isConnecting else { return }
         guard let capacity = Int(capacityInput), capacity > 0 else {
             saveError = "Enter a positive whole number."
             return
@@ -172,9 +176,11 @@ final class HostSettingsModel {
         isSaving = true
         defer { isSaving = false }
         do {
+            try github.saveSelection()
             try await pool.updateMaximumConcurrentJobs(to: capacity)
             saveError = nil
             await refreshPoolStatus()
+            await github.synchronize()
         } catch {
             saveError = "Could not save the execution limit: \(error.localizedDescription)"
         }
@@ -188,6 +194,7 @@ struct HostSettingsView: View {
     var body: some View {
         ScrollView {
             Form {
+                GitHubSettingsView(model: model.github)
                 Section("Storage") {
                     TextField("Storage folder", text: $model.storageDirectoryInput)
                         .textFieldStyle(.roundedBorder)
@@ -206,7 +213,7 @@ struct HostSettingsView: View {
                     if let error = model.storageError { errorMessage(error) }
                     if let error = model.storageSaveError { errorMessage(error) }
                 }
-                Section("Execution Pool") {
+                Section("Xcode Execution") {
                     LabeledContent("Running jobs") {
                         Text(model.poolStatus.map { String($0.activeJobCount) } ?? unavailablePoolValue)
                             .monospacedDigit()
@@ -228,18 +235,20 @@ struct HostSettingsView: View {
                             .monospacedDigit()
                     }
                     HStack {
-                        TextField("Maximum concurrent jobs", text: $model.capacityInput)
+                        TextField("Maximum concurrent Xcode jobs", text: $model.capacityInput)
                             .textFieldStyle(.roundedBorder)
                             .accessibilityIdentifier("execution-limit")
                         Button(model.isSaving ? "Applying…" : "Apply") {
                             Task { await model.applyCapacity() }
                         }
-                        .disabled(!model.hasLoadedPoolStatus || model.isSaving || model.hostState == "Stopping")
+                        .disabled(!model.hasLoadedPoolStatus || model.isSaving || model.github.isConnecting || model.github.isSynchronizing || model.hostState == "Stopping")
                         .accessibilityIdentifier("apply-execution-limit")
                     }
                     Text(model.admissionMessage)
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                    Text("This limit is shared across all repositories. Selected repositories receive enough runner registrations to use it. GitHub jobs may wait here after assignment; their in-progress count can be higher than the Xcode execution count.")
+                        .font(.callout).foregroundStyle(.secondary)
                     if let error = model.poolError { errorMessage(error) }
                     if let error = model.saveError { errorMessage(error) }
                 }

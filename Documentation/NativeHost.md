@@ -46,16 +46,96 @@ the CI user's GUI launchd domain.
 ## Register repository runners
 
 Install the signed [common host app](#common-host-app) before registering runners.
-The installer opts every new repository runner into that host, so its child
-processes share one app identity for macOS privacy permissions.
+Use its settings window to sign in with GitHub, select repositories, and apply
+the host's execution limit. The app registers the required official runners and
+starts them under its macOS privacy identity.
 
-For a personal GitHub account, register runners separately for each repository.
-An organization can instead provide organization runners with appropriate
-repository access. Register enough listeners to admit jobs from several repos;
-the shared pool controls how many Xcode payloads execute.
+The limit controls two stages: each selected repository gets enough runner
+listeners to accept that many GitHub jobs, and one shared pool limits Xcode
+operations across all repositories. With a limit of 24, each selected repository
+can have 24 listeners while at most 24 XcodeRunnerKit operations execute on the
+host in total. GitHub's in-progress count can be higher because a job can be
+checking out code, waiting for the pool, or uploading artifacts.
 
-The installer pins the initial official macOS ARM64 runner to v2.338.0 and
-verifies its release asset checksum. Download that archive from
+### Connect GitHub and apply the limit
+
+1. Open the host's **Settings…**. Leave **Organization (optional)** empty to
+   create the app under your personal account, or enter the organization that owns the
+   repositories. Choose **Create GitHub App…** in **GitHub**.
+   In the browser, choose a unique app name and create the app. The host supplies
+   repository **Administration: Read and write**, **Metadata: Read-only**, and
+   an inactive webhook through GitHub's app manifest.
+2. The host saves the returned app configuration and opens its installation page.
+   Grant the app access to the repositories this Mac will run. **Install App…**
+   reopens that page when repository access needs to change.
+3. Choose **Sign In…** and authorize the app in the browser. The browser returns
+   the authorization to the host through a local callback; app settings and
+   credentials are filled in automatically.
+4. Choose **Reload Repositories** if necessary, then select the repositories to
+   manage. A missing repository needs both app installation access and
+   administration access for the signed-in user.
+5. In **Xcode Execution**, enter **Maximum concurrent Xcode jobs** and choose
+   **Apply**. The host saves
+   the shared execution limit and registers missing listeners for each selected
+   repository using the official macOS ARM64 runner download and release digest.
+
+App creation uses GitHub's [manifest flow](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest).
+The generated app is private and can access repositories owned by the account
+where it was created. Create it under the organization to manage that
+organization's repositories; GitHub requires permission to register apps there.
+Sign-in uses its [web authorization flow](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app#using-the-web-application-flow-to-generate-a-user-access-token)
+with PKCE. The app's Actions permission is unnecessary for runner management;
+workflow job details remain on GitHub.
+
+Repository status shows the desired, registered, online, and busy runner counts
+along with any synchronization error. A failure leaves completed registrations
+in place; correct the reported cause and apply again to add the remaining
+listeners. While signed in, the host also synchronizes registrations every
+30 seconds. Existing runner labels are preserved. New runners have the
+`self-hosted`, `macOS`, `ARM64`, and `xcode-runnerkit` labels and inherit custom
+labels common to that repository's existing managed runners. For a repository
+with no managed runners, the host uses custom labels common to runners in the
+other selected repositories. Labels assigned only to a subset of listeners,
+such as `ci-interactive` and `ci-batch`, still need separate configuration.
+
+Lowering the limit updates the shared pool immediately. Existing operations
+finish, and new operations wait until the active count falls below the new
+limit. Extra runner listeners remain registered and running; the host reports
+the excess rather than stopping services that may have accepted work.
+Deselecting a repository stops managing its listener count and leaves its
+existing registrations and services in place. Runners using an individual
+`.service` are reported separately and are not converted automatically.
+
+The host stores the generated client secret and GitHub user and refresh tokens
+in the macOS Keychain, refreshes
+expiring access tokens, and requests sign-in again when authorization can no
+longer be refreshed. These tokens are used for host administration and are not
+passed to CI processes. Official runners keep their own registration credentials.
+The private key and webhook secret returned by app creation are unused.
+**Disconnect** removes the local user tokens and pauses registration management;
+existing runner services and jobs continue. Revoke the app in GitHub settings if
+its authorization should also end on GitHub.
+
+### Use an existing GitHub App
+
+Expand **Existing GitHub App** to enter an app's Client ID and app slug manually.
+The slug is the final component of `https://github.com/apps/<slug>`; the Client ID
+is on the app's settings page and differs from its numeric App ID. This path uses
+GitHub's [device flow](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app#using-the-device-flow-to-generate-a-user-access-token),
+so select **Enable Device Flow** in the app's settings. Keep **Expire user
+authorization tokens** selected, disable **Webhook → Active**, and grant
+repository **Administration: Read and write** with **Metadata: Read-only**.
+Install the app for the target repositories, choose **Sign In…**, and enter the
+displayed verification code on GitHub to authorize the host. No client secret
+needs to be entered for this path.
+
+See GitHub's [app registration guide](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app)
+and [runner API permissions](https://docs.github.com/en/rest/actions/self-hosted-runners#create-a-registration-token-for-a-repository).
+
+### Register a runner from the command line
+
+For manual registration, the installer defaults to the pinned official macOS
+ARM64 runner v2.338.0 and verifies its release asset checksum. Download it from
 [the official release](https://github.com/actions/runner/releases/tag/v2.338.0).
 Copy the archive and the contents of `Scripts` to the CI Mac.
 
@@ -76,10 +156,10 @@ if they contain spaces, quote the script placeholder in every consumer workflow
 as shown below. The common host discovers the new registration and starts its
 service in the CI user's GUI session.
 
-The default labels include `self-hosted`, `macOS`, `ARM64`, and
-`xcode-runnerkit`. The optional fourth argument selects comma-separated custom
-labels. Keep the labels selected by consumer workflows in that list; hardware
-or host-specific labels belong in the installation configuration.
+The optional fourth argument selects comma-separated custom labels, defaulting
+to `xcode-runnerkit`. Keep the labels selected by consumer workflows in that list.
+An optional fifth argument supplies the SHA-256 digest for a different official
+release archive; obtain the archive and digest from the same release.
 
 ## Common host app
 
@@ -88,8 +168,9 @@ runner services as child processes. One user LaunchAgent starts the app in the
 CI user's GUI session. Runner installations, registration credentials, hooks,
 work directories, and the shared compilation cache remain outside its bundle.
 The app supplies its active storage and execution pool to descendant CLI commands
-and provides a settings window for its live limit. GitHub's listener, service
-retries, and automatic updates continue to run in the official runner.
+and provides GitHub sign-in, repository selection, and a shared live limit in its
+settings window. GitHub's listener, service retries, and automatic updates
+continue to run in the official runner.
 
 Build with a certificate identity available in the build machine's keychain:
 
@@ -99,7 +180,8 @@ bash Scripts/build-runner-host.sh "SIGNING_IDENTITY" /path/to/output
 ```
 
 The script builds the `xcode-runner-host` product and signs the app with the
-selected identity. An ad-hoc identity (`-`) is useful for packaging tests, but
+selected identity. It bundles the runner setup scripts used by repository
+management. An ad-hoc identity (`-`) is useful for packaging tests, but
 the installer requires a certificate signature. Keep the same bundle identifier
 and signing identity across updates to retain macOS privacy decisions. This
 local build procedure does not notarize or publish the app.
@@ -123,17 +205,20 @@ Click the hammer icon in the menu bar and choose **Settings…**. The window sho
   and Low priority. These counts come from the shared pool, including jobs
   submitted through other runner processes.
 - Opted-in runners and the state of their local service processes. GitHub
-  connection and job status remain available on GitHub.
+  repository status also shows registered, online, and busy runner counts and
+  synchronization errors. Workflow job status remains available on GitHub.
 - One storage folder for checkouts, build results, and the shared compiler
   cache. Choose a parent folder once; the host manages its subdirectories.
 
 ![Host settings with one storage folder, a shared execution limit, and local runner service status.](Images/HostSettings.png)
 
 Enter a positive whole number and choose **Apply** to change the execution
-limit without restarting the host or runners. Decreasing from six to four
+limit and synchronize listeners for the selected repositories without restarting
+the host or runners. Decreasing from six to four
 leaves all six running jobs intact. New jobs wait until fewer than four remain,
 then start as slots become available. Increasing the limit makes additional
-slots available to waiting jobs. The display refreshes every two seconds.
+slots available to waiting jobs and registers missing listeners. Extra listeners
+are kept when decreasing the limit. Pool status refreshes every two seconds.
 Reading the window does not configure an unused pool; **Apply** explicitly
 creates its saved limit if necessary.
 

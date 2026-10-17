@@ -120,6 +120,15 @@ precedence. Explicit path and pool options override these defaults. Standalone
 CLI operations retain their own defaults. See the
 [native host guide](Documentation/NativeHost.md) for setup and retention.
 
+In the native host's settings, choose **Create GitHub App…** to register an app
+in the browser, install it for the target repositories, and sign in. Select
+the repositories to manage. **Apply** saves the shared execution limit and
+registers enough official runner listeners for each selected repository. A limit
+of 24 allows at most 24 XcodeRunnerKit operations across the host, even when
+several repositories each have 24 listeners. GitHub's in-progress job count also
+includes work outside the pool. See [repository registration](Documentation/NativeHost.md#register-repository-runners)
+for GitHub App setup, authentication, and synchronization errors.
+
 ### Execution priority
 
 All four Xcode subcommands accept `--priority high|medium|low`, with `medium`
@@ -150,6 +159,8 @@ xcode-runner pool status --pool-directory /path/to/shared-pool --json
 `pool configure` initializes a new pool or updates its saved capacity. Jobs
 already running continue; queued jobs use the new limit. See
 [shared host capacity](#shared-host-capacity) for the execution rules.
+This CLI command changes the pool only; use the native host's **Apply** action
+to synchronize GitHub runner listeners as well.
 
 `pool status` reports the saved capacity, active job count, and waiting job counts
 at each priority. With `--json`, a configured pool produces:
