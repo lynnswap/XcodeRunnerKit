@@ -11,7 +11,7 @@ struct CreatedGitHubApp: Sendable {
 struct GitHubAppSetup: Sendable {
     private let transport: GitHubClient.Transport
 
-    init(session: URLSession = .shared) {
+    init(session: URLSession = URLSession(configuration: .ephemeral)) {
         transport = { try await session.data(for: $0) }
     }
 

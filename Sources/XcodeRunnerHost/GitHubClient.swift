@@ -66,7 +66,7 @@ struct GitHubClient: Sendable {
     typealias Transport = @Sendable (URLRequest) async throws -> (Data, URLResponse)
     private let transport: Transport
 
-    init(session: URLSession = .shared) {
+    init(session: URLSession = URLSession(configuration: .ephemeral)) {
         transport = { try await session.data(for: $0) }
     }
 
