@@ -33,6 +33,7 @@ actor RunnerProvisioner {
         let sha256Checksum: String
         let registrationToken: String
         let labels: [String]
+        let replaceRegistration: Bool
     }
 
     private struct Registration: Decodable {
@@ -213,12 +214,16 @@ actor RunnerProvisioner {
                         for _ in 0..<missing {
                             try Task.checkCancellation()
                             let name: String
+                            var replaceRegistration = false
                             while true {
                                 let candidate = Self.runnerName(hostName: hostName, repository: repository, slot: nextSlot)
                                 nextSlot += 1
                                 let directory = installation.runnersRoot.appending(path: candidate)
                                 if try canResumeInstallation(at: directory, repository: repository, remote: remote) {
                                     name = candidate
+                                    replaceRegistration = !FileManager.default.fileExists(
+                                        atPath: directory.appending(path: ".runner").path(percentEncoded: false)
+                                    ) && remote.contains(where: { $0.name == candidate })
                                     break
                                 }
                                 if !remote.contains(where: { $0.name == candidate }),
@@ -229,7 +234,8 @@ actor RunnerProvisioner {
                             }
                             try await installRunner(InstallationRequest(
                                 repository: repository, runnerName: name, archive: prepared.url,
-                                sha256Checksum: prepared.checksum, registrationToken: registrationToken, labels: labels
+                                sha256Checksum: prepared.checksum, registrationToken: registrationToken, labels: labels,
+                                replaceRegistration: replaceRegistration
                             ))
                         }
                     } catch {
@@ -275,6 +281,11 @@ actor RunnerProvisioner {
             guard name == directory.lastPathComponent,
                   remote.contains(where: { $0.id == registration.agentId && $0.name == name }) else {
                 throw ProvisioningError("The incomplete registration at \(directory.path(percentEncoded: false)) could not be matched to this repository on GitHub. It was left unchanged.")
+            }
+        } else if let registered = remote.first(where: { $0.name == directory.lastPathComponent }) {
+            // The official runner registers remotely before saving its local .runner settings.
+            guard registered.status == "offline", !registered.busy else {
+                throw ProvisioningError("The incomplete runner \(registered.name) must be offline and idle before its registration can be recovered. It was left unchanged.")
             }
         }
         return true
@@ -395,6 +406,7 @@ actor RunnerProvisioner {
             environment: .inherit.updating([
                 "HOME": installation.homeDirectory.path(percentEncoded: false),
                 "XCODE_RUNNER_INSTALLATION_REPOSITORY_ID": String(request.repository.id),
+                "XCODE_RUNNER_REPLACE_REGISTRATION": request.replaceRegistration ? "1" : "0",
             ]),
             platformOptions: options,
             input: .string(request.registrationToken + "\n"),

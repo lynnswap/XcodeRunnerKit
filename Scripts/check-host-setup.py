@@ -326,8 +326,18 @@ from pathlib import Path
 a=sys.argv
 if counter := os.environ.get('XRK_FIXTURE_CONFIG_COUNTER'):
     with Path(counter).open('a') as output: output.write('configured\\n')
+if arguments := os.environ.get('XRK_FIXTURE_CONFIG_ARGUMENTS'):
+    Path(arguments).write_text(json.dumps(a[1:]))
 if os.environ.get('XRK_FIXTURE_CONFIG_FAIL') == '1':
     raise SystemExit('Fixture registration failed before creating .runner')
+if remote := os.environ.get('XRK_FIXTURE_REMOTE_REGISTRATION'):
+    remote = Path(remote)
+    if not remote.exists():
+        remote.write_text('remote registration created')
+        Path('.credentials').write_text('partial credentials')
+        raise SystemExit('Fixture registration interrupted before saving .runner')
+    if '--replace' not in a:
+        raise SystemExit('A runner exists with the same name')
 if gate := os.environ.get('XRK_FIXTURE_CONFIG_GATE'):
     gate = Path(gate)
     (gate / 'entered').touch()
@@ -411,6 +421,31 @@ Path('.credentials').write_text('registered credentials')
     assert len(pending_counter.read_text().splitlines()) == 4
     assert (pending_directory / ".xcode-runner-host").exists()
     assert not (pending_directory / ".xcode-runner-installation").exists()
+
+    remote_pending = installer[:3] + ["pending-remote-registration", str(archive)]
+    remote_directory = installation_root / "pending-remote-registration"
+    remote_arguments = root / "remote-registration-arguments"
+    remote_environment = {**managed_environment, "XRK_FIXTURE_REMOTE_REGISTRATION": str(root / "remote-registration"),
+                          "XRK_FIXTURE_CONFIG_ARGUMENTS": str(remote_arguments)}
+    failure = subprocess.run(remote_pending, input="fixture-token\n", text=True, env=remote_environment, capture_output=True)
+    assert failure.returncode != 0 and "interrupted before saving .runner" in failure.stderr
+    assert "--replace" not in json.loads(remote_arguments.read_text())
+    assert not (remote_directory / ".runner").exists()
+    failure = subprocess.run(remote_pending, input="fixture-token\n", text=True, env=remote_environment, capture_output=True)
+    assert failure.returncode != 0 and "A runner exists with the same name" in failure.stderr
+    subprocess.run(remote_pending, input="fixture-token\n", text=True,
+                   env={**remote_environment, "XCODE_RUNNER_REPLACE_REGISTRATION": "1"}, check=True, capture_output=True)
+    assert "--replace" in json.loads(remote_arguments.read_text())
+    assert (remote_directory / ".xcode-runner-host").exists()
+    assert not (remote_directory / ".xcode-runner-installation").exists()
+
+    refused_replace_arguments = root / "unowned-replace-arguments"
+    refused_replace = installer[:3] + ["unowned-replacement", str(archive)]
+    failure = subprocess.run(refused_replace, input="fixture-token\n", text=True,
+                             env={**managed_environment, "XCODE_RUNNER_REPLACE_REGISTRATION": "1",
+                                  "XRK_FIXTURE_CONFIG_ARGUMENTS": str(refused_replace_arguments)}, capture_output=True)
+    assert failure.returncode != 0 and "existing incomplete installation" in failure.stderr
+    assert not refused_replace_arguments.exists()
 
     setup = root / "resumable-setup"
     setup.mkdir()

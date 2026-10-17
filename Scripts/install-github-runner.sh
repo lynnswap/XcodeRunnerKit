@@ -28,6 +28,7 @@ install_github_runner() {
     case "$directory" in *[[:space:]]*) echo "Runner installation paths must not contain whitespace." >&2; exit 1;; esac
     managed_repository_id=${XCODE_RUNNER_INSTALLATION_REPOSITORY_ID:-}
     installation_owner="$directory/.xcode-runner-installation"
+    resuming_installation=0
     if [[ -n "$managed_repository_id" ]]; then
         if [[ -e "$directory" ]]; then
             if [[ ! -f "$installation_owner" ]] || [[ "$(cat "$installation_owner")" != "$managed_repository_id" ]]; then
@@ -38,6 +39,7 @@ install_github_runner() {
                 echo "This runner already has a service; its installation cannot be resumed." >&2
                 exit 1
             fi
+            resuming_installation=1
         else
             mkdir -p "$runners_root"
             mkdir "$directory"
@@ -52,6 +54,14 @@ install_github_runner() {
     elif [[ -f "$directory/.runner" ]]; then
         echo "Runner already configured at $directory; use its service commands or remove its registration before reinstalling." >&2
         exit 1
+    fi
+    configuration_arguments=(--unattended)
+    if [[ "${XCODE_RUNNER_REPLACE_REGISTRATION:-0}" == "1" ]]; then
+        if [[ "$resuming_installation" != "1" || -f "$directory/.runner" ]]; then
+            echo "Replacing a runner requires this repository's existing incomplete installation without local registration settings." >&2
+            exit 1
+        fi
+        configuration_arguments+=(--replace)
     fi
     work_path="$work_root/$runner_name"
     mkdir -p "$work_path"
@@ -70,7 +80,7 @@ install_github_runner() {
     fi
     cd "$directory"
     if [[ ! -f .runner ]]; then
-        ./config.sh --unattended --url "https://github.com/$repository" --token "$registration_token" \
+        ./config.sh "${configuration_arguments[@]}" --url "https://github.com/$repository" --token "$registration_token" \
             --name "$runner_name" --labels "$labels" --work "$work_directory"
     fi
     unset registration_token

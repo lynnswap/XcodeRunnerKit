@@ -21,6 +21,7 @@ struct RunnerProvisionerTests {
         var repositoryLookups: [String] = []
         var pendingInstallationFailures = 0
         var failBeforeOptIn = false
+        var failBeforeLocalSettings = false
         private var nextIdentifier = 100
 
         init(installation: HostInstallation) { self.installation = installation }
@@ -43,9 +44,12 @@ struct RunnerProvisionerTests {
             failAfterRegistration = afterRegistration
         }
 
-        func configurePendingFailures(count: Int, afterRegistration: Bool = false) {
+        func configurePendingFailures(
+            count: Int, afterRegistration: Bool = false, beforeLocalSettings: Bool = false
+        ) {
             pendingInstallationFailures = count
             failBeforeOptIn = afterRegistration
+            failBeforeLocalSettings = beforeLocalSettings
         }
 
         func listRunners(repository: GitHubRepository, accessToken: String) throws -> [GitHubRunner] {
@@ -89,9 +93,11 @@ struct RunnerProvisionerTests {
             if individualService { try Data().write(to: directory.appending(path: ".service")) }
         }
 
-        func addRemoteRunner(repository: GitHubRepository, identifier: Int, name: String) {
+        func addRemoteRunner(
+            repository: GitHubRepository, identifier: Int, name: String, online: Bool = true, busy: Bool = true
+        ) {
             remote[repository.id, default: []].append(GitHubRunner(
-                id: identifier, name: name, status: "online", busy: true, labels: []
+                id: identifier, name: name, status: online ? "online" : "offline", busy: busy, labels: []
             ))
         }
 
@@ -108,6 +114,12 @@ struct RunnerProvisionerTests {
                         repository: request.repository, identifier: nextIdentifier, name: request.runnerName, hosted: false
                     )
                     nextIdentifier += 1
+                } else if failBeforeLocalSettings {
+                    addRemoteRunner(
+                        repository: request.repository, identifier: nextIdentifier, name: request.runnerName,
+                        online: false, busy: false
+                    )
+                    nextIdentifier += 1
                 } else {
                     try Data("extracted runner archive".utf8).write(to: directory.appending(path: "config.sh"))
                 }
@@ -121,9 +133,17 @@ struct RunnerProvisionerTests {
             }
             let shouldFail = installations.count == failingInstallation
             if shouldFail && !failAfterRegistration { throw TestFailure("Installation failed: \(request.registrationToken)") }
+            var identifier = nextIdentifier
+            if request.replaceRegistration {
+                identifier = remote[request.repository.id, default: []].first(where: { $0.name == request.runnerName })?.id ?? identifier
+                remote[request.repository.id, default: []].removeAll { $0.name == request.runnerName }
+            }
             defer { nextIdentifier += 1 }
-            try addRunner(repository: request.repository, identifier: nextIdentifier, name: request.runnerName)
+            try addRunner(repository: request.repository, identifier: identifier, name: request.runnerName)
             if shouldFail { throw TestFailure("Installation failed after registration.") }
+            if FileManager.default.fileExists(atPath: owner.path(percentEncoded: false)) {
+                try FileManager.default.removeItem(at: owner)
+            }
         }
     }
 
@@ -344,7 +364,41 @@ struct RunnerProvisionerTests {
         let requests = await client.installations
         #expect(requests.count == 2)
         #expect(Set(requests.map(\.runnerName)).count == 1)
+        #expect(requests.allSatisfy { !$0.replaceRegistration })
         #expect(try await client.listRunners(repository: firstRepository, accessToken: "access-token").count == 1)
+    }
+
+    @Test func retryRecoversAnOfflineRemoteRegistrationCreatedBeforeLocalSettings() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        await client.configurePendingFailures(count: 1, beforeLocalSettings: true)
+        let first = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        #expect(first.first?.errorMessage == "Installation was interrupted.")
+        let retried = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        #expect(retried.first?.registeredCount == 1)
+        #expect(retried.first?.errorMessage == nil)
+        let requests = await client.installations
+        #expect(requests.map(\.replaceRegistration) == [false, true])
+        #expect(Set(requests.map(\.runnerName)).count == 1)
+        #expect(try await client.listRunners(repository: firstRepository, accessToken: "access-token").count == 1)
+    }
+
+    @Test(arguments: ["online", "busy"])
+    func recoveryDoesNotReplaceAnOnlineOrBusyRemoteRunner(state: String) async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let name = RunnerProvisioner.runnerName(hostName: "CI Mac", repository: firstRepository, slot: 1)
+        let directory = root.appending(path: "Library/XcodeRunnerKit/runners/\(name)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try String(firstRepository.id).write(
+            to: directory.appending(path: ".xcode-runner-installation"), atomically: true, encoding: .utf8
+        )
+        await client.addRemoteRunner(
+            repository: firstRepository, identifier: 1, name: name, online: state == "online", busy: state == "busy"
+        )
+        let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        #expect(statuses.first?.errorMessage?.contains("must be offline and idle") == true)
+        #expect(await client.installations.isEmpty)
     }
 
     @Test(arguments: ["", "2"])
@@ -362,6 +416,7 @@ struct RunnerProvisionerTests {
         let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
         #expect(statuses.first?.registeredCount == 1)
         #expect(await client.installations.first?.runnerName != name)
+        #expect(await client.installations.allSatisfy { !$0.replaceRegistration })
         #expect(try Data(contentsOf: payload) == Data("keep existing files".utf8))
     }
 
@@ -393,6 +448,7 @@ struct RunnerProvisionerTests {
         IFS= read -r token
         printf '%s' "$token" > "$HOME/token-input"
         printf '%s' "$XCODE_RUNNER_INSTALLATION_REPOSITORY_ID" > "$HOME/repository-id"
+        printf '%s' "$XCODE_RUNNER_REPLACE_REGISTRATION" > "$HOME/replace-registration"
         printf '%s\\n' "$@" > "$HOME/installer-arguments"
         printf '%s' "$token" >&2
         exit 1
@@ -407,6 +463,7 @@ struct RunnerProvisionerTests {
         let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
         #expect(try String(contentsOf: root.appending(path: "token-input"), encoding: .utf8) == "short-lived-registration-token")
         #expect(try String(contentsOf: root.appending(path: "repository-id"), encoding: .utf8) == String(firstRepository.id))
+        #expect(try String(contentsOf: root.appending(path: "replace-registration"), encoding: .utf8) == "0")
         let arguments = try String(contentsOf: root.appending(path: "installer-arguments"), encoding: .utf8)
             .split(separator: "\n").map(String.init)
         #expect(arguments.count == 5)
