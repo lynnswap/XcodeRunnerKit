@@ -23,6 +23,9 @@ Replace `/path/to/JobData` with the folder for checkouts, build output, and the
 compiler cache. Omit that argument to use
 `~/Library/Application Support/XcodeRunnerKit/Storage`.
 
+For an update, wait for running CI jobs to finish before installing. The
+installer stops the current host and its runner services.
+
 Build and install the app with a certificate from
 `security find-identity -v -p codesigning`:
 
@@ -165,8 +168,8 @@ update them for the new physical work path before restarting.
 
 ## Updates and troubleshooting
 
-Updating the app stops its runner services. Wait for jobs to finish, then repeat
-the build and installation commands. The installers keep the previous app as
+To update, repeat [the installation steps](#install). The installers keep the
+previous app as
 `XcodeRunnerHost.previous.app` and the previous CLI as `bin/xcode-runner.previous`.
 
 Inspect or restart the host with:

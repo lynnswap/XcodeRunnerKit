@@ -12,6 +12,93 @@ private struct RejectingGitHubCredentialWrites: GitHubCredentialStore {
 
 @MainActor
 struct GitHubHostSettingsTests {
+    private func waitForSignIn(_ model: GitHubHostSettings) async throws {
+        for _ in 0..<100 {
+            if !model.isConnecting { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(!model.isConnecting)
+        await model.shutDown()
+    }
+
+    @Test(arguments: [false, true])
+    func unsuccessfulAppSignInKeepsTheSavedAppAndRepositorySelection(isCancelled: Bool) async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root)
+        let record = installation.hostRoot.appending(path: "github-host.json")
+        let repository = GitHubRepository(id: 1, fullName: "owner/Project")
+        let previous = GitHubHostConfiguration(clientID: "previous-app", appSlug: "previous-host", repositories: [repository])
+        try previous.save(to: record)
+        let client = GitHubClient(transport: { request in
+            if isCancelled { throw CancellationError() }
+            let body = #"{"error":"incorrect_client_credentials","error_description":"The Client ID is incorrect."}"#
+            return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        })
+        let model = GitHubHostSettings(
+            installation: installation, pool: try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4),
+            client: client, authentication: GitHubAuthentication(client: client, store: MemoryGitHubCredentialStore()),
+            openURL: { _ in Issue.record("Authorization should fail before opening a browser."); return false }
+        )
+        model.clientIDInput = "candidate-app"
+        model.appSlugInput = "candidate-host"
+        model.signIn()
+        try await waitForSignIn(model)
+        #expect(try GitHubHostConfiguration.load(from: record) == previous)
+        #expect(model.selectedRepositoryIDs == [repository.id])
+        #expect(model.selectableRepositories == [repository])
+        #expect(model.account == nil)
+        #expect((model.errorMessage == nil) == isCancelled)
+    }
+
+    @Test(arguments: [true, false])
+    func authenticatedAppChoiceIsAppliedOnlyAfterItsSettingsAreSaved(canSaveSettings: Bool) async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        let installation = HostInstallation(homeDirectory: root)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: installation.hostRoot.path(percentEncoded: false))
+            try? FileManager.default.removeItem(at: root)
+        }
+        let record = installation.hostRoot.appending(path: "github-host.json")
+        let repository = GitHubRepository(id: 1, fullName: "owner/Project")
+        let previous = GitHubHostConfiguration(clientID: "previous-app", appSlug: "previous-host", repositories: [repository])
+        try previous.save(to: record)
+        let transport = GitHubTestTransport([
+            .init(path: "/login/device/code", body: #"{"device_code":"device","user_code":"USER-CODE","verification_uri":"https://github.com/login/device","expires_in":900,"interval":5}"#),
+            .init(path: "/login/oauth/access_token", body: #"{"access_token":"candidate-token"}"#),
+            .init(path: "/user", body: #"{"id":1,"login":"owner"}"#),
+        ] + (canSaveSettings ? [.init(path: "/user/installations", body: #"{"installations":[]}"#)] : []))
+        let client = await transport.client
+        let authentication = GitHubAuthentication(client: client, store: MemoryGitHubCredentialStore(), sleep: { _ in })
+        let model = GitHubHostSettings(
+            installation: installation, pool: try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4),
+            client: client, authentication: authentication, openURL: { _ in true }
+        )
+        model.clientIDInput = "candidate-app"
+        model.appSlugInput = " candidate-host "
+        if !canSaveSettings {
+            try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: installation.hostRoot.path(percentEncoded: false))
+        }
+        model.signIn()
+        try await waitForSignIn(model)
+        #expect(try await authentication.account(clientID: "candidate-app")?.login == "owner")
+        let saved = try GitHubHostConfiguration.load(from: record)
+        if canSaveSettings {
+            #expect(saved.clientID == "candidate-app")
+            #expect(saved.appSlug == "candidate-host")
+            #expect(saved.repositories.isEmpty)
+            #expect(model.selectedRepositoryIDs.isEmpty)
+            #expect(model.account?.login == "owner")
+            #expect(model.errorMessage == nil)
+        } else {
+            #expect(saved == previous)
+            #expect(model.selectedRepositoryIDs == [repository.id])
+            #expect(model.account == nil)
+            #expect(model.errorMessage?.contains("GitHub sign-in succeeded") == true)
+            #expect(model.errorMessage?.contains("previous repository settings are retained") == true)
+        }
+    }
+
     @Test(arguments: [true, false])
     func savedRepositoryIdentitySurvivesRenameAndOldNameReuse(isStillAccessible: Bool) async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)

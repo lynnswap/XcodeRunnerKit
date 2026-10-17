@@ -176,8 +176,14 @@ final class HostSettingsModel {
         isSaving = true
         defer { isSaving = false }
         do {
-            try github.saveSelection()
             try await pool.updateMaximumConcurrentJobs(to: capacity)
+            do {
+                try github.saveSelection()
+            } catch {
+                saveError = "The execution limit was saved as \(capacity), but the repository selection could not be saved: \(error.localizedDescription)"
+                await refreshPoolStatus()
+                return
+            }
             saveError = nil
             await refreshPoolStatus()
             await github.synchronize()
@@ -195,6 +201,7 @@ struct HostSettingsView: View {
         ScrollView {
             Form {
                 GitHubSettingsView(model: model.github)
+                    .disabled(model.isSaving)
                 Section("Storage") {
                     TextField("Storage folder", text: $model.storageDirectoryInput)
                         .textFieldStyle(.roundedBorder)

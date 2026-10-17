@@ -28,6 +28,7 @@ final class GitHubHostSettings {
     private let client: GitHubClient
     private let provisioner: RunnerProvisioner
     private let pool: HostExecutionPool
+    private let openURL: @MainActor (URL) -> Bool
     private var configuration = GitHubHostConfiguration()
     private var connectionTask: Task<Void, Never>?
     private var synchronizationTask: Task<Void, Never>?
@@ -53,10 +54,12 @@ final class GitHubHostSettings {
 
     init(
         installation: HostInstallation, pool: HostExecutionPool, client: GitHubClient = .init(),
-        authentication: GitHubAuthentication? = nil, provisioner: RunnerProvisioner? = nil
+        authentication: GitHubAuthentication? = nil, provisioner: RunnerProvisioner? = nil,
+        openURL: @escaping @MainActor (URL) -> Bool = { NSWorkspace.shared.open($0) }
     ) {
         self.pool = pool
         self.client = client
+        self.openURL = openURL
         self.record = installation.hostRoot.appending(path: "github-host.json")
         self.authentication = authentication ?? GitHubAuthentication(hostRoot: installation.hostRoot, client: client)
         self.provisioner = provisioner ?? RunnerProvisioner(
@@ -179,21 +182,16 @@ final class GitHubHostSettings {
             errorMessage = "Create a GitHub App first, or enter an existing app's Client ID."
             return
         }
+        let isCurrentApp = configuration.clientID == clientID
+        var candidate = isCurrentApp ? configuration : GitHubHostConfiguration(clientID: clientID)
+        candidate.appSlug = appSlugInput.trimmingCharacters(in: .whitespacesAndNewlines)
         isConnecting = true
         errorMessage = nil
         connectionTask = Task {
             defer { finishConnecting() }
             do {
-                if configuration.clientID != clientID {
-                    configuration = GitHubHostConfiguration(clientID: clientID, appSlug: appSlugInput)
-                    selectedRepositoryIDs = []
-                    repositories = []
-                    runnerStatuses = []
-                    account = nil
-                }
-                configuration.appSlug = appSlugInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                try configuration.save(to: record)
-                if let callbackURL = configuration.callbackURL {
+                let connectedAccount: GitHubAccount
+                if let callbackURL = candidate.callbackURL {
                     let callback = try await GitHubBrowserCallback.start(callbackURL: callbackURL)
                     browserCallback = callback
                     let verifier = UUID().uuidString.replacingOccurrences(of: "-", with: "")
@@ -213,16 +211,29 @@ final class GitHubHostSettings {
                     ]
                     try openBrowser(try requireURL(url.url))
                     let code = try await callback.waitForCode()
-                    account = try await authentication.completeWebAuthorization(
+                    connectedAccount = try await authentication.completeWebAuthorization(
                         clientID: clientID, code: code, redirectURI: callback.callbackURL, codeVerifier: verifier
                     )
                 } else {
                     let authorization = try await authentication.begin(clientID: clientID)
                     deviceAuthorization = authorization
                     try openBrowser(authorization.verificationURI)
-                    account = try await authentication.finish(clientID: clientID, authorization: authorization)
+                    connectedAccount = try await authentication.finish(clientID: clientID, authorization: authorization)
                 }
                 try Task.checkCancellation()
+                do { try candidate.save(to: record) }
+                catch {
+                    account = nil
+                    errorMessage = "GitHub sign-in succeeded, but the app selection could not be saved. Your previous repository settings are retained. Try signing in again: \(error.localizedDescription)"
+                    return
+                }
+                configuration = candidate
+                if !isCurrentApp {
+                    selectedRepositoryIDs = []
+                    repositories = []
+                    runnerStatuses = []
+                }
+                account = connectedAccount
                 await loadRepositories()
             } catch is CancellationError {
             } catch {
@@ -286,22 +297,23 @@ final class GitHubHostSettings {
     }
 
     func synchronize() async {
-        guard synchronizationTask == nil else { return }
-        let task = Task { await performSynchronization() }
-        synchronizationTask = task
-        await task.value
-        synchronizationTask = nil
-    }
-
-    private func performSynchronization() async {
-        guard storageIsReady, !isConnecting, !isSynchronizing else { return }
+        guard synchronizationTask == nil, storageIsReady, !isConnecting else { return }
         guard !configuration.repositories.isEmpty else { runnerStatuses = []; return }
         guard account != nil else {
             errorMessage = "Sign in to synchronize runner registrations. Existing jobs continue using the saved execution limit."
             return
         }
         isSynchronizing = true
-        defer { isSynchronizing = false }
+        defer {
+            synchronizationTask = nil
+            isSynchronizing = false
+        }
+        let task = Task { await performSynchronization() }
+        synchronizationTask = task
+        await task.value
+    }
+
+    private func performSynchronization() async {
         do {
             guard let status = try await pool.status() else { return }
             let selected = configuration.repositories
@@ -361,7 +373,7 @@ final class GitHubHostSettings {
     }
 
     private func openBrowser(_ url: URL) throws {
-        guard NSWorkspace.shared.open(url) else {
+        guard openURL(url) else {
             throw CocoaError(.fileReadUnknown, userInfo: [NSLocalizedDescriptionKey: "Could not open your browser."])
         }
     }
