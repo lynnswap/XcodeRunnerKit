@@ -524,7 +524,7 @@ struct RunnerProvisionerTests {
         try FileManager.default.createDirectory(at: installation.hostRoot, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let installer = root.appending(path: "fake installer.sh")
-        try #"exec /usr/bin/python3 "$HOME/installer.py" 2>"$HOME/installer.stderr""#.write(to: installer, atomically: true, encoding: .utf8)
+        try #"exec python3 "$HOME/installer.py""#.write(to: installer, atomically: true, encoding: .utf8)
         try """
         import fcntl, json, os, signal, time
         from pathlib import Path
@@ -561,19 +561,7 @@ struct RunnerProvisionerTests {
         guard FileManager.default.fileExists(atPath: marker.path(percentEncoded: false)) else {
             let statuses = await provisioning.value
             let errors = statuses.compactMap(\.errorMessage).joined(separator: "\n")
-            let standardError: String
-            do {
-                standardError = try String(contentsOf: root.appending(path: "installer.stderr"), encoding: .utf8)
-            } catch {
-                standardError = "Could not read installer stderr: \(error.localizedDescription)"
-            }
-            Issue.record("""
-            Installer child did not start.
-            Provisioner errors:
-            \(errors.isEmpty ? "None reported." : errors)
-            Installer stderr:
-            \(standardError)
-            """)
+            Issue.record("Installer child did not start.\n\(errors)")
             return
         }
         struct Child: Decodable { let pid: Int32; let group: Int32 }
