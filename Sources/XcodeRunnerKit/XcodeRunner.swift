@@ -55,6 +55,9 @@ public struct XcodeRunner: Sendable {
         let outcome: Result<XcodeBuildResult, any Error>
         do {
             try Task.checkCancellation()
+            if action == .test || action == .testWithoutBuilding {
+                try await tool.boot(identifier)
+            }
             var simulatorRequest = request
             simulatorRequest.destination = "platform=iOS Simulator,id=" + identifier
             if !request.arguments.contains("-parallel-testing-enabled") {

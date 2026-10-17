@@ -43,6 +43,10 @@ struct SimulatorTool: Sendable {
         return identifier.uuidString
     }
 
+    func boot(_ identifier: String) async throws {
+        _ = try await call(["bootstatus", identifier, "-b"])
+    }
+
     func delete(_ identifier: String) async throws {
         _ = try await call(["delete", identifier])
     }

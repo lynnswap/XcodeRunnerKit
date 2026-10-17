@@ -168,11 +168,20 @@ struct XcodeRunnerKitTests {
         let identifier = UUID().uuidString
         let simulator = root.appending(path: "simctl")
         let deleted = root.appending(path: "deleted")
+        let booted = root.appending(path: "booted")
         let selectedXcode = root.appending(path: "selected-xcode")
-        try ("#!/bin/sh\ncase \"$2\" in\ncreate) echo " + identifier + "; printf '%s' \"$DEVELOPER_DIR\" > " + selectedXcode.path + ";;\ndelete) printf '%s' \"$3\" > " + deleted.path + ";;\nesac\n")
-            .write(to: simulator, atomically: true, encoding: .utf8)
+        try """
+            #!/bin/sh
+            case "$2" in
+            create) echo \(identifier); printf '%s' "$DEVELOPER_DIR" > \(selectedXcode.path);;
+            bootstatus)
+                [ "$3" = "\(identifier)" ] && [ "$4" = "-b" ] || exit 9
+                touch \(booted.path);;
+            delete) printf '%s' "$3" > \(deleted.path);;
+            esac
+            """.write(to: simulator, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: simulator.path)
-        let executable = try script("printf '%s\\n' \"$@\"; exit \(exitCode)", at: root)
+        let executable = try script("[ -e \(booted.path) ] || exit 9; printf '%s\\n' \"$@\"; exit \(exitCode)", at: root)
         var runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
         runner.executionPool = try HostExecutionPool(directory: root.appending(path: "pool"), initialCapacity: 1)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
@@ -189,6 +198,38 @@ struct XcodeRunnerKitTests {
         #expect(log.contains("platform=iOS Simulator,id=" + identifier))
         #expect(log.components(separatedBy: "-parallel-testing-enabled").count == 2)
         #expect(try String(contentsOf: selectedXcode, encoding: .utf8) == request.environment["DEVELOPER_DIR"])
+    }
+
+    @Test func simulatorBootFailureSkipsPayloadAndDeletesTheOwnedDevice() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let identifier = UUID().uuidString
+        let simulator = root.appending(path: "simctl")
+        let deleted = root.appending(path: "deleted")
+        let started = root.appending(path: "unexpected-payload")
+        try """
+            #!/bin/sh
+            case "$2" in
+            create) echo \(identifier);;
+            bootstatus) echo boot-failed >&2; exit 9;;
+            delete) printf '%s' "$3" > \(deleted.path);;
+            esac
+            """.write(to: simulator, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: simulator.path)
+        let executable = try script("touch \(started.path)", at: root)
+        let runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
+        var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
+        request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
+        do {
+            _ = try await runner.run(.testWithoutBuilding, request: request)
+            Issue.record("Simulator boot failure returned successfully.")
+        } catch {
+            #expect((error as NSError).domain == "XcodeRunnerKit.simctl")
+            #expect(error.localizedDescription.contains("boot-failed"))
+        }
+        #expect(!FileManager.default.fileExists(atPath: started.path))
+        #expect(try String(contentsOf: deleted, encoding: .utf8) == identifier)
     }
 
     @Test func simulatorCleanupFailurePreservesBuildFailure() async throws {
