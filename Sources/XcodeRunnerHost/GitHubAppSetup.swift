@@ -1,7 +1,7 @@
 import Foundation
 import Network
 
-struct CreatedGitHubApp: Sendable {
+struct CreatedGitHubApp: Codable, Sendable {
     let clientID: String
     let slug: String
     let clientSecret: String

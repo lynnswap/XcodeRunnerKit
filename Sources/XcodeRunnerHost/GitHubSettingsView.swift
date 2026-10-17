@@ -6,6 +6,11 @@ struct GitHubSettingsView: View {
 
     var body: some View {
         Section("GitHub") {
+            if model.hasPendingApp {
+                Button("Retry Saving App") { model.retrySavingApp() }
+                    .disabled(model.isConnecting || model.isSynchronizing)
+                    .accessibilityIdentifier("create-github-app")
+            }
             if let account = model.account {
                 LabeledContent("Connected account", value: account.login)
                 HStack {
@@ -42,12 +47,11 @@ struct GitHubSettingsView: View {
                     .disabled(model.isConnecting || model.isSynchronizing)
                 Text("Leave blank to create the app on your personal account. For organization repositories, enter the organization that will own the app.")
                     .font(.callout).foregroundStyle(.secondary)
-                Button(model.isConnecting ? "Waiting for GitHub…" : model.hasPendingApp ? "Retry Saving App" : "Create GitHub App…") {
-                    if model.hasPendingApp { model.retrySavingApp() }
-                    else { model.createApp() }
+                if !model.hasPendingApp {
+                    Button(model.isConnecting ? "Waiting for GitHub…" : "Create GitHub App…") { model.createApp() }
+                        .disabled(model.isConnecting || model.isSynchronizing)
+                        .accessibilityIdentifier("create-github-app")
                 }
-                    .disabled(model.isConnecting || model.isSynchronizing)
-                    .accessibilityIdentifier("create-github-app")
                 Text("Create the GitHub App from your browser. Permissions are filled in automatically, and its credentials are saved in Keychain. Install it on your account, then sign in.")
                     .font(.callout).foregroundStyle(.secondary)
                 if !model.clientIDInput.isEmpty {

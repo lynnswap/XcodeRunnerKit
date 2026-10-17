@@ -24,6 +24,11 @@ struct GitHubApplicationCredentials: Codable, Sendable {
     let clientSecret: String
 }
 
+private struct GitHubApplicationState: Codable {
+    var current: GitHubApplicationCredentials?
+    var pending: CreatedGitHubApp?
+}
+
 protocol GitHubCredentialStore: Sendable {
     func read() throws -> Data?
     func write(_ data: Data) throws
@@ -113,22 +118,28 @@ actor GitHubAuthentication {
         try await client.beginDeviceAuthorization(clientID: clientID)
     }
 
-    func saveApp(clientID: String, clientSecret: String) throws {
-        guard let appStore else { throw GitHubError.notSignedIn }
-        try appStore.write(JSONEncoder().encode(GitHubApplicationCredentials(clientID: clientID, clientSecret: clientSecret)))
-        generation += 1
-        refresh?.task.cancel()
-        refresh = nil
+    func stageCreatedApp(_ app: CreatedGitHubApp) throws {
+        var applications = try applications()
+        applications.pending = app
+        try saveApplications(applications)
     }
 
-    func appClientID() throws -> String? {
-        try applicationCredentials()?.clientID
+    func pendingCreatedApp() throws -> CreatedGitHubApp? {
+        try applications().pending
+    }
+
+    func activatePendingApp(clientID: String) throws {
+        var applications = try applications()
+        guard let pending = applications.pending, pending.clientID == clientID else { throw GitHubError.authenticationChanged }
+        applications.current = GitHubApplicationCredentials(clientID: pending.clientID, clientSecret: pending.clientSecret)
+        applications.pending = nil
+        try saveApplications(applications)
     }
 
     func completeWebAuthorization(
         clientID: String, code: String, redirectURI: URL, codeVerifier: String
     ) async throws -> GitHubAccount {
-        guard let app = try applicationCredentials(), app.clientID == clientID else { throw GitHubError.notSignedIn }
+        guard let app = try applicationCredentials(clientID: clientID) else { throw GitHubError.notSignedIn }
         let originalGeneration = generation
         let response = try await client.exchangeAuthorizationCode(
             clientID: clientID, clientSecret: app.clientSecret, code: code, redirectURI: redirectURI, codeVerifier: codeVerifier
@@ -189,8 +200,7 @@ actor GitHubAuthentication {
         if let refresh {
             pending = refresh.task
         } else {
-            let app = try applicationCredentials()
-            let clientSecret = app?.clientID == clientID ? app?.clientSecret : nil
+            let clientSecret = try applicationCredentials(clientID: clientID)?.clientSecret
             let id = UUID()
             pending = Task {
                 defer { if refresh?.id == id { refresh = nil } }
@@ -221,8 +231,22 @@ actor GitHubAuthentication {
         try store.read().map { try JSONDecoder().decode(GitHubCredentials.self, from: $0) }
     }
 
-    private func applicationCredentials() throws -> GitHubApplicationCredentials? {
-        try appStore?.read().map { try JSONDecoder().decode(GitHubApplicationCredentials.self, from: $0) }
+    private func applications() throws -> GitHubApplicationState {
+        try appStore?.read().map { try JSONDecoder().decode(GitHubApplicationState.self, from: $0) } ?? GitHubApplicationState()
+    }
+
+    private func saveApplications(_ applications: GitHubApplicationState) throws {
+        guard let appStore else { throw GitHubError.notSignedIn }
+        try appStore.write(JSONEncoder().encode(applications))
+    }
+
+    private func applicationCredentials(clientID: String) throws -> GitHubApplicationCredentials? {
+        let applications = try applications()
+        if let current = applications.current, current.clientID == clientID { return current }
+        if let pending = applications.pending, pending.clientID == clientID {
+            return GitHubApplicationCredentials(clientID: pending.clientID, clientSecret: pending.clientSecret)
+        }
+        return nil
     }
 
     private func save(response: GitHubTokenResponse, account: GitHubAccount, clientID: String) throws {

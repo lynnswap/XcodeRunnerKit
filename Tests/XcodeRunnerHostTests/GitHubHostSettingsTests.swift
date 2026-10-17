@@ -3,6 +3,13 @@ import Testing
 import XcodeRunnerKit
 @testable import XcodeRunnerHost
 
+private struct RejectingGitHubCredentialWrites: GitHubCredentialStore {
+    let store: MemoryGitHubCredentialStore
+    func read() -> Data? { store.read() }
+    func write(_ data: Data) throws { throw CocoaError(.fileWriteNoPermission) }
+    func remove() { store.remove() }
+}
+
 @MainActor
 struct GitHubHostSettingsTests {
     @Test(arguments: [true, false])
@@ -100,9 +107,104 @@ struct GitHubHostSettingsTests {
 
     @Test func createdAppCanBeSavedAgainAfterASettingsWriteFailure() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        let installation = HostInstallation(homeDirectory: root)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: installation.hostRoot.path(percentEncoded: false))
+            try? FileManager.default.removeItem(at: root)
+        }
+        let record = installation.hostRoot.appending(path: "github-host.json")
+        let previous = GitHubHostConfiguration(clientID: "previous-app", appSlug: "previous-host")
+        try previous.save(to: record)
+        let app = CreatedGitHubApp(
+            clientID: "app", slug: "host-app", clientSecret: "secret",
+            callbackURL: URL(string: "http://127.0.0.1:12345/callback")!
+        )
+        let appStore = MemoryGitHubCredentialStore()
+        let transport = GitHubTestTransport([
+            .init(path: "/login/oauth/access_token", body: #"{"access_token":"previous-fresh","refresh_token":"previous-rotated","expires_in":28800,"refresh_token_expires_in":3600}"#),
+            .init(path: "/user/installations", body: #"{"installations":[]}"#),
+        ])
+        let client = await transport.client
+        let store = MemoryGitHubCredentialStore()
+        store.write(try JSONEncoder().encode(GitHubCredentials(
+            clientID: previous.clientID, account: GitHubAccount(id: 1, login: "owner"), accessToken: "previous-expired",
+            refreshToken: "previous-refresh", expiresAt: Date.distantPast, refreshExpiresAt: Date.distantFuture
+        )))
+        let authentication = GitHubAuthentication(client: client, store: store, appStore: appStore)
+        try await authentication.configureTestApp(clientID: previous.clientID, clientSecret: "previous-secret")
+        let model = GitHubHostSettings(
+            installation: installation, pool: try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4),
+            client: client, authentication: authentication
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: installation.hostRoot.path(percentEncoded: false))
+        await #expect(throws: (any Error).self) { try await model.storeCreatedApp(app) }
+        #expect(model.hasPendingApp)
+        #expect(model.clientIDInput == previous.clientID)
+        #expect(try GitHubHostConfiguration.load(from: record) == previous)
+        let restoredAuthentication = GitHubAuthentication(client: client, store: store, appStore: appStore)
+        #expect(try await restoredAuthentication.accessToken(clientID: previous.clientID) == "previous-fresh")
+        let refreshRequest = try #require(await transport.requests.first)
+        let body = try #require(refreshRequest.httpBody)
+        #expect(URLComponents(string: "?" + String(decoding: body, as: UTF8.self))?.queryItems?.contains(
+            URLQueryItem(name: "client_secret", value: "previous-secret")
+        ) == true)
+        let restored = GitHubHostSettings(
+            installation: installation, pool: try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4),
+            client: client, authentication: restoredAuthentication
+        )
+        await restored.restore()
+        #expect(restored.account?.login == "owner")
+        #expect(restored.hasPendingApp)
+        let recovered = try #require(await restoredAuthentication.pendingCreatedApp())
+        #expect(recovered.clientID == app.clientID)
+        #expect(recovered.slug == app.slug)
+        #expect(recovered.callbackURL == app.callbackURL)
+        #expect(recovered.clientSecret == app.clientSecret)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: installation.hostRoot.path(percentEncoded: false))
+        try await restored.storeCreatedApp(recovered)
+        #expect(!restored.hasPendingApp)
+        #expect(try await restoredAuthentication.pendingCreatedApp() == nil)
+        let saved = try GitHubHostConfiguration.load(from: record)
+        #expect(saved.clientID == app.clientID)
+        #expect(saved.appSlug == app.slug)
+        #expect(saved.callbackURL == app.callbackURL)
+        #expect(String(decoding: try Data(contentsOf: record), as: UTF8.self).contains("secret") == false)
+    }
+
+    @Test func appKeychainFailureLeavesTheSavedConfigurationAndSecretUnchanged() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let installation = HostInstallation(homeDirectory: root)
         let record = installation.hostRoot.appending(path: "github-host.json")
+        let previous = GitHubHostConfiguration(clientID: "previous-app", appSlug: "previous-host")
+        try previous.save(to: record)
+        let client = GitHubClient(transport: { _ in throw URLError(.notConnectedToInternet) })
+        let appStore = MemoryGitHubCredentialStore()
+        let store = MemoryGitHubCredentialStore()
+        let original = GitHubAuthentication(client: client, store: store, appStore: appStore)
+        try await original.configureTestApp(clientID: previous.clientID, clientSecret: "previous-secret")
+        let originalData = try #require(appStore.read())
+        let model = GitHubHostSettings(
+            installation: installation, pool: try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4),
+            client: client, authentication: GitHubAuthentication(
+                client: client, store: store, appStore: RejectingGitHubCredentialWrites(store: appStore)
+            )
+        )
+        let app = CreatedGitHubApp(
+            clientID: "next-app", slug: "next-host", clientSecret: "next-secret",
+            callbackURL: URL(string: "http://127.0.0.1:12345/callback")!
+        )
+        await #expect(throws: CocoaError.self) { try await model.storeCreatedApp(app) }
+        #expect(try GitHubHostConfiguration.load(from: record) == previous)
+        #expect(model.clientIDInput == previous.clientID)
+        #expect(appStore.read() == originalData)
+        #expect(model.hasPendingApp)
+    }
+
+    @Test func firstCreatedAppCanBeRecoveredBeforeAnyConfigurationWasSaved() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root)
         let app = CreatedGitHubApp(
             clientID: "app", slug: "host-app", clientSecret: "secret",
             callbackURL: URL(string: "http://127.0.0.1:12345/callback")!
@@ -110,22 +212,79 @@ struct GitHubHostSettingsTests {
         let appStore = MemoryGitHubCredentialStore()
         let client = GitHubClient(transport: { _ in throw URLError(.notConnectedToInternet) })
         let authentication = GitHubAuthentication(client: client, store: MemoryGitHubCredentialStore(), appStore: appStore)
+        try await authentication.stageCreatedApp(app)
+        let restoredAuthentication = GitHubAuthentication(client: client, store: MemoryGitHubCredentialStore(), appStore: appStore)
+        let model = GitHubHostSettings(
+            installation: installation, pool: try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4),
+            client: client, authentication: restoredAuthentication
+        )
+        await model.restore()
+        #expect(model.hasPendingApp)
+        #expect(model.account == nil)
+        #expect(model.clientIDInput.isEmpty)
+        #expect(try await restoredAuthentication.pendingCreatedApp()?.callbackURL == app.callbackURL)
+    }
+
+    @Test func pendingSecretCanAuthorizeWhenItsActivationCouldNotBeSaved() async throws {
+        let app = CreatedGitHubApp(
+            clientID: "next-app", slug: "next-host", clientSecret: "next-secret",
+            callbackURL: URL(string: "http://127.0.0.1:12345/callback")!
+        )
+        let transport = GitHubTestTransport([
+            .init(path: "/login/oauth/access_token", body: #"{"access_token":"next-token"}"#),
+            .init(path: "/user", body: #"{"id":1,"login":"owner"}"#),
+        ])
+        let client = await transport.client
+        let appStore = MemoryGitHubCredentialStore()
+        let store = MemoryGitHubCredentialStore()
+        let authentication = GitHubAuthentication(client: client, store: store, appStore: appStore)
+        try await authentication.configureTestApp(clientID: "previous-app", clientSecret: "previous-secret")
+        try await authentication.stageCreatedApp(app)
+        let failing = GitHubAuthentication(client: client, store: store, appStore: RejectingGitHubCredentialWrites(store: appStore))
+        await #expect(throws: CocoaError.self) { try await failing.activatePendingApp(clientID: app.clientID) }
+        let restored = GitHubAuthentication(client: client, store: store, appStore: appStore)
+        let account = try await restored.completeWebAuthorization(
+            clientID: app.clientID, code: "code", redirectURI: app.callbackURL, codeVerifier: "verifier"
+        )
+        #expect(account.login == "owner")
+        #expect(try await restored.pendingCreatedApp()?.clientID == app.clientID)
+        let request = try #require(await transport.requests.first)
+        let body = try #require(request.httpBody)
+        #expect(URLComponents(string: "?" + String(decoding: body, as: UTF8.self))?.queryItems?.contains(
+            URLQueryItem(name: "client_secret", value: app.clientSecret)
+        ) == true)
+    }
+
+    @Test func retryingPendingActivationPreservesAnExplicitAppChoiceAndItsRepositories() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root)
+        let record = installation.hostRoot.appending(path: "github-host.json")
+        let app = CreatedGitHubApp(
+            clientID: "app", slug: "host-app", clientSecret: "secret",
+            callbackURL: URL(string: "http://127.0.0.1:12345/callback")!
+        )
+        let repository = GitHubRepository(id: 1, fullName: "owner/Project")
+        let saved = GitHubHostConfiguration(
+            clientID: app.clientID, appSlug: app.slug, callbackURL: app.callbackURL, repositories: [repository]
+        )
+        try saved.save(to: record)
+        let client = GitHubClient(transport: { _ in throw URLError(.notConnectedToInternet) })
+        let appStore = MemoryGitHubCredentialStore()
+        let authentication = GitHubAuthentication(client: client, store: MemoryGitHubCredentialStore(), appStore: appStore)
+        try await authentication.stageCreatedApp(app)
         let model = GitHubHostSettings(
             installation: installation, pool: try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4),
             client: client, authentication: authentication
         )
-        try FileManager.default.createDirectory(at: record, withIntermediateDirectories: true)
-        await #expect(throws: (any Error).self) { try await model.storeCreatedApp(app) }
+        await model.restore()
         #expect(model.hasPendingApp)
-        #expect(try await authentication.appClientID() == app.clientID)
-        try FileManager.default.removeItem(at: record)
+        #expect(model.selectedRepositoryIDs == [repository.id])
+        #expect(try GitHubHostConfiguration.load(from: record) == saved)
         try await model.storeCreatedApp(app)
+        #expect(model.selectedRepositoryIDs == [repository.id])
+        #expect(try GitHubHostConfiguration.load(from: record) == saved)
         #expect(!model.hasPendingApp)
-        let saved = try GitHubHostConfiguration.load(from: record)
-        #expect(saved.clientID == app.clientID)
-        #expect(saved.appSlug == app.slug)
-        #expect(saved.callbackURL == app.callbackURL)
-        #expect(String(decoding: try Data(contentsOf: record), as: UTF8.self).contains("secret") == false)
     }
 
     @Test func revocationDuringProvisioningMakesSignInAvailableAgain() async throws {

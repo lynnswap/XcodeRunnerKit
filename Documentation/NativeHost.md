@@ -76,7 +76,7 @@ stay in place. Deselecting a repository leaves its existing runners running;
 it stops the app from managing their count.
 
 Settings shows each repository's registered, online, and busy runner counts,
-plus any error. The host retries synchronization every 30 seconds while signed
+plus any error. The host retries synchronization every five minutes while signed
 in. **Disconnect** removes local login tokens and stops registration management;
 it leaves existing runner services running.
 

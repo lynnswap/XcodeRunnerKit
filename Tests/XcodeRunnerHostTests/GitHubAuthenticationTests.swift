@@ -24,6 +24,16 @@ private actor GitHubPollSleeps {
     func record(_ interval: TimeInterval) { intervals.append(interval) }
 }
 
+extension GitHubAuthentication {
+    func configureTestApp(clientID: String, clientSecret: String) throws {
+        try stageCreatedApp(CreatedGitHubApp(
+            clientID: clientID, slug: "host-app", clientSecret: clientSecret,
+            callbackURL: URL(string: "http://127.0.0.1:12345/callback")!
+        ))
+        try activatePendingApp(clientID: clientID)
+    }
+}
+
 struct GitHubAuthenticationTests {
     @Test func deviceFlowWaitsForAuthorizationAndHonorsSlowDown() async throws {
         let transport = GitHubTestTransport([
@@ -62,8 +72,7 @@ struct GitHubAuthenticationTests {
         let store = MemoryGitHubCredentialStore()
         let appStore = MemoryGitHubCredentialStore()
         let authentication = GitHubAuthentication(client: await transport.client, store: store, appStore: appStore)
-        try await authentication.saveApp(clientID: "app", clientSecret: "secret+&value")
-        #expect(try await authentication.appClientID() == "app")
+        try await authentication.configureTestApp(clientID: "app", clientSecret: "secret+&value")
         _ = try await authentication.completeWebAuthorization(
             clientID: "app", code: "code", redirectURI: URL(string: "http://127.0.0.1:1234/callback")!, codeVerifier: "verifier"
         )
@@ -81,9 +90,10 @@ struct GitHubAuthenticationTests {
         #expect(credentials.refreshToken == "new-refresh")
         #expect(credentials.clientID == "app")
         await #expect(throws: GitHubError.self) { try await authentication.accessToken(clientID: "another-app") }
+        let savedApp = appStore.read()
         try await authentication.signOut()
         #expect(try await authentication.account() == nil)
-        #expect(try await authentication.appClientID() == "app")
+        #expect(appStore.read() == savedApp)
     }
 
     @Test func expiredRefreshTokenRequiresSignInWithoutMakingARequest() async throws {
@@ -109,7 +119,7 @@ struct GitHubAuthenticationTests {
         let authentication = GitHubAuthentication(
             client: await transport.client, store: store, appStore: MemoryGitHubCredentialStore()
         )
-        try await authentication.saveApp(clientID: "next-app", clientSecret: "secret")
+        try await authentication.configureTestApp(clientID: "next-app", clientSecret: "secret")
         #expect(try await authentication.account(clientID: "next-app") == nil)
         #expect(try await authentication.account(clientID: "previous-app") == GitHubAccount(id: 1, login: "owner"))
         await #expect(throws: GitHubError.self) { try await authentication.accessToken(clientID: "next-app") }
@@ -209,7 +219,7 @@ struct GitHubAuthenticationTests {
         let authentication = GitHubAuthentication(
             client: client, store: MemoryGitHubCredentialStore(), appStore: MemoryGitHubCredentialStore()
         )
-        try await authentication.saveApp(clientID: "app", clientSecret: "secret")
+        try await authentication.configureTestApp(clientID: "app", clientSecret: "secret")
         let signingIn = Task {
             try await authentication.completeWebAuthorization(
                 clientID: "app", code: "code", redirectURI: URL(string: "http://127.0.0.1/callback")!, codeVerifier: "verifier"
@@ -250,6 +260,46 @@ struct GitHubAuthenticationTests {
         #expect(try await authentication.accessToken(clientID: "app") == "rotated")
         let credentials = try JSONDecoder().decode(GitHubCredentials.self, from: #require(store.read()))
         #expect(credentials.refreshToken == "rotated-refresh")
+    }
+
+    @Test func stagingAnotherAppPreservesAnActiveRefreshAndRecoversItsMetadata() async throws {
+        let started = AsyncStream<Void>.makeStream()
+        let release = AsyncStream<Void>.makeStream()
+        let store = MemoryGitHubCredentialStore()
+        let appStore = MemoryGitHubCredentialStore()
+        let now = Date()
+        store.write(try JSONEncoder().encode(GitHubCredentials(
+            clientID: "previous-app", account: GitHubAccount(id: 1, login: "owner"), accessToken: "expired",
+            refreshToken: "refresh", expiresAt: now.addingTimeInterval(-1), refreshExpiresAt: now.addingTimeInterval(3600)
+        )))
+        let client = GitHubClient(transport: { request in
+            started.continuation.yield()
+            for await _ in release.stream { break }
+            let body = #"{"access_token":"rotated","refresh_token":"rotated-refresh","expires_in":28800,"refresh_token_expires_in":3600}"#
+            return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        })
+        let authentication = GitHubAuthentication(client: client, store: store, appStore: appStore, now: { now })
+        try await authentication.configureTestApp(clientID: "previous-app", clientSecret: "previous-secret")
+        let refreshing = Task { try await authentication.accessToken(clientID: "previous-app") }
+        defer { release.continuation.finish(); refreshing.cancel() }
+        var events = started.stream.makeAsyncIterator()
+        await events.next()
+        let app = CreatedGitHubApp(
+            clientID: "next-app", slug: "next-host", clientSecret: "next-secret",
+            callbackURL: URL(string: "http://127.0.0.1:12345/callback")!
+        )
+        try await authentication.stageCreatedApp(app)
+        release.continuation.finish()
+        #expect(try await refreshing.value == "rotated")
+        let restored = GitHubAuthentication(client: client, store: store, appStore: appStore, now: { now })
+        #expect(try await restored.accessToken(clientID: "previous-app") == "rotated")
+        #expect(try await restored.pendingCreatedApp()?.clientID == app.clientID)
+        #expect(try await restored.pendingCreatedApp()?.clientSecret == app.clientSecret)
+        try await restored.activatePendingApp(clientID: app.clientID)
+        #expect(try await restored.pendingCreatedApp() == nil)
+        let data = try #require(appStore.read())
+        #expect(String(decoding: data, as: UTF8.self).contains("previous-secret") == false)
+        #expect(String(decoding: data, as: UTF8.self).contains("next-secret"))
     }
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["XCODERUNNER_KEYCHAIN_TESTS"] == "1"))

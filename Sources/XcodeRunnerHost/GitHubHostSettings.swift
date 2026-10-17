@@ -83,8 +83,12 @@ final class GitHubHostSettings {
     func restore() async {
         guard !hasRestored else { return }
         hasRestored = true
-        guard !configuration.clientID.isEmpty else { return }
         do {
+            pendingApp = try await authentication.pendingCreatedApp()
+            if pendingApp != nil {
+                errorMessage = "A GitHub App was created, but its settings still need to be saved. Retry saving to finish setup."
+            }
+            guard !configuration.clientID.isEmpty else { return }
             account = try await authentication.account(clientID: configuration.clientID)
             if account != nil { await loadRepositories() }
         } catch {
@@ -136,15 +140,23 @@ final class GitHubHostSettings {
 
     private func saveCreatedApp() async throws {
         guard let app = pendingApp else { return }
-        try await authentication.saveApp(clientID: app.clientID, clientSecret: app.clientSecret)
-        configuration = GitHubHostConfiguration(clientID: app.clientID, appSlug: app.slug, callbackURL: app.callbackURL)
+        try await authentication.stageCreatedApp(app)
+        let isCurrentApp = configuration.clientID == app.clientID
+        var next = isCurrentApp ? configuration : GitHubHostConfiguration()
+        next.clientID = app.clientID
+        next.appSlug = app.slug
+        next.callbackURL = app.callbackURL
+        try next.save(to: record)
+        configuration = next
         clientIDInput = app.clientID
         appSlugInput = app.slug
-        account = nil
-        repositories = []
-        runnerStatuses = []
-        selectedRepositoryIDs = []
-        try configuration.save(to: record)
+        if !isCurrentApp {
+            account = nil
+            repositories = []
+            runnerStatuses = []
+            selectedRepositoryIDs = []
+        }
+        try await authentication.activatePendingApp(clientID: app.clientID)
         pendingApp = nil
     }
 

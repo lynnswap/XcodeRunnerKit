@@ -196,7 +196,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 githubMonitoring = Task {
                     while !Task.isCancelled {
                         await settings.github.synchronize()
-                        do { try await Task.sleep(for: .seconds(30)) }
+                        do { try await Task.sleep(for: .seconds(300)) }
                         catch { break }
                     }
                 }
