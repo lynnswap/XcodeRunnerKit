@@ -94,6 +94,7 @@ Find installed runtimes and their supported device types with
 `xcrun simctl list runtimes --json`. In Swift, set
 `request.simulator = SimulatorConfiguration(runtimeIdentifier:deviceTypeIdentifier:)`.
 
+Test operations wait for the owned Simulator to finish booting before launching xcodebuild.
 The runner deletes the device after the operation, including on failure or
 managed cancellation. It disables parallel test workers by default to avoid
 Xcode creating additional device clones. If deletion fails,
