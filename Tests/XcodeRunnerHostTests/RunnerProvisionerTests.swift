@@ -19,6 +19,8 @@ struct RunnerProvisionerTests {
         var failAfterRegistration = false
         var repositoryResolutions: [String: Result<GitHubRepository, any Error>] = [:]
         var repositoryLookups: [String] = []
+        var pendingInstallationFailures = 0
+        var failBeforeOptIn = false
         private var nextIdentifier = 100
 
         init(installation: HostInstallation) { self.installation = installation }
@@ -39,6 +41,11 @@ struct RunnerProvisionerTests {
             failedRepository = repository
             failingInstallation = installation
             failAfterRegistration = afterRegistration
+        }
+
+        func configurePendingFailures(count: Int, afterRegistration: Bool = false) {
+            pendingInstallationFailures = count
+            failBeforeOptIn = afterRegistration
         }
 
         func listRunners(repository: GitHubRepository, accessToken: String) throws -> [GitHubRunner] {
@@ -90,6 +97,28 @@ struct RunnerProvisionerTests {
 
         func install(_ request: RunnerProvisioner.InstallationRequest) throws {
             installations.append(request)
+            let directory = installation.runnersRoot.appending(path: request.runnerName)
+            let owner = directory.appending(path: ".xcode-runner-installation")
+            if pendingInstallationFailures > 0 {
+                pendingInstallationFailures -= 1
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                try String(request.repository.id).write(to: owner, atomically: true, encoding: .utf8)
+                if failBeforeOptIn {
+                    try addRunner(
+                        repository: request.repository, identifier: nextIdentifier, name: request.runnerName, hosted: false
+                    )
+                    nextIdentifier += 1
+                } else {
+                    try Data("extracted runner archive".utf8).write(to: directory.appending(path: "config.sh"))
+                }
+                throw TestFailure("Installation was interrupted.")
+            }
+            if FileManager.default.fileExists(atPath: owner.path(percentEncoded: false)),
+               FileManager.default.fileExists(atPath: directory.appending(path: ".runner").path(percentEncoded: false)) {
+                try Data().write(to: directory.appending(path: ".xcode-runner-host"))
+                try FileManager.default.removeItem(at: owner)
+                return
+            }
             let shouldFail = installations.count == failingInstallation
             if shouldFail && !failAfterRegistration { throw TestFailure("Installation failed: \(request.registrationToken)") }
             defer { nextIdentifier += 1 }
@@ -287,6 +316,73 @@ struct RunnerProvisionerTests {
         #expect(statuses.first?.errorMessage == "Installation failed after registration.")
     }
 
+    @Test func repeatedConfigurationFailuresReuseTheirOwnedDirectory() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        await client.configurePendingFailures(count: 3)
+        for _ in 0..<3 {
+            let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+            #expect(statuses.first?.errorMessage == "Installation was interrupted.")
+        }
+        let requests = await client.installations
+        #expect(requests.count == 3)
+        #expect(Set(requests.map(\.runnerName)).count == 1)
+        let runnersRoot = root.appending(path: "Library/XcodeRunnerKit/runners")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: runnersRoot.path(percentEncoded: false)).count == 1)
+    }
+
+    @Test func retryAfterRegistrationResumesTheSameRunnerWithoutRegisteringAnother() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        await client.configurePendingFailures(count: 1, afterRegistration: true)
+        let first = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        #expect(first.first?.registeredCount == 0)
+        #expect(first.first?.errorMessage == "Installation was interrupted.")
+        let retried = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        #expect(retried.first?.registeredCount == 1)
+        #expect(retried.first?.errorMessage == nil)
+        let requests = await client.installations
+        #expect(requests.count == 2)
+        #expect(Set(requests.map(\.runnerName)).count == 1)
+        #expect(try await client.listRunners(repository: firstRepository, accessToken: "access-token").count == 1)
+    }
+
+    @Test(arguments: ["", "2"])
+    func directoriesWithoutMatchingInstallationOwnershipArePreserved(owner: String) async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let name = RunnerProvisioner.runnerName(hostName: "CI Mac", repository: firstRepository, slot: 1)
+        let directory = root.appending(path: "Library/XcodeRunnerKit/runners/\(name)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let payload = directory.appending(path: "user-data")
+        try Data("keep existing files".utf8).write(to: payload)
+        if !owner.isEmpty {
+            try owner.write(to: directory.appending(path: ".xcode-runner-installation"), atomically: true, encoding: .utf8)
+        }
+        let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        #expect(statuses.first?.registeredCount == 1)
+        #expect(await client.installations.first?.runnerName != name)
+        #expect(try Data(contentsOf: payload) == Data("keep existing files".utf8))
+    }
+
+    @Test func anOwnedMarkerDoesNotAuthorizeResumingAnUnmatchedRegistration() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let name = RunnerProvisioner.runnerName(hostName: "CI Mac", repository: firstRepository, slot: 1)
+        try await client.addRunner(
+            repository: firstRepository, identifier: 1, name: name, hosted: false, localIdentifier: 2
+        )
+        let directory = root.appending(path: "Library/XcodeRunnerKit/runners/\(name)")
+        try String(firstRepository.id).write(
+            to: directory.appending(path: ".xcode-runner-installation"), atomically: true, encoding: .utf8
+        )
+        let metadata = try Data(contentsOf: directory.appending(path: ".runner"))
+        let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        #expect(statuses.first?.errorMessage?.contains("could not be matched") == true)
+        #expect(await client.installations.isEmpty)
+        #expect(try Data(contentsOf: directory.appending(path: ".runner")) == metadata)
+    }
+
     @Test func realInstallerReceivesTokenOnStandardInputAndReportsRedactedFailures() async throws {
         let root = URL.temporaryDirectory.appending(path: "Runner installer \(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -296,6 +392,7 @@ struct RunnerProvisionerTests {
         #!/bin/bash
         IFS= read -r token
         printf '%s' "$token" > "$HOME/token-input"
+        printf '%s' "$XCODE_RUNNER_INSTALLATION_REPOSITORY_ID" > "$HOME/repository-id"
         printf '%s\\n' "$@" > "$HOME/installer-arguments"
         printf '%s' "$token" >&2
         exit 1
@@ -309,6 +406,7 @@ struct RunnerProvisionerTests {
         )
         let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
         #expect(try String(contentsOf: root.appending(path: "token-input"), encoding: .utf8) == "short-lived-registration-token")
+        #expect(try String(contentsOf: root.appending(path: "repository-id"), encoding: .utf8) == String(firstRepository.id))
         let arguments = try String(contentsOf: root.appending(path: "installer-arguments"), encoding: .utf8)
             .split(separator: "\n").map(String.init)
         #expect(arguments.count == 5)

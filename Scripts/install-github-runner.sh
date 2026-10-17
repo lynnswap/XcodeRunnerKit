@@ -26,7 +26,30 @@ install_github_runner() {
     directory="$runners_root/$runner_name"
     # The official runner's default shell template does not quote its script path.
     case "$directory" in *[[:space:]]*) echo "Runner installation paths must not contain whitespace." >&2; exit 1;; esac
-    if [[ -f "$directory/.runner" ]]; then
+    managed_repository_id=${XCODE_RUNNER_INSTALLATION_REPOSITORY_ID:-}
+    installation_owner="$directory/.xcode-runner-installation"
+    if [[ -n "$managed_repository_id" ]]; then
+        if [[ -e "$directory" ]]; then
+            if [[ ! -f "$installation_owner" ]] || [[ "$(cat "$installation_owner")" != "$managed_repository_id" ]]; then
+                echo "Existing runner directory is not this repository's incomplete installation: $directory" >&2
+                exit 1
+            fi
+            if [[ -f "$directory/.xcode-runner-host" || -f "$directory/.service" ]]; then
+                echo "This runner already has a service; its installation cannot be resumed." >&2
+                exit 1
+            fi
+        else
+            mkdir -p "$runners_root"
+            mkdir "$directory"
+            if ! printf '%s\n' "$managed_repository_id" > "$installation_owner"; then
+                echo "Could not record the new runner installation's owner: $directory" >&2
+                if ! rm -f "$installation_owner" || ! rmdir "$directory"; then
+                    echo "The new incomplete runner directory could not be removed: $directory" >&2
+                fi
+                exit 1
+            fi
+        fi
+    elif [[ -f "$directory/.runner" ]]; then
         echo "Runner already configured at $directory; use its service commands or remove its registration before reinstalling." >&2
         exit 1
     fi
@@ -42,13 +65,21 @@ install_github_runner() {
     install -m 644 "$script_directory/cleanup-runner-temp.py" "$hooks_directory/cleanup-runner-temp.py"
     IFS= read -r registration_token
     mkdir -p "$directory"
-    tar -xzf "$archive" -C "$directory"
+    if [[ ! -f "$directory/.runner" ]]; then
+        tar -xzf "$archive" -C "$directory"
+    fi
     cd "$directory"
-    ./config.sh --unattended --url "https://github.com/$repository" --token "$registration_token" \
-        --name "$runner_name" --labels "$labels" --work "$work_directory"
+    if [[ ! -f .runner ]]; then
+        ./config.sh --unattended --url "https://github.com/$repository" --token "$registration_token" \
+            --name "$runner_name" --labels "$labels" --work "$work_directory"
+    fi
     unset registration_token
-    printf 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=%s/cleanup-runner-temp.sh\n' "$hooks_directory" >> .env
+    hook="ACTIONS_RUNNER_HOOK_JOB_COMPLETED=$hooks_directory/cleanup-runner-temp.sh"
+    if [[ ! -f .env ]] || ! grep -Fxq "$hook" .env; then
+        printf '%s\n' "$hook" >> .env
+    fi
     bash "$script_directory/enable-hosted-runner.sh" "$directory"
+    if [[ -n "$managed_repository_id" ]]; then rm "$installation_owner"; fi
     printf 'Registered %s for %s with the common host.\n' "$runner_name" "$repository"
 }
 

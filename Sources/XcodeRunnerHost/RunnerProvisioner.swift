@@ -43,6 +43,7 @@ actor RunnerProvisioner {
     }
 
     private struct LocalRunner {
+        let directory: URL
         let name: String
         let registration: Registration
         let hasIndividualService: Bool
@@ -183,7 +184,10 @@ actor RunnerProvisioner {
                 if individualCount > 0 {
                     messages.append("\(individualCount) runner(s) use an individual service and were left unchanged.")
                 }
-                let unhosted = local.filter { !$0.isHosted && !$0.hasIndividualService }
+                let unhosted = try local.filter { runner in
+                    guard !runner.isHosted && !runner.hasIndividualService else { return false }
+                    return try !canResumeInstallation(at: runner.directory, repository: repository, remote: remote)
+                }
                 if !unhosted.isEmpty {
                     messages.append("\(unhosted.count) registration(s) have not opted in to this host and were left unchanged.")
                 }
@@ -212,8 +216,13 @@ actor RunnerProvisioner {
                             while true {
                                 let candidate = Self.runnerName(hostName: hostName, repository: repository, slot: nextSlot)
                                 nextSlot += 1
+                                let directory = installation.runnersRoot.appending(path: candidate)
+                                if try canResumeInstallation(at: directory, repository: repository, remote: remote) {
+                                    name = candidate
+                                    break
+                                }
                                 if !remote.contains(where: { $0.name == candidate }),
-                                   !FileManager.default.fileExists(atPath: installation.runnersRoot.appending(path: candidate).path(percentEncoded: false)) {
+                                   !FileManager.default.fileExists(atPath: directory.path(percentEncoded: false)) {
                                     name = candidate
                                     break
                                 }
@@ -248,6 +257,29 @@ actor RunnerProvisioner {
         return statuses
     }
 
+    private func canResumeInstallation(
+        at directory: URL, repository: GitHubRepository, remote: [GitHubRunner]
+    ) throws -> Bool {
+        let manager = FileManager.default
+        guard !manager.fileExists(atPath: directory.appending(path: ".xcode-runner-host").path(percentEncoded: false)),
+              !manager.fileExists(atPath: directory.appending(path: ".service").path(percentEncoded: false)) else { return false }
+        let owner: String
+        do {
+            owner = try String(contentsOf: directory.appending(path: ".xcode-runner-installation"), encoding: .utf8)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return false }
+        guard owner.trimmingCharacters(in: .whitespacesAndNewlines) == String(repository.id) else { return false }
+        let metadata = directory.appending(path: ".runner")
+        if manager.fileExists(atPath: metadata.path(percentEncoded: false)) {
+            let registration = try JSONDecoder().decode(Registration.self, from: Data(contentsOf: metadata))
+            let name = registration.agentName ?? directory.lastPathComponent
+            guard name == directory.lastPathComponent,
+                  remote.contains(where: { $0.id == registration.agentId && $0.name == name }) else {
+                throw ProvisioningError("The incomplete registration at \(directory.path(percentEncoded: false)) could not be matched to this repository on GitHub. It was left unchanged.")
+            }
+        }
+        return true
+    }
+
     private func localRunners() throws -> [LocalRunner] {
         let manager = FileManager.default
         let directories: [URL]
@@ -261,7 +293,7 @@ actor RunnerProvisioner {
             do {
                 let registration = try JSONDecoder().decode(Registration.self, from: Data(contentsOf: metadata))
                 return LocalRunner(
-                    name: registration.agentName ?? directory.lastPathComponent, registration: registration,
+                    directory: directory, name: registration.agentName ?? directory.lastPathComponent, registration: registration,
                     hasIndividualService: manager.fileExists(atPath: directory.appending(path: ".service").path(percentEncoded: false)),
                     isHosted: manager.fileExists(atPath: directory.appending(path: ".xcode-runner-host").path(percentEncoded: false))
                 )
@@ -360,7 +392,10 @@ actor RunnerProvisioner {
                 installerURL.path(percentEncoded: false), request.repository.fullName, request.runnerName, request.archive.path(percentEncoded: false),
                 request.labels.joined(separator: ","), request.sha256Checksum,
             ]),
-            environment: .inherit.updating(["HOME": installation.homeDirectory.path(percentEncoded: false)]),
+            environment: .inherit.updating([
+                "HOME": installation.homeDirectory.path(percentEncoded: false),
+                "XCODE_RUNNER_INSTALLATION_REPOSITORY_ID": String(request.repository.id),
+            ]),
             platformOptions: options,
             input: .string(request.registrationToken + "\n"),
             output: .string(limit: 1_048_576), error: .string(limit: 1_048_576)

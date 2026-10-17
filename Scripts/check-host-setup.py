@@ -324,12 +324,17 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit-runner-") as temporary:
 import json, os, sys, time
 from pathlib import Path
 a=sys.argv
+if counter := os.environ.get('XRK_FIXTURE_CONFIG_COUNTER'):
+    with Path(counter).open('a') as output: output.write('configured\\n')
+if os.environ.get('XRK_FIXTURE_CONFIG_FAIL') == '1':
+    raise SystemExit('Fixture registration failed before creating .runner')
 if gate := os.environ.get('XRK_FIXTURE_CONFIG_GATE'):
     gate = Path(gate)
     (gate / 'entered').touch()
     while not (gate / 'release').exists(): time.sleep(0.02)
 Path('.runner').write_text(json.dumps({'workFolder':a[a.index('--work')+1], 'labels':a[a.index('--labels')+1]}), encoding='utf-8-sig')
 Path('.env').write_text('')
+Path('.credentials').write_text('registered credentials')
 """
     with tarfile.open(archive, "w:gz") as target:
         for name, content in {"config.sh": config, "svc.sh": "#!/bin/bash\nprintf '%s\\n' fixture.plist > .service\n", "bin/runsvc.sh": "#!/bin/bash\nexit 0\n"}.items():
@@ -386,6 +391,66 @@ Path('.env').write_text('')
     assert failure.returncode != 0 and "does not match the expected release digest" in failure.stderr
     assert not (installation_root / "wrong-digest").exists()
     assert not (physical_work / "Work" / "wrong-digest").exists()
+
+    managed_environment = {**environment, "XCODE_RUNNER_INSTALLATION_REPOSITORY_ID": "42"}
+    pending_name = "pending-configuration"
+    pending_directory = installation_root / pending_name
+    pending = installer[:3] + [pending_name, str(archive)]
+    pending_counter = root / "pending-config-count"
+    failing_environment = {**managed_environment, "XRK_FIXTURE_CONFIG_FAIL": "1",
+                           "XRK_FIXTURE_CONFIG_COUNTER": str(pending_counter)}
+    for _ in range(3):
+        failure = subprocess.run(pending, input="fixture-token\n", text=True, env=failing_environment, capture_output=True)
+        assert failure.returncode != 0
+        assert (pending_directory / ".xcode-runner-installation").read_text().strip() == "42"
+        assert not (pending_directory / ".runner").exists()
+    assert len(pending_counter.read_text().splitlines()) == 3
+    subprocess.run(pending, input="fixture-token\n", text=True,
+                   env={**managed_environment, "XRK_FIXTURE_CONFIG_COUNTER": str(pending_counter)},
+                   check=True, capture_output=True)
+    assert len(pending_counter.read_text().splitlines()) == 4
+    assert (pending_directory / ".xcode-runner-host").exists()
+    assert not (pending_directory / ".xcode-runner-installation").exists()
+
+    setup = root / "resumable-setup"
+    setup.mkdir()
+    for name in ("install-github-runner.sh", "lock-host-storage.py", "cleanup-runner-temp.sh", "cleanup-runner-temp.py"):
+        shutil.copy2(scripts / name, setup / name)
+    (setup / "enable-hosted-runner.sh").write_text('''#!/bin/bash
+if [[ "${XRK_FIXTURE_OPT_IN_FAIL:-}" == "1" ]]; then
+    echo "Fixture opt-in failed after registration" >&2
+    exit 1
+fi
+exec /bin/bash "$XRK_FIXTURE_ENABLE_SCRIPT" "$@"
+''')
+    registered_counter = root / "registered-config-count"
+    registered_environment = {**managed_environment, "XRK_FIXTURE_CONFIG_COUNTER": str(registered_counter),
+                              "XRK_FIXTURE_ENABLE_SCRIPT": str(scripts / "enable-hosted-runner.sh")}
+    registered = ["bash", str(setup / "install-github-runner.sh"), "OWNER/REPO", "pending-opt-in", str(archive)]
+    failure = subprocess.run(registered, input="fixture-token\n", text=True,
+                             env={**registered_environment, "XRK_FIXTURE_OPT_IN_FAIL": "1"}, capture_output=True)
+    assert failure.returncode != 0 and "Fixture opt-in failed" in failure.stderr
+    registered_directory = installation_root / "pending-opt-in"
+    metadata = (registered_directory / ".runner").read_bytes()
+    credentials = (registered_directory / ".credentials").read_bytes()
+    assert not (registered_directory / ".xcode-runner-host").exists()
+    subprocess.run(registered, input="fixture-token\n", text=True, env=registered_environment, check=True, capture_output=True)
+    assert len(registered_counter.read_text().splitlines()) == 1
+    assert (registered_directory / ".runner").read_bytes() == metadata
+    assert (registered_directory / ".credentials").read_bytes() == credentials
+    assert (registered_directory / ".xcode-runner-host").exists()
+    assert not (registered_directory / ".xcode-runner-installation").exists()
+    assert len((registered_directory / ".env").read_text().splitlines()) == 1
+
+    unowned_directory = installation_root / "unowned"
+    unowned_directory.mkdir()
+    retained = unowned_directory / "retained"
+    retained.write_text("existing user data")
+    unowned = installer[:3] + ["unowned", str(archive)]
+    failure = subprocess.run(unowned, input="fixture-token\n", text=True, env=managed_environment, capture_output=True)
+    assert failure.returncode != 0 and "not this repository's incomplete installation" in failure.stderr
+    assert retained.read_text() == "existing user data"
+    assert not (unowned_directory / "config.sh").exists()
 
     service_plist = root / "individual.plist"
     import plistlib
