@@ -14,6 +14,7 @@ struct RunnerProvisionerTests {
         var installations: [RunnerProvisioner.InstallationRequest] = []
         var tokenRequests = 0
         var archiveRequests = 0
+        var runnerListRequests: [Int] = []
         var failedRepository: Int?
         var failingInstallation: Int?
         var failAfterRegistration = false
@@ -53,6 +54,7 @@ struct RunnerProvisionerTests {
         }
 
         func listRunners(repository: GitHubRepository, accessToken: String) throws -> [GitHubRunner] {
+            runnerListRequests.append(repository.id)
             if failedRepository == repository.id { throw TestFailure("Repository access denied.") }
             return remote[repository.id, default: []]
         }
@@ -191,6 +193,47 @@ struct RunnerProvisionerTests {
         #expect(await client.installations.count == 4)
         #expect(await client.archiveRequests == 1)
         #expect(await client.tokenRequests == 2)
+    }
+
+    @Test func malformedUnselectedRegistrationIsReportedWithoutBlockingSelectedRepositories() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appending(path: "Library/XcodeRunnerKit/runners/unselected-malformed")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let metadata = directory.appending(path: ".runner")
+        let malformed = Data(#"{"agentId":"#.utf8)
+        try malformed.write(to: metadata)
+        let statuses = await provisioner.reconcile(
+            repositories: [firstRepository, secondRepository], capacity: 1, token: "access-token"
+        )
+        #expect(statuses.map(\.registeredCount) == [1, 1])
+        #expect(Set(await client.runnerListRequests) == Set([firstRepository.id, secondRepository.id]))
+        for status in statuses {
+            let message = try #require(status.errorMessage)
+            #expect(message.components(separatedBy: metadata.path(percentEncoded: false)).count == 2)
+        }
+        #expect(try Data(contentsOf: metadata) == malformed)
+    }
+
+    @Test func malformedOwnedPendingRegistrationStopsOnlyItsRepository() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let name = RunnerProvisioner.runnerName(hostName: "CI Mac", repository: firstRepository, slot: 1)
+        let directory = root.appending(path: "Library/XcodeRunnerKit/runners/\(name)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try String(firstRepository.id).write(
+            to: directory.appending(path: ".xcode-runner-installation"), atomically: true, encoding: .utf8
+        )
+        let metadata = directory.appending(path: ".runner")
+        let malformed = Data(#"{"agentId":"#.utf8)
+        try malformed.write(to: metadata)
+        let statuses = await provisioner.reconcile(
+            repositories: [firstRepository, secondRepository], capacity: 1, token: "access-token"
+        )
+        #expect(statuses.map(\.registeredCount) == [0, 1])
+        #expect(await client.installations.map(\.repository.id) == [secondRepository.id])
+        #expect(statuses.allSatisfy { $0.errorMessage?.contains(metadata.path(percentEncoded: false)) == true })
+        #expect(try Data(contentsOf: metadata) == malformed)
     }
 
     @Test func hostLabelsAreInheritedAndSharedWithNewRepositories() async throws {

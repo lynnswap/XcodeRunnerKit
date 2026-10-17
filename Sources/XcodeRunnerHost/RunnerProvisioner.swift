@@ -115,13 +115,14 @@ actor RunnerProvisioner {
         defer { isReconciling = false }
         var archive: Result<PreparedArchive, any Error>?
         var statuses: [RepositoryRunnerStatus] = []
-        let initialLocal: [LocalRunner]
-        do { initialLocal = try localRunners() }
+        let initialScan: (runners: [LocalRunner], errors: [String])
+        do { initialScan = try localRunners() }
         catch {
             return repositories.map {
                 Self.status(repository: $0, capacity: capacity, runners: [], error: error.localizedDescription)
             }
         }
+        let initialLocal = initialScan.runners
         var snapshots: [Int: Result<[GitHubRunner], any Error>] = [:]
         for repository in repositories {
             do {
@@ -170,7 +171,7 @@ actor RunnerProvisioner {
 
         for repository in repositories {
             var knownRunners: [GitHubRunner] = []
-            var messages: [String] = []
+            var messages = initialScan.errors
             var requiresAuthentication = false
             do {
                 try Task.checkCancellation()
@@ -243,7 +244,9 @@ actor RunnerProvisioner {
                     }
                     // A failed installer can still have registered a runner. Preserve and report that partial result.
                     remote = try await client.listRunners(repository: repository, accessToken: token)
-                    local = try localRunners().filter {
+                    let scan = try localRunners()
+                    for error in scan.errors where !messages.contains(error) { messages.append(error) }
+                    local = try scan.runners.filter {
                         try $0.belongs(to: repository, remote: remote, resolvedRepositories: resolvedRepositories)
                     }
                     knownRunners = Self.managedRunners(local: local, remote: remote)
@@ -291,27 +294,30 @@ actor RunnerProvisioner {
         return true
     }
 
-    private func localRunners() throws -> [LocalRunner] {
+    private func localRunners() throws -> (runners: [LocalRunner], errors: [String]) {
         let manager = FileManager.default
         let directories: [URL]
         do {
             directories = try manager.contentsOfDirectory(at: installation.runnersRoot, includingPropertiesForKeys: [.isDirectoryKey])
-        } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return [] }
-        return try directories.compactMap { directory in
-            guard try directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else { return nil }
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return ([], []) }
+        var runners: [LocalRunner] = []
+        var errors: [String] = []
+        for directory in directories {
             let metadata = directory.appending(path: ".runner")
-            guard manager.fileExists(atPath: metadata.path(percentEncoded: false)) else { return nil }
             do {
+                guard try directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true,
+                      manager.fileExists(atPath: metadata.path(percentEncoded: false)) else { continue }
                 let registration = try JSONDecoder().decode(Registration.self, from: Data(contentsOf: metadata))
-                return LocalRunner(
+                runners.append(LocalRunner(
                     directory: directory, name: registration.agentName ?? directory.lastPathComponent, registration: registration,
                     hasIndividualService: manager.fileExists(atPath: directory.appending(path: ".service").path(percentEncoded: false)),
                     isHosted: manager.fileExists(atPath: directory.appending(path: ".xcode-runner-host").path(percentEncoded: false))
-                )
+                ))
             } catch {
-                throw ProvisioningError("Could not read the registration at \(metadata.path(percentEncoded: false)): \(error.localizedDescription)")
+                errors.append("Could not read the registration at \(metadata.path(percentEncoded: false)): \(error.localizedDescription)")
             }
         }
+        return (runners, errors)
     }
 
     private static func managedRunners(local: [LocalRunner], remote: [GitHubRunner]) -> [GitHubRunner] {
