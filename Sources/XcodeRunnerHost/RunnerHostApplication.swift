@@ -136,6 +136,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var monitoring: Task<Void, Never>?
     private var poolMonitoring: Task<Void, Never>?
+    private var githubMonitoring: Task<Void, Never>?
     private var storagePreparation: Task<Void, Never>?
     private var signals: [any DispatchSourceSignal] = []
     private var stopping = false
@@ -190,6 +191,15 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 settings.storageDidBecomeAvailable(storage)
                 settings.hostState = "Running"
                 startRunnerMonitoring()
+                await settings.github.restore()
+                try Task.checkCancellation()
+                githubMonitoring = Task {
+                    while !Task.isCancelled {
+                        if !settings.isSaving { await settings.github.synchronize() }
+                        do { try await Task.sleep(for: .seconds(300)) }
+                        catch { break }
+                    }
+                }
             } catch {
                 guard !Task.isCancelled else { return }
                 settings.storagePreparationFailed(error)
@@ -295,12 +305,15 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         settings.hostState = "Stopping"
         monitoring?.cancel()
         poolMonitoring?.cancel()
+        githubMonitoring?.cancel()
         storagePreparation?.cancel()
         Task {
             for runner in runners.values { runner.task.cancel() }
+            await settings.github.shutDown()
             await storagePreparation?.value
             await monitoring?.value
             await poolMonitoring?.value
+            await githubMonitoring?.value
             for runner in runners.values { await runner.task.value }
             stopped = true
             print("Runner host stopped.")

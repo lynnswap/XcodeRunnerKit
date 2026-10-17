@@ -203,6 +203,10 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     assert not (host_root/'Pool').exists(), 'Host status reads configured an unused pool'
 
     subprocess.run(['bash',str(scripts/'build-runner-host.sh'),'-',str(root/'packaging'),executable],check=True,capture_output=True)
+    setup = root/'packaging/XcodeRunnerHost.app/Contents/Resources/HostSetup'
+    for name in ('install-github-runner.sh', 'enable-hosted-runner.sh', 'lock-host-storage.py',
+                 'stop-runner-service.py', 'cleanup-runner-temp.sh', 'cleanup-runner-temp.py'):
+        assert (setup/name).read_bytes() == (scripts/name).read_bytes(), f'Missing or outdated bundled setup script: {name}'
     tools = root/'tools'
     tools.mkdir()
     fake_launchctl = tools/'launchctl'

@@ -1,36 +1,30 @@
 # XcodeRunnerKit
 
-> [!NOTE]
-> Work in progress. APIs, command-line options, and behavior may change.
+Run Xcode builds and tests from Swift or the `xcode-runner` CLI. Each run gets
+its own logs, result bundle, and DerivedData directory.
 
-Run Xcode builds and tests on a macOS host from Swift or the `xcode-runner` CLI.
-Each operation preserves a combined output log and reserves its own result-bundle
-location. Task cancellation tears down the launched process group.
-
-For trusted self-hosted GitHub Actions jobs, an optional
-[signed menu bar host app](Documentation/NativeHost.md#common-host-app) starts multiple
-repository runners under one macOS privacy identity.
+For GitHub Actions on your own Mac, use the [menu bar host](Documentation/NativeHost.md).
+It provides GitHub sign-in, runner registration, and a shared limit on concurrent
+Xcode jobs.
 
 ## Requirements
 
 - macOS 26 or later
 - Swift 6.4 and Xcode 27.1 or later
-- The SDKs, Simulator runtimes, and additional components required by the project
+- The SDKs and Simulator runtimes needed by your project
 
-The library runs on macOS. Its Xcode destination can be macOS or an existing
-iOS Simulator.
+The package is under development; APIs and CLI options may change.
 
-## Swift usage
+## Use from Swift
 
-Add the library product to a Swift package target:
+Add the package dependency:
 
 ```swift
 .package(url: "https://github.com/lynnswap/XcodeRunnerKit.git", branch: "main")
 ```
 
-```swift
-.product(name: "XcodeRunnerKit", package: "XcodeRunnerKit")
-```
+Add `.product(name: "XcodeRunnerKit", package: "XcodeRunnerKit")` to your target's
+dependencies, then run an Xcode operation:
 
 ```swift
 import Foundation
@@ -52,370 +46,163 @@ print(result.logURL)
 print(result.resultBundleURL)
 ```
 
-Use `.project(URL)` for an Xcode project or `.package(URL)` for a Swift package.
-`buildSettings` and `environment` pass values to the child process.
-An optional `onOutput` closure receives output bytes while the command runs.
+Use `.project(URL)` or `.package(URL)` for other source types.
+Set `request.buildSettings` and `request.environment` to configure the child
+process. Pass `onOutput` to `runner.run` to receive output as it runs.
 
-## Command-line usage
+## Use the CLI
 
-Build the executable with:
+Build from this checkout:
 
 ```sh
 swift build -c release --product xcode-runner
 ```
 
-Run a macOS package's tests:
+Run a package's macOS tests:
 
 ```sh
 .build/release/xcode-runner test \
-  --package /path/to/Package \
-  --scheme PackageName \
+  --package /path/to/Package --scheme PackageName \
   --destination 'platform=macOS,arch=arm64' \
   --developer-directory /Applications/Xcode.app/Contents/Developer \
   --output-directory /path/to/CIOutput
 ```
 
-Run an application's tests on an existing Simulator:
+The commands are `build`, `build-for-testing`, `test`, and
+`test-without-building`. Choose one of `--workspace`, `--project`, or
+`--package`. Add Xcode arguments after `--`.
 
-```sh
-.build/release/xcode-runner test \
-  --workspace /path/to/App.xcworkspace \
-  --scheme App \
-  --destination 'platform=iOS Simulator,id=<SIMULATOR_UDID>' \
-  --output-directory /path/to/CIOutput \
-  -- -parallel-testing-enabled NO -jobs 4
-```
+Use repeated `--setting NAME=VALUE` and `--environment NAME=VALUE` options
+for build settings and environment values. `--developer-directory` selects
+Xcode without changing `xcode-select`.
 
-The Xcode subcommands are `build`, `build-for-testing`, `test`, and
-`test-without-building`. Specify exactly one of `--workspace`, `--project`,
-or `--package`. Forward additional Xcode arguments after `--`.
-Use `pool status` and `pool configure` to manage shared host capacity.
+### iOS Simulators
 
-Repeat `--setting NAME=VALUE` for build settings and
-`--environment NAME=VALUE` for child environment values.
-`--developer-directory` selects Xcode without changing the host's
-`xcode-select` setting.
+To use an existing device, pass
+`--destination 'platform=iOS Simulator,id=<SIMULATOR_UDID>'`.
 
-### Installed host storage
-
-Select one job-data parent when setting up the native host:
-
-```sh
-bash Scripts/install-host-tools.sh .build/release/xcode-runner \
-  "$(git rev-parse HEAD)" /path/to/JobData
-"$HOME/Library/Application Support/XcodeRunnerKit/bin/xcode-runner" host storage status --json
-```
-
-The parent contains `Work/<runner-name>`, `CompilationCache`, and
-`Build/<operation-UUID>`. Omitting the directory uses the managed default.
-Internal tools, credentials, execution pool, and service logs have fixed managed
-locations. `host storage configure --directory <path>` initializes the selection
-or confirms the existing location; it preserves data and rejects a different
-location after initialization.
-
-The common host passes its active storage to runner processes at startup.
-Descendant Xcode commands default to its Build directory, shared cache, and
-shared pool. An unused pool starts with capacity four; a saved limit takes
-precedence. Explicit path and pool options override these defaults. Standalone
-CLI operations retain their own defaults. See the
-[native host guide](Documentation/NativeHost.md) for setup and retention.
-
-### Execution priority
-
-All four Xcode subcommands accept `--priority high|medium|low`, with `medium`
-as the default:
-
-```sh
-xcode-runner test --package /path/to/Package --scheme PackageName \
-  --pool-directory /path/to/shared-pool --maximum-concurrent-jobs 4 \
-  --priority high
-```
-
-Priority controls admission to the local shared pool. Jobs already running
-continue, and a command with no explicit or inherited host pool starts immediately
-regardless of its priority. See [shared host capacity](#shared-host-capacity) for
-ordering and cancellation rules. GitHub assigns jobs to runner listeners before the CLI
-reaches this pool.
-
-### Pool management
-
-Inspect or change a pool while jobs run:
-
-```sh
-xcode-runner pool status --pool-directory /path/to/shared-pool
-xcode-runner pool configure --pool-directory /path/to/shared-pool --maximum-concurrent-jobs 4
-xcode-runner pool status --pool-directory /path/to/shared-pool --json
-```
-
-`pool configure` initializes a new pool or updates its saved capacity. Jobs
-already running continue; queued jobs use the new limit. See
-[shared host capacity](#shared-host-capacity) for the execution rules.
-
-`pool status` reports the saved capacity, active job count, and waiting job counts
-at each priority. With `--json`, a configured pool produces:
-
-```json
-{"maximumConcurrentJobs":4,"activeJobCount":4,"waitingJobCounts":{"high":1,"medium":2,"low":1}}
-```
-
-An unconfigured pool produces `null` without creating its directory. The text
-output also includes the total number of waiting jobs.
-
-Check CLI administration and the existing Xcode command interface:
-
-```sh
-DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer \
-python3 Scripts/check-pool-cli.py /absolute/path/to/xcode-runner
-```
-
-## Job-owned iOS Simulators
-
-Select an available iOS runtime and a device type from that runtime's
-`supportedDeviceTypes` metadata:
-
-```sh
-DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer xcrun simctl list runtimes --json
-```
-
-Pass both identifiers to the CLI:
+To create a separate device for each run, pass a runtime and device type:
 
 ```sh
 xcode-runner test --workspace /path/to/App.xcworkspace --scheme App \
   --simulator-runtime com.apple.CoreSimulator.SimRuntime.iOS-27-0 \
   --simulator-device-type com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro \
-  --pool-directory /path/to/shared-pool --maximum-concurrent-jobs 2
+  --output-directory /path/to/CIOutput
 ```
 
-In Swift, set `request.simulator = SimulatorConfiguration(runtimeIdentifier:
-deviceTypeIdentifier:)`. The runner creates a fresh device, replaces the test
-destination with its UDID, and deletes that exact device after success, failure,
-or managed cancellation. Creation and deletion remain inside the execution
-slot. Existing devices are never selected for deletion.
+Find installed runtimes and their supported device types with
+`xcrun simctl list runtimes --json`. In Swift, set
+`request.simulator = SimulatorConfiguration(runtimeIdentifier:deviceTypeIdentifier:)`.
 
-Parallel test workers are disabled by default for owned devices. Keep this
-setting to prevent Xcode from creating additional worker clones; explicitly
-forwarded Xcode options can override it. Direct macOS destinations and existing
-Simulator destinations remain available when `simulator` is nil.
+The runner deletes the device after the operation, including on failure or
+managed cancellation. It disables parallel test workers by default to avoid
+Xcode creating additional device clones. If deletion fails,
+`SimulatorCleanupFailure` includes the UDID and cleanup error;
+resolve the reported error and delete that device with `xcrun simctl delete`.
 
-Creation finishes before cancellation cleanup begins so the device identifier
-is known. A stuck simctl create or delete therefore delays completion.
-`SimulatorCleanupFailure` preserves the original operation error, any completed
-build result, the owned UDID, and the deletion error. If deletion fails, use
-`xcrun simctl delete <reported-UDID>` after resolving the reported cause.
-Force-killing the wrapper can leave a device behind.
+### Shared execution limit
 
-The public fixture contains Swift, Clang, and the SDK's Observation macro.
-Validate concurrent devices, test-failure cleanup, and cancellation cleanup:
+Point cooperating processes at the same local pool directory:
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer \
-python3 Scripts/check-simulators.py /absolute/path/to/xcode-runner
+xcode-runner test --package /path/to/Package --scheme PackageName \
+  --destination 'platform=macOS,arch=arm64' \
+  --pool-directory /path/to/shared-pool --maximum-concurrent-jobs 4
 ```
 
-
-## Shared compilation cache
-
-Set `request.compilationCache = CompilationCache(directory: cacheURL)`, or add
-`--compilation-cache <shared-CAS-directory>` to the CLI. Each operation keeps its
-own DerivedData, build database, intermediate products, and result bundle.
-
-The cache configuration enables Swift and Clang compilation caching and maps
-the source root and DerivedData to stable compiler-visible prefixes. Cached
-operations use canonical physical paths, including /private for /var and /tmp.
-Additional
-locations outside the source root can be mapped with `prefixMappings` in Swift
-or repeated `--prefix-mapping /physical/path=/canonical-prefix` options.
-Use physical paths and distinct replacement prefixes for extra mappings.
-The fixture uses a relative Clang module map so its contents stay unchanged
-when relocated. Generated module maps that embed absolute paths can miss
-because their contents are different compiler inputs.
-Raw `buildSettings` or `--setting` values take precedence over cache defaults.
-
-Keep the package checkout basename consistent across jobs: SwiftPM's package
-identity is a compiler input. Changes to source, compiler flags, toolchains,
-SDKs, dependencies, or macro behavior can legitimately cause misses.
-Prefix mapping changes paths recorded in compiler outputs, including debug and
-coverage data. Use unmapped builds when a consumer needs original physical paths.
-
-Add `--cache-diagnostics` to inspect replay hit/miss notes. The reproducible
-check uses paths containing spaces, relocated checkouts, concurrent builds,
-and a changed Clang input:
+`--maximum-concurrent-jobs` sets the initial limit. Once the pool exists,
+change its saved limit with:
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer \
-python3 Scripts/check-compilation-cache.py /absolute/path/to/xcode-runner
+xcode-runner pool configure --pool-directory /path/to/shared-pool --maximum-concurrent-jobs 8
+xcode-runner pool status --pool-directory /path/to/shared-pool --json
 ```
 
-The check records cold and relocated build timings, cache replay diagnostics,
-and concurrent runs. Xcode can repeat diagnostic notes, so note counts are not
-compiler-task counts. It also changes the C implementation and its expected
-result to verify that the cache respects changed compiler inputs.
+An increase lets waiting jobs start. A decrease lets current jobs finish and
+holds new jobs until the active count falls below the limit. All clients must
+use the same macOS user and local pool directory.
 
-The fixture exercises the SDK's Observation macro. Its result does not establish
-cache reuse for every third-party macro or build-tool plugin. Those consumers
-need their own build verification. Keep shared CAS directories separate from
-job artifact retention, and remove a CAS only while its users are stopped.
-
-Xcode settings: [Apple build settings reference](https://developer.apple.com/documentation/xcode/build-settings-reference).
-The path-mapping approach also follows [this worktree cache investigation](https://zenn.dev/sryu/articles/worktree-compilation-cache).
-
-## Shared host capacity
-
-Configure the same pool directory in every repository runner:
+In Swift, attach a pool to the runner:
 
 ```swift
-let poolDirectory = URL(filePath: "/Users/ci/Library/Application Support/XcodeRunnerKit/Pool")
-var runner = XcodeRunner()
-runner.executionPool = try HostExecutionPool(
-    directory: poolDirectory,
-    initialCapacity: 2
+let pool = try HostExecutionPool(
+    directory: URL(filePath: "/path/to/shared-pool"),
+    initialCapacity: 4
 )
-```
+var runner = XcodeRunner()
+runner.executionPool = pool
 
-Add `--pool-directory <path> --maximum-concurrent-jobs 2` to CLI operations.
-The first operation initializes an empty pool with the specified capacity.
-Later operations use the pool's saved capacity, even when the workflow specifies
-a different value. A workflow specifying four against a two-slot pool waits
-when both slots are occupied. A workflow specifying two against a four-slot
-pool can use any available slot.
-
-The kernel holds each slot through execution and log cleanup. Waiting jobs can
-be cancelled. Invalid saved configuration or lock I/O failures stop the operation.
-
-Use a local filesystem and the same macOS user for all cooperating runners.
-Keep the pool directory and lock files in place while jobs run. Read or change
-the saved limit without stopping CI:
-
-```swift
-let pool = try HostExecutionPool(directory: poolDirectory, initialCapacity: 4)
 let status = try await pool.status()
-try await pool.updateMaximumConcurrentJobs(to: 4)
+try await pool.updateMaximumConcurrentJobs(to: 8)
 ```
 
-`status()` returns `nil` for an unconfigured pool and does not initialize it.
-Otherwise it reports `maximumConcurrentJobs` and `activeJobCount`, including
-operations that started before a capacity decrease, and `waitingJobCounts` for
-the `high`, `medium`, and `low` priorities. Updating from six to four
-while six operations run lets all six finish. New operations, including existing
-waiters, start only after the active count drops below four. Increasing the limit
-lets waiting operations use the additional capacity.
+`status()` returns `nil` for an unused pool without creating it.
+`--priority high|medium|low`, or `runner.run(..., priority: .high)` in Swift,
+sets the queue priority. Higher priorities start first; equal priorities start
+in arrival order. Running operations are not interrupted.
 
-An operation uses `medium` priority by default. Supply a priority when running an
-Xcode operation or acquiring a slot directly:
+For a native GitHub Actions host, use **Apply** in the app's settings. It updates
+the execution limit and registers enough GitHub runners to use it. The CLI's
+`pool configure` command changes only the local limit. GitHub assigns jobs to
+runners before they enter the local Xcode queue.
 
-```swift
-let result = try await runner.run(.test, request: request, priority: .high)
-try await pool.withSlot(priority: .low) {
-    // Perform an operation that participates in the same host limit.
-}
-```
+When upgrading from the old `capacity.lock` pool format, stop all clients,
+update them together, then recreate the pool. Keep pool files in place while
+jobs are running.
 
-Waiting operations start in `high`, `medium`, then `low` priority order. Operations
-at the same priority start in the order they register with the local pool. An
-operation that already holds a slot continues through its cleanup. A continuous
-stream of higher-priority work can keep lower-priority operations waiting. The
-pool orders operations that reach it; GitHub's assignment of jobs to runner
-listeners happens before this admission step.
+### Shared compilation cache
 
-All cooperating CLI and library clients must use the current pool protocol.
-To upgrade from a version that stores capacity in `capacity.lock`, stop new jobs
-and let running jobs finish. Replace every client, remove the old pool directory,
-and configure the desired capacity again. Older clients and pool data are not
-supported.
+Add `--compilation-cache /path/to/shared-CAS`, or set
+`request.compilationCache = CompilationCache(directory: cacheURL)` in Swift.
+The compiler cache is shared; each run still has separate DerivedData and build
+outputs.
 
-Locks coordinate XcodeRunnerKit operations; unmanaged commands do not participate.
-Force-killing the wrapper does not provide cleanup guarantees for its subprocesses;
-use Task, SIGINT, or SIGTERM
-cancellation for managed teardown.
+Keep package checkout names consistent across jobs because SwiftPM includes the
+package identity in compiler inputs. For source locations outside the checkout,
+use `--prefix-mapping /physical/path=/canonical-prefix` or
+`CompilationCache.prefixMappings`. Path mappings also affect paths in debug and
+coverage data. Explicit build settings override cache defaults.
 
-The separate-process check compiles the production pool implementation:
-
-```sh
-DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer \
-python3 Scripts/check-execution-pool.py
-```
+Use `--cache-diagnostics` to see compiler cache hits and misses. Remove a shared
+cache only after its users have stopped.
 
 ## Results and cancellation
 
-Each operation creates a uniquely named directory under `outputDirectory`.
-It contains `xcodebuild.log`, the requested `Results.xcresult`, and the default
-`DerivedData` directory. Early failures may leave no result bundle.
+Each run creates a directory under `outputDirectory` containing `xcodebuild.log`,
+`Results.xcresult`, and its default `DerivedData`. Early failures may produce no
+result bundle.
 
-To reuse a completed build with `test-without-building`, set
-`derivedDataDirectory` in Swift or pass `--derived-data` to the CLI.
-Use a separate DerivedData directory for concurrent jobs.
+`XcodeBuildFailure.result` contains the exit status and artifact paths.
+`underlyingError` and `cleanupError` preserve execution and cleanup failures.
 
-An unsuccessful operation throws `XcodeBuildFailure`. Its `result` preserves
-the termination or cancellation state and artifact locations.
-`underlyingError` and `cleanupError` retain execution and log-closing failures.
-Cancel the calling Swift task to forcefully terminate the process group with
-SIGKILL. A cancelled result bundle may be incomplete. The CLI handles SIGINT
-and SIGTERM through the same cancellation path.
+Cancel the calling Swift task, or send the CLI SIGINT/SIGTERM, to terminate the
+process group and clean up an owned Simulator. A forced kill can prevent cleanup,
+and a cancelled result bundle may be incomplete.
 
-## GitHub Actions
+For `test-without-building`, reuse the previous build with
+`derivedDataDirectory` or `--derived-data`. Do not share mutable DerivedData
+between concurrent runs.
 
-This package's own CI runs pull requests, main pushes, and manual dispatches
-on fresh GitHub-hosted macOS runners. Each job builds the CLI from its checkout
-and uses temporary pool, cache, and output directories. The workflow covers
-macOS tests, separate-process capacity, and the iOS consumer fixture.
+## GitHub Actions host
 
-[Set up a native host](Documentation/NativeHost.md) to run trusted consumer
-repositories on an owned Mac, including private dependency authentication,
-service operation, and cache retention. Public contribution workflows belong
-on isolated hosted runners rather than a Mac that holds private credentials.
-
-### Choose priorities in consumer workflows
-
-A trusted consumer workflow can choose a priority from its event. This example
-uses `high` for pull requests, `low` for pushes and scheduled runs, and `medium`
-for manual runs and other events. XcodeRunnerKit reads the explicit CLI flag;
-it does not inspect GitHub events.
-
-Set the environment value on the consumer job and add the test step after its
-checkout and dependency setup:
-
-```yaml
-env:
-  XCODE_JOB_PRIORITY: ${{ github.event_name == 'pull_request' && 'high' || (github.event_name == 'push' || github.event_name == 'schedule') && 'low' || 'medium' }}
-steps:
-  - name: Run Xcode tests
-    run: |
-      ci_root="$XCODE_RUNNER_HOST_ROOT"
-      exec "$ci_root/bin/xcode-runner" test \
-        --package "$GITHUB_WORKSPACE" --scheme PackageName \
-        --destination 'platform=macOS,arch=arm64' \
-        --priority "$XCODE_JOB_PRIORITY"
-```
-
-If every official runner listener is busy, a high-priority GitHub job can still
-wait for assignment before it reaches the local pool. To reserve a listener for
-pull requests, add `ci-interactive` to one installed runner and `ci-batch` to the
-other runners. Keep the base labels on each runner and select the additional
-label in the consumer job:
-
-```yaml
-runs-on:
-  - self-hosted
-  - macOS
-  - ARM64
-  - xcode-runnerkit
-  - "${{ github.event_name == 'pull_request' && 'ci-interactive' || 'ci-batch' }}"
-```
-
-Jobs that use `ci-batch` cannot occupy the listener labeled only `ci-interactive`.
-Use the same pool directory for both groups. Reserving a listener does not reserve
-Xcode execution capacity or interrupt a running operation. Configure custom
-labels during [native runner installation](Documentation/NativeHost.md#register-repository-runners).
+See [the host setup guide](Documentation/NativeHost.md) for installation,
+GitHub login, workflow configuration, and private SwiftPM dependencies.
+The app supplies storage, cache, and pool settings to the jobs it starts.
 
 ## Development
 
+Run package tests with:
+
 ```sh
 DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer \
-xcodebuild test \
-  -scheme XcodeRunnerKit-Package \
+xcodebuild test -scheme XcodeRunnerKit-Package \
   -destination 'platform=macOS,arch=arm64'
 ```
 
+The `Scripts/check-*.py` scripts cover process cancellation, shared pools,
+compilation caching, Simulators, and host setup. Checks that take an executable
+path should use a CLI built from the same checkout.
+
 ## License
 
-MIT License. See [LICENSE](LICENSE).
+[MIT](LICENSE).

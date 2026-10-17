@@ -82,6 +82,57 @@ struct HostSettingsTests {
         try FileManager.default.removeItem(at: root)
     }
 
+    @Test func poolWriteFailureDoesNotSaveRepositorySelection() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root.appending(path: "Home"))
+        let record = installation.hostRoot.appending(path: "github-host.json")
+        let repository = GitHubRepository(id: 1, fullName: "owner/Project")
+        try GitHubHostConfiguration(repositories: [repository]).save(to: record)
+        let settings = try model(at: root)
+        try await settings.pool.updateMaximumConcurrentJobs(to: 4)
+        await settings.refreshPoolStatus()
+        let lock = settings.pool.directory.appending(path: "pool.lock")
+        try FileManager.default.removeItem(at: lock)
+        try FileManager.default.createDirectory(at: lock, withIntermediateDirectories: false)
+        settings.github.selectedRepositoryIDs = []
+        settings.capacityInput = "6"
+
+        await settings.applyCapacity()
+
+        #expect(settings.saveError?.contains("Could not save the execution limit") == true)
+        #expect(try GitHubHostConfiguration.load(from: record).repositories == [repository])
+        #expect(try String(contentsOf: settings.pool.directory.appending(path: "capacity"), encoding: .utf8) == "4")
+        #expect(!settings.isSaving)
+    }
+
+    @Test func selectionWriteFailureReportsTheSavedExecutionLimit() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        let installation = HostInstallation(homeDirectory: root.appending(path: "Home"))
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: installation.hostRoot.path(percentEncoded: false))
+            try? FileManager.default.removeItem(at: root)
+        }
+        let record = installation.hostRoot.appending(path: "github-host.json")
+        let repository = GitHubRepository(id: 1, fullName: "owner/Project")
+        try GitHubHostConfiguration(repositories: [repository]).save(to: record)
+        let settings = try model(at: root)
+        try await settings.pool.updateMaximumConcurrentJobs(to: 4)
+        await settings.refreshPoolStatus()
+        settings.github.selectedRepositoryIDs = []
+        settings.capacityInput = "6"
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: installation.hostRoot.path(percentEncoded: false))
+
+        await settings.applyCapacity()
+
+        #expect(settings.poolStatus?.maximumConcurrentJobs == 6)
+        #expect(try await settings.pool.status()?.maximumConcurrentJobs == 6)
+        #expect(try GitHubHostConfiguration.load(from: record).repositories == [repository])
+        #expect(settings.saveError?.contains("execution limit was saved as 6") == true)
+        #expect(settings.saveError?.contains("repository selection could not be saved") == true)
+        #expect(!settings.isSaving)
+    }
+
     @Test func shrinkingLimitShowsJobsStillRunning() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         let settings = try model(at: root)
