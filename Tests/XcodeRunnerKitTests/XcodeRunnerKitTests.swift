@@ -72,6 +72,27 @@ struct XcodeRunnerKitTests {
         #expect(log.contains("environment value"))
     }
 
+    @Test(arguments: [false, true])
+    func explicitBuildServiceOverridesEnvironmentWhenConfigured(_ isConfigured: Bool) async throws {
+        let root = URL.temporaryDirectory.appending(path: "Build service " + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = try script("printf '%s\\n' \"$SWBBUILDSERVICE_PATH\" \"$XCBBUILDSERVICE_PATH\"", at: root)
+        var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root)
+        request.environment = [
+            "SWBBUILDSERVICE_PATH": "/existing/service",
+            "XCBBUILDSERVICE_PATH": "/existing/legacy-service",
+        ]
+        var runner = XcodeRunner(executableURL: executable)
+        let customService = root.appending(path: "Custom service.bundle/SWBBuildServiceBundle")
+        if isConfigured { runner.buildServiceExecutableURL = customService }
+
+        let result = try await runner.run(.build, request: request)
+        let log = try String(contentsOf: result.logURL, encoding: .utf8)
+        let expectedService = isConfigured ? customService.path(percentEncoded: false) : "/existing/service"
+        #expect(log == expectedService + "\n/existing/legacy-service\n")
+    }
+
     @Test func nonzeroExitRetainsStatusAndDiagnostics() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

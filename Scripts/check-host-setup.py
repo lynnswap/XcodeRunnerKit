@@ -237,9 +237,50 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit host setup ") as tempora
     package = storage / "Work" / "BuildProbe"
     shutil.copytree(scripts.parent / "Tests/Fixtures/BuildProbe", package,
                     ignore=shutil.ignore_patterns(".build", ".swiftpm"))
+    developer = Path(os.environ.get("DEVELOPER_DIR") or subprocess.run(
+        ["xcode-select", "-p"], check=True, capture_output=True, text=True).stdout.strip())
+    bundled_service = developer.parent / (
+        "SharedFrameworks/SwiftBuild.framework/Versions/A/PlugIns/"
+        "SWBBuildService.bundle/Contents/MacOS/SWBBuildService")
+    assert bundled_service.is_file(), bundled_service
+    # Xcode reads the selected service's Mach-O deployment target before launching it.
+    service_source = root / "BuildServiceProbe.c"
+    service_source.write_text('''#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    char *marker;
+    if (asprintf(&marker, "%s.started", argv[0]) < 0) return 1;
+    FILE *output = fopen(marker, "a");
+    free(marker);
+    if (!output) { perror("service marker"); return 1; }
+    fputs("started\\n", output);
+    if (fclose(output) != 0) { perror("service marker"); return 1; }
+    execv(getenv("XRK_FIXTURE_BUNDLED_SERVICE"), argv);
+    perror("bundled service");
+    return 1;
+}
+''')
+    service_wrappers = [root / name for name in ("Saved service", "Operation service")]
+    service_markers = [Path(str(wrapper) + ".started") for wrapper in service_wrappers]
+    subprocess.run(["xcrun", "clang", str(service_source), "-o", str(service_wrappers[0])], check=True)
+    shutil.copy2(service_wrappers[0], service_wrappers[1])
+    service_command = [str(executable), "host", "build-service"]
+    initial_service_status = json.loads(subprocess.run(
+        service_command + ["status", "--json"], env=environment,
+        check=True, capture_output=True, text=True, timeout=30).stdout)
+    assert initial_service_status == {"hostRoot": layout["hostRoot"]}
+    configured_service_status = json.loads(subprocess.run(
+        service_command + ["configure", "--path", str(service_wrappers[0]), "--json"],
+        env=environment, check=True, capture_output=True, text=True, timeout=30).stdout)
+    assert configured_service_status == {**initial_service_status,
+                                         "buildServiceExecutablePath": str(service_wrappers[0])}
     hosted_environment = {**environment, "HOME": str(root / "different-home"),
                           "XCODE_RUNNER_HOST_STORAGE_DIRECTORY": str(storage.resolve()),
-                          "XCODE_RUNNER_HOST_ROOT": str(host.resolve())}
+                          "XCODE_RUNNER_HOST_ROOT": str(host.resolve()),
+                          "XRK_FIXTURE_BUNDLED_SERVICE": str(bundled_service),
+                          "SWBBUILDSERVICE_PATH": str(root / "missing inherited SWB service"),
+                          "XCBBUILDSERVICE_PATH": str(root / "missing inherited XCB service")}
     build = [str(executable), "build", "--package", str(package), "--scheme", "BuildProbe",
              "--destination", "platform=macOS,arch=arm64", "--", "-jobs", "2"]
     shutil.rmtree(storage / "Build")
@@ -247,6 +288,8 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit host setup ") as tempora
     log = Path(next(line[5:] for line in result.stdout.splitlines() if line.startswith("Log: ")))
     assert (storage / "Build").resolve() in log.parents
     assert compilation_cache_in(log) == cache.resolve()
+    saved_service_launches = service_markers[0].read_text()
+    assert saved_service_launches and not service_markers[1].exists()
     pool_status = subprocess.run([str(executable), "pool", "status", "--pool-directory", str(host / "Pool"), "--json"],
                                  env=environment, check=True, capture_output=True, text=True)
     assert json.loads(pool_status.stdout)["maximumConcurrentJobs"] == 4
@@ -258,12 +301,21 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit host setup ") as tempora
     result = subprocess.run(build[:-3] + ["--output-directory", str(override_build),
                             "--compilation-cache", str(override_cache),
                             "--pool-directory", str(override_pool), "--maximum-concurrent-jobs", "1",
+                            "--build-service-path", str(service_wrappers[1]),
                             *build[-3:]], env=hosted_environment, check=True, capture_output=True, text=True, timeout=300)
     log = Path(next(line[5:] for line in result.stdout.splitlines() if line.startswith("Log: ")))
     assert override_build.resolve() in log.resolve().parents
     assert compilation_cache_in(log) == override_cache.resolve()
     assert json.loads(subprocess.run([str(executable), "pool", "status", "--pool-directory", str(override_pool), "--json"],
                                     env=environment, check=True, capture_output=True, text=True).stdout)["maximumConcurrentJobs"] == 1
+    assert service_markers[1].read_text()
+    assert service_markers[0].read_text() == saved_service_launches
+    assert json.loads(subprocess.run(service_command + ["status", "--json"], env=environment,
+                                    check=True, capture_output=True, text=True, timeout=30).stdout) == configured_service_status
+    assert json.loads(subprocess.run(service_command + ["configure", "--json"], env=environment,
+                                    check=True, capture_output=True, text=True, timeout=30).stdout) == initial_service_status
+    assert json.loads(subprocess.run(service_command + ["status", "--json"], env=environment,
+                                    check=True, capture_output=True, text=True, timeout=30).stdout) == initial_service_status
 
     runner_temp = root / "work" / "_temp"
     runner_temp.mkdir(parents=True)
@@ -708,4 +760,4 @@ with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
     assert failure.returncode != 0 and b"certificate signing identity" in failure.stderr
     assert (applications / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host").read_text() == "updated executable"
 
-print("PASS: unified storage, serialized initial selection and runner registration/startup migration, unavailable parent rejection at setup and admitted execution, explicit overrides, managed directory recovery and permissions, existing data preservation, cleanup, physical runner work paths, common-host opt-in, app installation, and signature requirements")
+print("PASS: unified storage, serialized initial selection and runner registration/startup migration, unavailable parent rejection at setup and admitted execution, saved and per-operation build service selection, explicit overrides, managed directory recovery and permissions, existing data preservation, cleanup, physical runner work paths, common-host opt-in, app installation, and signature requirements")

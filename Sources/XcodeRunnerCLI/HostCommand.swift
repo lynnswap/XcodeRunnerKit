@@ -4,8 +4,39 @@ import XcodeRunnerKit
 
 struct Host: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Manage the installed runner host.", subcommands: [Storage.self]
+        abstract: "Manage the installed runner host.", subcommands: [Storage.self, BuildService.self]
     )
+
+    struct BuildService: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "build-service",
+            abstract: "Inspect or configure the host's custom build service.",
+            subcommands: [Status.self, Configure.self]
+        )
+
+        struct Status: AsyncParsableCommand {
+            @Flag var json = false
+
+            mutating func run() async throws {
+                let installation = HostInstallation()
+                try reportBuildService(installation, executable: installation.buildServiceExecutableURL(), json: json)
+            }
+        }
+
+        struct Configure: AsyncParsableCommand {
+            @Option(help: "Build service executable path. Omit to clear the host override.")
+            var path: String?
+            @Flag var json = false
+
+            mutating func run() async throws {
+                let installation = HostInstallation()
+                let executable = try installation.saveBuildServiceExecutableURL(path.map {
+                    URL(filePath: $0, relativeTo: .currentDirectory())
+                })
+                try reportBuildService(installation, executable: executable, json: json)
+            }
+        }
+    }
 
     struct Storage: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
@@ -35,6 +66,28 @@ struct Host: AsyncParsableCommand {
                 try report(installation, storage: storage, json: json)
             }
         }
+    }
+}
+
+private struct HostBuildServiceStatus: Encodable {
+    let hostRoot: String
+    let buildServiceExecutablePath: String?
+}
+
+private func reportBuildService(_ installation: HostInstallation, executable: URL?, json: Bool) throws {
+    if json {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let status = HostBuildServiceStatus(
+            hostRoot: installation.hostRoot.path(percentEncoded: false),
+            buildServiceExecutablePath: executable?.path(percentEncoded: false)
+        )
+        let data = try encoder.encode(status)
+        try FileHandle.standardOutput.write(contentsOf: data + Data("\n".utf8))
+    } else if let executable {
+        print("Build service executable: \(executable.path(percentEncoded: false))")
+    } else {
+        print("Host build service is not configured.")
     }
 }
 

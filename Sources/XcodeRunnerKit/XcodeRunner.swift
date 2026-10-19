@@ -4,6 +4,11 @@ import Subprocess
 /// Runs native Xcode operations with per-operation logs and result bundles.
 public struct XcodeRunner: Sendable {
     public var developerDirectory: URL?
+    /// A custom build service executable, overriding inherited service selection.
+    ///
+    /// The path is passed directly to each xcodebuild child process. It does not
+    /// require a launchd environment setting or restarting the calling process.
+    public var buildServiceExecutableURL: URL?
     public var executionPool: HostExecutionPool?
     package var hostStorage: HostInstallation.Storage?
     private let executableURL: URL
@@ -129,6 +134,9 @@ public struct XcodeRunner: Sendable {
             var environment = request.environment
             if let developerDirectory {
                 environment["DEVELOPER_DIR"] = developerDirectory.path(percentEncoded: false)
+            }
+            if let buildServiceExecutableURL {
+                environment["SWBBUILDSERVICE_PATH"] = buildServiceExecutableURL.path(percentEncoded: false)
             }
             var buildSettings = request.buildSettings
             var commandSource = request.source

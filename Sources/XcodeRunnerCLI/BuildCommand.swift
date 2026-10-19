@@ -48,6 +48,8 @@ struct BuildOptions: ParsableArguments {
     @Option var outputDirectory: String?
     @Option var derivedData: String?
     @Option var developerDirectory: String?
+    @Option(help: "Custom build service executable. Overrides the host's saved selection.")
+    var buildServicePath: String?
     @Option(help: "Shared compiler CAS directory; DerivedData remains isolated.")
     var compilationCache: String?
     @Flag(help: "Emit compilation cache diagnostic remarks.")
@@ -119,6 +121,7 @@ struct BuildOptions: ParsableArguments {
         request.buildSettings = try Self.assignments(settings)
         request.arguments = additionalArguments
         var runner = XcodeRunner(developerDirectory: developerDirectory.map(Self.url))
+        runner.buildServiceExecutableURL = buildServicePath.map(Self.url) ?? host?.buildServiceExecutableURL
         runner.hostStorage = host?.storage
         if let poolDirectory, let maximumConcurrentJobs {
             runner.executionPool = try HostExecutionPool(
