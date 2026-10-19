@@ -73,7 +73,7 @@ def main():
                 *(["--fresh-simulator"] if fresh else []),
                 "--environment", "TEST_RUNNER_PROBE_MODE=" + mode,
                 "--environment", "DEVELOPER_DIR=" + selected_xcode,
-                "--", "-parallel-testing-enabled", "NO", "-jobs", "4",
+                "--", "-parallel-testing-enabled", "NO", "-collect-test-diagnostics", "never", "-jobs", "4",
             ], stdout=log, stderr=subprocess.STDOUT, env=child_environment)
             return jobs[name]
 
