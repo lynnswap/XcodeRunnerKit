@@ -53,6 +53,33 @@ struct SimulatorPoolTests {
         #expect(try fixture.calls().filter { $0.hasPrefix("create ") }.count == 2)
     }
 
+    @Test func backgroundBuildChildKeepsDeviceLeasedAfterRunnerReturns() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let gate = fixture.root.appending(path: "lease-child-gate")
+        let started = fixture.root.appending(path: "lease-child-started")
+        let finished = fixture.root.appending(path: "lease-child-finished")
+        try Data().write(to: gate)
+        defer { try? FileManager.default.removeItem(at: gate) }
+        let runner = fixture.runner
+        var request = fixture.request("first")
+        request.environment["LEASE_CHILD_GATE"] = gate.path
+        request.environment["LEASE_CHILD_STARTED"] = started.path
+        request.environment["LEASE_CHILD_FINISHED"] = finished.path
+
+        let first = try await runner.run(.test, request: request)
+        try await waitForFile(started)
+        #expect(!FileManager.default.fileExists(atPath: finished.path))
+        let second = try await runner.run(.test, request: fixture.request("second"))
+        #expect(second.simulatorIdentifier != first.simulatorIdentifier)
+        let identifier = try #require(first.simulatorIdentifier)
+        let calls = try fixture.calls()
+        #expect(!calls.contains { $0.hasPrefix("delete " + identifier) })
+
+        try FileManager.default.removeItem(at: gate)
+        try await waitForFile(finished)
+    }
+
     @Test func deviceRemainsLeasedUntilCleanupFinishes() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
@@ -227,6 +254,13 @@ struct SimulatorPoolTests {
                 if [ "$BLOCK_CLEANUP" = '1' ]; then touch "$FIXTURE_ROOT/cleanup-gate-$identifier"; fi
                 printf '%s' "$identifier" > "$STARTED_PATH"
                 while [ -n "$PAYLOAD_GATE" ] && [ -e "$PAYLOAD_GATE" ]; do sleep 0.02; done
+                if [ -n "$LEASE_CHILD_GATE" ]; then
+                    (
+                        touch "$LEASE_CHILD_STARTED"
+                        while [ -e "$LEASE_CHILD_GATE" ]; do sleep 0.02; done
+                        touch "$LEASE_CHILD_FINISHED"
+                    ) </dev/null >/dev/null 2>&1 &
+                fi
                 exit "$EXIT_CODE"
                 """, to: root.appending(path: "xcodebuild"))
         }

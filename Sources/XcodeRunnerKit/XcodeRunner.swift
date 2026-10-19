@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Subprocess
 
 /// Runs native Xcode operations with per-operation logs and result bundles.
@@ -68,8 +69,11 @@ public struct XcodeRunner: Sendable {
             let pool = simulatorPool ?? SimulatorPool(
                 directory: executionPool?.directory.appending(path: "Simulators") ?? SimulatorPool.defaultDirectory
             )
-            return try await pool.withSimulator(configuration: configuration, developerDirectory: selectedXcode, tool: tool) { identifier in
-                try await runOnSimulator(action, request: simulatorRequest, identifier: identifier, onOutput: onOutput)
+            return try await pool.withSimulator(configuration: configuration, developerDirectory: selectedXcode, tool: tool) { identifier, leaseDescriptor in
+                try await runOnSimulator(
+                    action, request: simulatorRequest, identifier: identifier,
+                    inheritedLeaseDescriptor: leaseDescriptor, onOutput: onOutput
+                )
             }
         }
         // Finish creation even if the caller cancels, so the owned UDID is known.
@@ -113,6 +117,7 @@ public struct XcodeRunner: Sendable {
 
     private func runOnSimulator(
         _ action: XcodeBuildAction, request: XcodeBuildRequest, identifier: String,
+        inheritedLeaseDescriptor: Int32? = nil,
         onOutput: (@Sendable (Data) throws -> Void)?
     ) async throws -> XcodeBuildResult {
         var simulatorRequest = request
@@ -121,7 +126,8 @@ public struct XcodeRunner: Sendable {
             simulatorRequest.arguments = ["-parallel-testing-enabled", "NO"] + request.arguments
         }
         return try await runUnrestricted(
-            action, request: simulatorRequest, simulatorIdentifier: identifier, onOutput: onOutput
+            action, request: simulatorRequest, simulatorIdentifier: identifier,
+            inheritedLeaseDescriptor: inheritedLeaseDescriptor, onOutput: onOutput
         )
     }
 
@@ -129,6 +135,7 @@ public struct XcodeRunner: Sendable {
         _ action: XcodeBuildAction,
         request: XcodeBuildRequest,
         simulatorIdentifier: String? = nil,
+        inheritedLeaseDescriptor: Int32? = nil,
         onOutput: (@Sendable (Data) throws -> Void)?
     ) async throws -> XcodeBuildResult {
         let directory = request.outputDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
@@ -192,6 +199,13 @@ public struct XcodeRunner: Sendable {
             options.teardownSequence = [
                 .send(signal: .kill, toProcessGroup: true, allowedDurationToNextStep: .zero),
             ]
+            if let inheritedLeaseDescriptor {
+                // A surviving xcodebuild must retain its Simulator lease after its parent exits.
+                options.preSpawnProcessConfigurator = { _, fileActions in
+                    let error = posix_spawn_file_actions_addinherit_np(&fileActions, inheritedLeaseDescriptor)
+                    guard error == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(error)) }
+                }
+            }
             let execution = try await Subprocess.run(
                 .path(.init(executableURL.path(percentEncoded: false))),
                 arguments: .init(arguments),

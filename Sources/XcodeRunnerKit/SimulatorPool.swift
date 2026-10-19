@@ -73,7 +73,7 @@ public struct SimulatorPool: Sendable {
         configuration: SimulatorConfiguration,
         developerDirectory: URL,
         tool: SimulatorTool,
-        operation: @Sendable (String) async throws -> XcodeBuildResult
+        operation: @Sendable (String, Int32) async throws -> XcodeBuildResult
     ) async throws -> XcodeBuildResult {
         let key = Key(
             developerDirectory: developerDirectory.resolvingSymlinksInPath().path(percentEncoded: false),
@@ -106,7 +106,7 @@ public struct SimulatorPool: Sendable {
             do {
                 try Task.checkCancellation()
                 try await protectedTool.boot(identifier)
-                outcome = .success(try await operation(identifier))
+                outcome = .success(try await operation(identifier, lease.handle.fileDescriptor))
             } catch { outcome = .failure(error) }
 
             let reuse = !Task.isCancelled && Self.canReuse(after: outcome)
