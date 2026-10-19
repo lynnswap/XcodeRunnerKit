@@ -4,8 +4,8 @@ import XcodeRunnerKit
 
 struct Pool: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Inspect or configure a shared host execution pool.",
-        subcommands: [Status.self, Configure.self]
+        abstract: "Manage a shared host execution pool and its idle Simulators.",
+        subcommands: [Status.self, Configure.self, CleanSimulators.self]
     )
 
     struct Status: AsyncParsableCommand {
@@ -44,6 +44,26 @@ struct Pool: AsyncParsableCommand {
             let pool = try options.pool(initialCapacity: maximumConcurrentJobs)
             try await pool.updateMaximumConcurrentJobs(to: maximumConcurrentJobs)
             printStatus(try await pool.status())
+        }
+    }
+
+    struct CleanSimulators: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Delete idle Simulators owned by this pool. Simulators in use continue running."
+        )
+
+        @OptionGroup private var options: PoolOptions
+        @Option(help: "Only remove devices registered with this Xcode developer directory.")
+        var developerDirectory: String?
+
+        mutating func run() async throws {
+            let executionPool = try options.pool()
+            let pool = SimulatorPool(directory: executionPool.directory.appending(path: "Simulators"))
+            try await pool.removeIdleSimulators(
+                developerDirectory: developerDirectory.map {
+                    URL(filePath: $0, relativeTo: URL.currentDirectory()).standardizedFileURL
+                }
+            )
         }
     }
 }

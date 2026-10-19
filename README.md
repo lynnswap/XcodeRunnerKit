@@ -105,7 +105,7 @@ or saved path, the process keeps its inherited Xcode service selection.
 To use an existing device, pass
 `--destination 'platform=iOS Simulator,id=<SIMULATOR_UDID>'`.
 
-To create a separate device for each run, pass a runtime and device type:
+To reuse a managed device between runs, pass a runtime and device type:
 
 ```sh
 xcode-runner test --workspace /path/to/App.xcworkspace --scheme App \
@@ -118,12 +118,44 @@ Find installed runtimes and their supported device types with
 `xcrun simctl list runtimes --json`. In Swift, set
 `request.simulator = SimulatorConfiguration(runtimeIdentifier:deviceTypeIdentifier:)`.
 
-Test operations wait for the owned Simulator to finish booting before launching xcodebuild.
-The runner deletes the device after the operation, including on failure or
-managed cancellation. It disables parallel test workers by default to avoid
-Xcode creating additional device clones. If deletion fails,
-`SimulatorCleanupFailure` includes the UDID and cleanup error;
-resolve the reported error and delete that device with `xcrun simctl delete`.
+The runner leases a device exclusively for each operation. Devices are shared
+only when their runtime, device type, and selected Xcode match. Test operations
+wait for the Simulator to finish booting before launching xcodebuild. After a
+normal exit, including a failed test run, cleanup prepares the device for its
+next operation and leaves it booted. Cancellation or abnormal termination
+retires the device by deleting it.
+
+Cleanup removes installed user apps and resets keychain, privacy permissions,
+location simulation, and status bar overrides. Tests that change system app
+data or other device settings should use a fresh device: add
+`--fresh-simulator`, or set `request.simulator?.reusesDevice = false` in Swift.
+A fresh device is deleted after the operation, including on failure or managed
+cancellation.
+
+With `--pool-directory`, the device registry lives in that pool's `Simulators`
+subdirectory. Without an execution pool, the runner uses
+`SimulatorPool.defaultDirectory`. Keep the registry in a persistent local
+directory; clean its devices before removing a temporary pool directory.
+In Swift, assign a separate pool if needed:
+
+```swift
+var runner = XcodeRunner()
+runner.simulatorPool = SimulatorPool(directory: URL(filePath: "/path/to/simulator-pool"))
+```
+
+Remove idle devices from an execution pool when they are no longer needed:
+
+```sh
+xcode-runner pool clean-simulators --pool-directory /path/to/shared-pool
+```
+
+Devices in use continue running. Add `--developer-directory` to clean only
+devices registered with a particular Xcode. Swift callers can use
+`try await pool.removeIdleSimulators()` on their `SimulatorPool`.
+The runner disables parallel test workers by default to avoid Xcode creating
+additional device clones. `SimulatorCleanupFailure` preserves the UDID,
+operation outcome, and cleanup errors. Use `pool clean-simulators` to retry
+removing any remaining pooled devices, or `xcrun simctl delete` for a fresh device.
 
 ### Shared execution limit
 

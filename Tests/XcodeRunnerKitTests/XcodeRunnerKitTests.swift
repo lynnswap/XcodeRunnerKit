@@ -207,6 +207,7 @@ struct XcodeRunnerKitTests {
         runner.executionPool = try HostExecutionPool(directory: root.appending(path: "pool"), initialCapacity: 1)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
         request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
+        request.simulator?.reusesDevice = false
         request.arguments = ["-parallel-testing-enabled", "NO"]
         request.environment["DEVELOPER_DIR"] = root.appending(path: "SelectedXcode").path
         let result: XcodeBuildResult
@@ -242,6 +243,7 @@ struct XcodeRunnerKitTests {
         let runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
         request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
+        request.simulator?.reusesDevice = false
         do {
             _ = try await runner.run(.testWithoutBuilding, request: request)
             Issue.record("Simulator boot failure returned successfully.")
@@ -266,6 +268,7 @@ struct XcodeRunnerKitTests {
         let runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root)
         request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
+        request.simulator?.reusesDevice = false
         do {
             _ = try await runner.run(.test, request: request)
             Issue.record("Cleanup failure returned successfully.")
@@ -290,6 +293,7 @@ struct XcodeRunnerKitTests {
         let runner = XcodeRunner(executableURL: root.appending(path: "must-not-start"), simulatorExecutableURL: simulator)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
         request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
+        request.simulator?.reusesDevice = false
         let configured = request
         let task = Task { try await runner.run(.test, request: configured) }
         let clock = ContinuousClock()
@@ -333,6 +337,7 @@ struct XcodeRunnerKitTests {
         runner.executionPool = try HostExecutionPool(directory: root.appending(path: "pool"), initialCapacity: 1)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
         request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
+        request.simulator?.reusesDevice = false
         let configuredRunner = runner
         let configuredRequest = request
         let task = Task { try await configuredRunner.run(.test, request: configuredRequest) }

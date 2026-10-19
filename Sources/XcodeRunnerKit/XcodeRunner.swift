@@ -10,6 +10,9 @@ public struct XcodeRunner: Sendable {
     /// require a launchd environment setting or restarting the calling process.
     public var buildServiceExecutableURL: URL?
     public var executionPool: HostExecutionPool?
+    /// A shared Simulator pool. Defaults to the execution pool's Simulators directory,
+    /// or SimulatorPool.defaultDirectory when no execution pool is configured.
+    public var simulatorPool: SimulatorPool?
     package var hostStorage: HostInstallation.Storage?
     private let executableURL: URL
     private var simulatorExecutableURL = URL(filePath: "/usr/bin/xcrun")
@@ -53,8 +56,22 @@ public struct XcodeRunner: Sendable {
             return try await runUnrestricted(action, request: request, onOutput: onOutput)
         }
         try Task.checkCancellation()
-        let selectedXcode = developerDirectory ?? request.environment["DEVELOPER_DIR"].map { URL(filePath: $0) }
+        let selectedXcode = try await SimulatorTool.selectedDeveloperDirectory(
+            developerDirectory ?? (request.environment["DEVELOPER_DIR"] ?? ProcessInfo.processInfo.environment["DEVELOPER_DIR"])
+                .map { URL(filePath: $0) }
+        )
         let tool = SimulatorTool(executableURL: simulatorExecutableURL, developerDirectory: selectedXcode)
+        var selectedRequest = request
+        selectedRequest.environment["DEVELOPER_DIR"] = selectedXcode.path(percentEncoded: false)
+        let simulatorRequest = selectedRequest
+        if configuration.reusesDevice {
+            let pool = simulatorPool ?? SimulatorPool(
+                directory: executionPool?.directory.appending(path: "Simulators") ?? SimulatorPool.defaultDirectory
+            )
+            return try await pool.withSimulator(configuration: configuration, developerDirectory: selectedXcode, tool: tool) { identifier in
+                try await runOnSimulator(action, request: simulatorRequest, identifier: identifier, onOutput: onOutput)
+            }
+        }
         // Finish creation even if the caller cancels, so the owned UDID is known.
         let identifier = try await Task.detached { try await tool.create(configuration) }.value
         let outcome: Result<XcodeBuildResult, any Error>
@@ -63,14 +80,7 @@ public struct XcodeRunner: Sendable {
             if action == .test || action == .testWithoutBuilding {
                 try await tool.boot(identifier)
             }
-            var simulatorRequest = request
-            simulatorRequest.destination = "platform=iOS Simulator,id=" + identifier
-            if !request.arguments.contains("-parallel-testing-enabled") {
-                simulatorRequest.arguments = ["-parallel-testing-enabled", "NO"] + request.arguments
-            }
-            outcome = .success(try await runUnrestricted(
-                action, request: simulatorRequest, simulatorIdentifier: identifier, onOutput: onOutput
-            ))
+            outcome = .success(try await runOnSimulator(action, request: simulatorRequest, identifier: identifier, onOutput: onOutput))
         } catch { outcome = .failure(error) }
 
         // Cleanup must run after cancellation, and remains inside the host slot.
@@ -99,6 +109,20 @@ public struct XcodeRunner: Sendable {
             )
         }
         return result
+    }
+
+    private func runOnSimulator(
+        _ action: XcodeBuildAction, request: XcodeBuildRequest, identifier: String,
+        onOutput: (@Sendable (Data) throws -> Void)?
+    ) async throws -> XcodeBuildResult {
+        var simulatorRequest = request
+        simulatorRequest.destination = "platform=iOS Simulator,id=" + identifier
+        if !request.arguments.contains("-parallel-testing-enabled") {
+            simulatorRequest.arguments = ["-parallel-testing-enabled", "NO"] + request.arguments
+        }
+        return try await runUnrestricted(
+            action, request: simulatorRequest, simulatorIdentifier: identifier, onOutput: onOutput
+        )
     }
 
     private func runUnrestricted(
