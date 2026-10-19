@@ -36,6 +36,22 @@ struct SimulatorPoolTests {
         #expect(!calls.contains { $0.hasPrefix("listapps ") })
     }
 
+    @Test func unavailableRetainedDeviceIsRecreatedForBuild() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let runner = fixture.runner
+        let first = try await runner.run(.build, request: fixture.request("first"))
+        let identifier = try #require(first.simulatorIdentifier)
+        try Data().write(to: fixture.root.appending(path: "unavailable-" + identifier))
+
+        let second = try await runner.run(.build, request: fixture.request("second"))
+
+        #expect(second.simulatorIdentifier != identifier)
+        let calls = try fixture.calls()
+        #expect(calls.contains { $0.hasPrefix("delete " + identifier) })
+        #expect(!calls.contains { $0.hasPrefix("bootstatus ") })
+    }
+
     @Test func concurrentOperationsUseDifferentDevicesAndIdleCleanupSkipsActiveLeases() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
@@ -70,7 +86,7 @@ struct SimulatorPoolTests {
         #expect(try fixture.calls().filter { $0.hasPrefix("create ") }.count == 2)
     }
 
-    @Test func backgroundBuildChildKeepsDeviceLeasedAfterRunnerReturns() async throws {
+    @Test func backgroundBuildChildFinishesBeforeDeviceCleanup() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let gate = fixture.root.appending(path: "lease-child-gate")
@@ -83,18 +99,24 @@ struct SimulatorPoolTests {
         request.environment["LEASE_CHILD_GATE"] = gate.path
         request.environment["LEASE_CHILD_STARTED"] = started.path
         request.environment["LEASE_CHILD_FINISHED"] = finished.path
+        let firstRequest = request
+        let first = Task { try await runner.run(.test, request: firstRequest) }
+        defer { first.cancel() }
 
-        let first = try await runner.run(.test, request: request)
         try await waitForFile(started)
-        #expect(!FileManager.default.fileExists(atPath: finished.path))
+        let identifier = try String(contentsOf: fixture.root.appending(path: "started-first"), encoding: .utf8)
+        let cleanup = fixture.root.appending(path: "cleanup-started-" + identifier)
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(!FileManager.default.fileExists(atPath: cleanup.path))
         let second = try await runner.run(.test, request: fixture.request("second"))
-        #expect(second.simulatorIdentifier != first.simulatorIdentifier)
-        let identifier = try #require(first.simulatorIdentifier)
-        let calls = try fixture.calls()
-        #expect(!calls.contains { $0.hasPrefix("delete " + identifier) })
+        #expect(second.simulatorIdentifier != identifier)
+        #expect(!FileManager.default.fileExists(atPath: cleanup.path))
 
         try FileManager.default.removeItem(at: gate)
         try await waitForFile(finished)
+        let firstResult = try await first.value
+        #expect(firstResult.simulatorIdentifier == identifier)
+        #expect(FileManager.default.fileExists(atPath: cleanup.path))
     }
 
     @Test func deviceRemainsLeasedUntilCleanupFinishes() async throws {
@@ -244,7 +266,9 @@ struct SimulatorPoolTests {
                         [ -f "$device" ] || continue
                         identifier=${device##*/}
                         name=$(cat "$device")
-                        printf '%s{"udid":"%s","name":"%s","state":"Booted","isAvailable":true}' "$separator" "$identifier" "$name"
+                        available=true
+                        if [ -e "$root/unavailable-$identifier" ]; then available=false; fi
+                        printf '%s{"udid":"%s","name":"%s","state":"Booted","isAvailable":%s}' "$separator" "$identifier" "$name" "$available"
                         separator=','
                     done
                     printf ']}}\\n';;

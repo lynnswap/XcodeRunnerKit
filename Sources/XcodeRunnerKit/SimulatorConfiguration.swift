@@ -64,10 +64,14 @@ struct SimulatorTool: Sendable {
     }
 
     func containsDevice(_ identifier: String) async throws -> Bool {
-        try await devices().contains { $0.udid == identifier }
+        try await devices().contains { $0.udid == identifier && $0.isAvailable }
     }
 
-    private struct Device: Decodable { let name: String; let udid: String }
+    private struct Device: Decodable {
+        let name: String
+        let udid: String
+        let isAvailable: Bool
+    }
 
     private func devices() async throws -> [Device] {
         struct Listing: Decodable { let devices: [String: [Device]] }

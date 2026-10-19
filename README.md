@@ -125,6 +125,8 @@ normal test exit, including a failed test run, cleanup prepares the device for
 its next operation and leaves it booted. Build operations reuse their destination
 without booting or changing runtime state. Cancellation or abnormal termination
 retires the device by deleting it.
+Cleanup waits for job subprocesses retaining the lease to exit. Other jobs can
+lease different devices while those subprocesses finish.
 
 Cleanup removes installed user apps and resets keychain, privacy permissions,
 location simulation, and status bar overrides. Tests that change system app
