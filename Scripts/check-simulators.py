@@ -118,7 +118,8 @@ def main():
 
         def finish(name, succeeds=True):
             try:
-                code = jobs[name].wait(timeout=600)
+                # Cold compilation and boots before testing and cleanup share this budget.
+                code = jobs[name].wait(timeout=900)
             except subprocess.TimeoutExpired:
                 diagnose_timeout(name)
                 raise

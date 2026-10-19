@@ -22,6 +22,21 @@ struct SimulatorPoolTests {
         #expect(!calls.contains { $0.hasPrefix("uninstall ") && $0.hasSuffix(" com.apple.mobilesafari") })
     }
 
+    @Test func shutdownDestinationIsBootedForCleanupAndReused() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let runner = fixture.runner
+        var request = fixture.request("first")
+        request.environment["SHUTDOWN_AFTER_TEST"] = "1"
+
+        let first = try await runner.run(.test, request: request)
+        let identifier = try #require(first.simulatorIdentifier)
+        #expect(FileManager.default.fileExists(atPath: fixture.root.appending(path: "booted-" + identifier).path))
+        let second = try await runner.run(.test, request: fixture.request("second"))
+
+        #expect(second.simulatorIdentifier == identifier)
+    }
+
     @Test(arguments: [XcodeBuildAction.build, .buildForTesting])
     func buildOperationsDoNotRequireABootedDevice(action: XcodeBuildAction) async throws {
         let fixture = try Fixture()
@@ -286,6 +301,10 @@ struct SimulatorPoolTests {
                         echo cleanup-failed >&2
                         exit 9
                     fi
+                    if [ ! -e "$root/booted-$3" ]; then
+                        echo 'device is Shutdown (405)' >&2
+                        exit 405
+                    fi
                     touch "$root/cleanup-started-$3"
                     while [ -e "$root/cleanup-gate-$3" ]; do sleep 0.02; done
                     printf '<?xml version="1.0"?><plist version="1.0"><dict><key>com.example.TestHost</key><dict><key>ApplicationType</key><string>User</string></dict><key>com.apple.mobilesafari</key><dict><key>ApplicationType</key><string>System</string></dict></dict></plist>\\n';;
@@ -317,6 +336,11 @@ struct SimulatorPoolTests {
                         while [ -e "$LEASE_CHILD_GATE" ]; do sleep 0.02; done
                         touch "$LEASE_CHILD_FINISHED"
                     ) </dev/null >/dev/null 2>&1 &
+                fi
+                if [ "$SHUTDOWN_AFTER_TEST" = '1' ] && [ "$EXIT_CODE" = '0' ]; then
+                    case "$action" in
+                    test|test-without-building) rm "$FIXTURE_ROOT/booted-$identifier";;
+                    esac
                 fi
                 exit "$EXIT_CODE"
                 """, to: root.appending(path: "xcodebuild"))

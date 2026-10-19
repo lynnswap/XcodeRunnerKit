@@ -79,9 +79,10 @@ struct SimulatorTool: Sendable {
         return try JSONDecoder().decode(Listing.self, from: Data(output.utf8)).devices.values.flatMap { $0 }
     }
 
-    /// Removes installed test apps and resets the state supported by simctl while staying booted.
+    /// Boots the device before removing test apps and resetting the state supported by simctl.
     /// Tests that change system app data or arbitrary device settings must request a fresh device.
     func prepareForReuse(_ identifier: String) async throws {
+        try await boot(identifier)
         let output = try await call(["listapps", identifier])
         let plist = try PropertyListSerialization.propertyList(from: Data(output.utf8), format: nil)
         guard let applications = plist as? [String: [String: Any]] else {
