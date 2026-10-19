@@ -19,6 +19,35 @@ package struct HostInstallation: Sendable {
     package var logsDirectory: URL { hostRoot.appending(path: "logs/runners") }
     package var applicationsDirectory: URL { homeDirectory.appending(path: "Applications") }
     private var storageRecord: URL { hostRoot.appending(path: "storage-directory") }
+    private var buildServiceRecord: URL { hostRoot.appending(path: "build-service-path") }
+
+    package func buildServiceExecutableURL() throws -> URL? {
+        try Self.buildServiceExecutableURL(hostRoot: hostRoot)
+    }
+
+    private static func buildServiceExecutableURL(hostRoot: URL) throws -> URL? {
+        let record = hostRoot.appending(path: "build-service-path")
+        let data: Data
+        do { data = try Data(contentsOf: record) }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile { return nil }
+        guard let path = String(data: data, encoding: .utf8), !path.isEmpty, path.hasPrefix("/") else {
+            throw ConfigurationError.invalidBuildServiceRecord(record)
+        }
+        return URL(filePath: path)
+    }
+
+    @discardableResult
+    package func saveBuildServiceExecutableURL(_ url: URL?) throws -> URL? {
+        guard let url else {
+            do { try FileManager.default.removeItem(at: buildServiceRecord) }
+            catch let error as CocoaError where error.code == .fileNoSuchFile { }
+            return nil
+        }
+        let executable = url.standardizedFileURL
+        try FileManager.default.createDirectory(at: hostRoot, withIntermediateDirectories: true)
+        try Data(executable.path(percentEncoded: false).utf8).write(to: buildServiceRecord, options: .atomic)
+        return executable
+    }
 
     package struct Storage: Sendable {
         package let directory: URL
@@ -163,24 +192,31 @@ package struct HostInstallation: Sendable {
 
     package static func hostedConfiguration(
         environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> (storage: Storage, poolDirectory: URL)? {
+    ) throws -> (storage: Storage, poolDirectory: URL, buildServiceExecutableURL: URL?)? {
         let directory = environment["XCODE_RUNNER_HOST_STORAGE_DIRECTORY"]
         let root = environment["XCODE_RUNNER_HOST_ROOT"]
         guard directory != nil || root != nil else { return nil }
         guard let directory, let root, !directory.isEmpty, !root.isEmpty else {
             throw ConfigurationError.incompleteHostEnvironment
         }
-        return (Storage(directory: URL(filePath: directory)), URL(filePath: root).appending(path: "Pool"))
+        let hostRoot = URL(filePath: root)
+        return (
+            Storage(directory: URL(filePath: directory)),
+            hostRoot.appending(path: "Pool"),
+            try buildServiceExecutableURL(hostRoot: hostRoot)
+        )
     }
 
     package enum ConfigurationError: LocalizedError {
         case invalidStorageRecord(URL)
+        case invalidBuildServiceRecord(URL)
         case alreadyConfigured(URL)
         case incompleteHostEnvironment
 
         package var errorDescription: String? {
             switch self {
             case .invalidStorageRecord(let url): "Invalid host storage configuration at \(url.path(percentEncoded: false))."
+            case .invalidBuildServiceRecord(let url): "Invalid host build service configuration at \(url.path(percentEncoded: false))."
             case .alreadyConfigured(let url): "Host storage is already configured at \(url.path(percentEncoded: false)). Change existing storage through the host settings."
             case .incompleteHostEnvironment: "The installed host must supply both its active storage directory and host root."
             }

@@ -117,6 +117,22 @@ Use `exec` in shell wrappers so cancellation reaches `xcode-runner`.
 The host supplies the shared pool, compiler cache, and output directory;
 those flags are not needed in each workflow.
 
+To select a custom build service for hosted jobs, save its executable path:
+
+```sh
+"$HOME/Library/Application Support/XcodeRunnerKit/bin/xcode-runner" \
+  host build-service configure \
+  --path /path/to/SWBBuildServiceBundle
+```
+
+The next job reads the saved path directly. No host restart or login-time
+environment setup is needed. A workflow can override it with
+`--build-service-path /path/to/SWBBuildServiceBundle`. Run
+`host build-service status --json` to inspect the saved selection, or
+`host build-service configure` without `--path` to clear the override.
+For the Homebrew package, the executable is
+`$(brew --prefix custom-xcode-build-service)/libexec/libexec/swift-build/SWBBuildService.bundle/SWBBuildServiceBundle`.
+
 ### Private SwiftPM dependencies
 
 For each private dependency, run this on a controller with `gh` authenticated:

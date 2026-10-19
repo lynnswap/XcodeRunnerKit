@@ -3,6 +3,62 @@ import Testing
 @testable import XcodeRunnerKit
 
 struct HostInstallationTests {
+    @Test func buildServiceConfigurationPreservesAnExecutableAliasAndCanBeCleared() throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root.appending(path: "Home"))
+        #expect(try installation.buildServiceExecutableURL() == nil)
+        #expect(try installation.saveBuildServiceExecutableURL(nil) == nil)
+        let directory = root.appending(path: "Service version")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data().write(to: directory.appending(path: "BuildService"))
+        let alias = root.appending(path: "Current service")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: directory)
+        let executable = alias.appending(path: "BuildService").standardizedFileURL
+
+        #expect(try installation.saveBuildServiceExecutableURL(executable) == executable)
+        #expect(try installation.buildServiceExecutableURL() == executable)
+        #expect(try installation.buildServiceExecutableURL() != executable.resolvingSymlinksInPath())
+        #expect(try installation.saveBuildServiceExecutableURL(nil) == nil)
+        #expect(try installation.buildServiceExecutableURL() == nil)
+    }
+
+    @Test func hostedBuildServiceConfigurationUsesTheSuppliedRootAndReloadsItsRecord() throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root.appending(path: "Home"))
+        let storage = HostInstallation.Storage(directory: root.appending(path: "Active storage"))
+        let environment = installation.environment(for: storage).merging(["HOME": "/different/home"]) { _, value in value }
+        #expect(try HostInstallation.hostedConfiguration(environment: environment)?.buildServiceExecutableURL == nil)
+        let executable = root.appending(path: "BuildService")
+        try installation.saveBuildServiceExecutableURL(executable)
+
+        let configured = try #require(try HostInstallation.hostedConfiguration(environment: environment))
+        #expect(configured.buildServiceExecutableURL == executable)
+        #expect(configured.storage.directory == storage.directory)
+        #expect(configured.poolDirectory == installation.poolDirectory)
+        try installation.saveBuildServiceExecutableURL(nil)
+        #expect(try HostInstallation.hostedConfiguration(environment: environment)?.buildServiceExecutableURL == nil)
+    }
+
+    @Test func invalidOrUnreadableBuildServiceRecordsAreReported() throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root.appending(path: "Home"))
+        try FileManager.default.createDirectory(at: installation.hostRoot, withIntermediateDirectories: true)
+        let record = installation.hostRoot.appending(path: "build-service-path")
+        let environment = installation.environment(for: .init(directory: root.appending(path: "Storage")))
+        try Data("relative/service".utf8).write(to: record)
+        #expect(throws: HostInstallation.ConfigurationError.self) {
+            try HostInstallation.hostedConfiguration(environment: environment)
+        }
+        try FileManager.default.removeItem(at: record)
+        try FileManager.default.createDirectory(at: record, withIntermediateDirectories: false)
+        #expect(throws: (any Error).self) {
+            try HostInstallation.hostedConfiguration(environment: environment)
+        }
+    }
+
     @Test func initializesOneParentAndPreservesExistingJobData() throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

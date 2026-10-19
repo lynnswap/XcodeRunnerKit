@@ -76,6 +76,30 @@ Use repeated `--setting NAME=VALUE` and `--environment NAME=VALUE` options
 for build settings and environment values. `--developer-directory` selects
 Xcode without changing `xcode-select`.
 
+### Custom build service
+
+Pass `--build-service-path /path/to/SWBBuildServiceBundle` to select a custom
+build service executable for an operation. In Swift, set
+`runner.buildServiceExecutableURL` to the executable's file URL.
+
+For all jobs on an installed host, save the path once:
+
+```sh
+xcode-runner host build-service configure \
+  --path /path/to/SWBBuildServiceBundle
+xcode-runner host build-service status --json
+```
+
+The saved path applies to the next `xcode-runner` invocation; existing builds
+continue using their current service. An operation's `--build-service-path`
+overrides the saved path. Omit `--path` from `configure` to clear the host
+override.
+
+Xcode receives the selection through the child process's `SWBBUILDSERVICE_PATH`.
+The explicit path takes precedence over inherited service selection, so it does
+not depend on login-time activation or restarting the host. Without an explicit
+or saved path, the process keeps its inherited Xcode service selection.
+
 ### iOS Simulators
 
 To use an existing device, pass
