@@ -48,7 +48,8 @@ public struct XcodeBuildRequest: Sendable {
     /// An existing or reusable DerivedData location. Defaults to the job directory.
     public var derivedDataDirectory: URL?
     public var compilationCache: CompilationCache?
-    /// Creates a job-owned Simulator and overrides destination with its UDID.
+    /// Exclusively leases a Simulator and overrides destination with its UDID.
+    /// Set reusesDevice to false to create and delete a fresh device for this operation.
     public var simulator: SimulatorConfiguration?
     public var environment: [String: String] = [:]
     public var buildSettings: [String: String] = [:]
@@ -83,7 +84,7 @@ public struct XcodeBuildResult: Sendable {
     public let logURL: URL
     /// The requested result-bundle location. Early failures may leave no bundle.
     public let resultBundleURL: URL
-    /// The job-owned device identifier, retained after device cleanup.
+    /// The leased or freshly created device identifier, retained after resource cleanup.
     public let simulatorIdentifier: String?
 
     public var succeeded: Bool { status == .exited(0) }

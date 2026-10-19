@@ -56,10 +56,12 @@ struct BuildOptions: ParsableArguments {
     var cacheDiagnostics = false
     @Option(name: .customLong("prefix-mapping"), help: "Extra physical-path=canonical-prefix mapping. May be repeated.")
     var prefixMappings: [String] = []
-    @Option(help: "Runtime identifier for a new, job-owned iOS Simulator.")
+    @Option(help: "Runtime identifier for a Simulator reused between operations.")
     var simulatorRuntime: String?
     @Option(help: "Device type supported by --simulator-runtime.")
     var simulatorDeviceType: String?
+    @Flag(help: "Create a separate Simulator and delete it after this operation. Requires the Simulator runtime and device type.")
+    var freshSimulator = false
     @Option(help: "Local directory shared by every repository runner on this Mac.")
     var poolDirectory: String?
     @Option(help: "Capacity for a new shared pool. Existing pools use their saved capacity. Required with --pool-directory.")
@@ -114,8 +116,11 @@ struct BuildOptions: ParsableArguments {
             request.simulator = SimulatorConfiguration(
                 runtimeIdentifier: simulatorRuntime, deviceTypeIdentifier: simulatorDeviceType
             )
+            request.simulator?.reusesDevice = !freshSimulator
         } else if simulatorRuntime != nil || simulatorDeviceType != nil {
             throw ValidationError("Specify both --simulator-runtime and --simulator-device-type.")
+        } else if freshSimulator {
+            throw ValidationError("Specify --simulator-runtime and --simulator-device-type with --fresh-simulator.")
         }
         request.environment = try Self.assignments(environment)
         request.buildSettings = try Self.assignments(settings)
