@@ -5,7 +5,8 @@ import Foundation
 /// Reuses exclusively leased Simulators across cooperating processes on one Mac.
 ///
 /// A normal test exit returns its cleaned device to the pool without shutting it
-/// down. Cancelled, interrupted, or abandoned leases are retired before reuse.
+/// down. Builds reuse their destination without booting or changing runtime state.
+/// Cancelled, interrupted, or abandoned leases are retired before reuse.
 /// Keep the directory and its lock files in place while clients are running.
 public struct SimulatorPool: Sendable {
     public let directory: URL
@@ -54,7 +55,7 @@ public struct SimulatorPool: Sendable {
                         do {
                             try Self.saveRecord(Record(identifier: record.identifier, isReady: false), at: recordURL)
                             try await Task.detached {
-                                try await tool.deleteDevices(named: Self.deviceName(for: recordURL))
+                                try await tool.delete(identifier: record.identifier, name: Self.deviceName(for: recordURL))
                                 try FileManager.default.removeItem(at: recordURL)
                             }.value
                         } catch {
@@ -70,6 +71,7 @@ public struct SimulatorPool: Sendable {
     }
 
     func withSimulator(
+        action: XcodeBuildAction,
         configuration: SimulatorConfiguration,
         developerDirectory: URL,
         tool: SimulatorTool,
@@ -84,6 +86,7 @@ public struct SimulatorPool: Sendable {
         var leasedTool = tool
         leasedTool.inheritedLeaseDescriptor = lease.handle.fileDescriptor
         let protectedTool = leasedTool
+        let runsTests = action == .test || action == .testWithoutBuilding
         return try await Self.withHandle(lease.handle) {
             // Creation finishes even after cancellation so its identifier can be recorded.
             let identifier: String
@@ -105,30 +108,29 @@ public struct SimulatorPool: Sendable {
             let outcome: Result<XcodeBuildResult, any Error>
             do {
                 try Task.checkCancellation()
-                try await protectedTool.boot(identifier)
+                if runsTests { try await protectedTool.boot(identifier) }
                 outcome = .success(try await operation(identifier, lease.handle.fileDescriptor))
             } catch { outcome = .failure(error) }
 
             let reuse = !Task.isCancelled && Self.canReuse(after: outcome)
             do {
                 // The lease stays locked until cancellation-independent cleanup finishes.
-                try await Task.detached {
-                    if reuse {
-                        try await protectedTool.prepareForReuse(identifier)
+                if reuse {
+                    try await Task.detached {
+                        if runsTests { try await protectedTool.prepareForReuse(identifier) }
                         try Self.saveRecord(Record(identifier: identifier, isReady: true), at: lease.recordURL)
-                    } else {
-                        try await protectedTool.deleteDevices(named: Self.deviceName(for: lease.recordURL))
-                        try FileManager.default.removeItem(at: lease.recordURL)
-                    }
-                }.value
+                    }.value
+                } else {
+                    try await Self.retire(lease, identifier: identifier, tool: protectedTool)
+                }
                 if reuse, Task.isCancelled {
                     try Self.saveRecord(Record(identifier: identifier, isReady: false), at: lease.recordURL)
-                    try await Self.retire(lease, tool: protectedTool)
+                    try await Self.retire(lease, identifier: identifier, tool: protectedTool)
                 }
             } catch {
                 var cleanupError = error
                 if reuse {
-                    do { try await Self.retire(lease, tool: protectedTool) }
+                    do { try await Self.retire(lease, identifier: identifier, tool: protectedTool) }
                     catch {
                         cleanupError = SimulatorCleanupFailure(
                             simulatorIdentifier: identifier, operationError: cleanupError,
@@ -215,16 +217,17 @@ public struct SimulatorPool: Sendable {
         if lease.record.isReady, let identifier = lease.record.identifier,
            try await tool.containsDevice(identifier) { return identifier }
         let name = deviceName(for: lease.recordURL)
-        try await tool.deleteDevices(named: name)
+        try await tool.delete(identifier: lease.record.identifier, name: name)
         try saveRecord(Record(identifier: nil, isReady: false), at: lease.recordURL)
         let identifier = try await tool.create(configuration, name: name)
         try saveRecord(Record(identifier: identifier, isReady: false), at: lease.recordURL)
         return identifier
     }
 
-    private static func retire(_ lease: Lease, tool: SimulatorTool) async throws {
+    private static func retire(_ lease: Lease, identifier: String? = nil, tool: SimulatorTool) async throws {
         try await Task.detached {
-            try await tool.deleteDevices(named: deviceName(for: lease.recordURL))
+            guard let record = try readRecordIfPresent(lease.recordURL) else { return }
+            try await tool.delete(identifier: identifier ?? record.identifier, name: deviceName(for: lease.recordURL))
             try FileManager.default.removeItem(at: lease.recordURL)
         }.value
     }

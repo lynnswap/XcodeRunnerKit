@@ -55,8 +55,10 @@ struct SimulatorTool: Sendable {
         _ = try await call(["delete", identifier])
     }
 
-    func deleteDevices(named name: String) async throws {
-        for device in try await devices() where device.name == name {
+    func delete(identifier: String?, name: String) async throws {
+        for device in try await devices() {
+            let matches = identifier.map { device.udid == $0 } ?? (device.name == name)
+            guard matches else { continue }
             try await delete(device.udid)
         }
     }

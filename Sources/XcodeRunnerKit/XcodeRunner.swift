@@ -1,5 +1,5 @@
-import Foundation
 import Darwin
+import Foundation
 import Subprocess
 
 /// Runs native Xcode operations with per-operation logs and result bundles.
@@ -69,7 +69,7 @@ public struct XcodeRunner: Sendable {
             let pool = simulatorPool ?? SimulatorPool(
                 directory: executionPool?.directory.appending(path: "Simulators") ?? SimulatorPool.defaultDirectory
             )
-            return try await pool.withSimulator(configuration: configuration, developerDirectory: selectedXcode, tool: tool) { identifier, leaseDescriptor in
+            return try await pool.withSimulator(action: action, configuration: configuration, developerDirectory: selectedXcode, tool: tool) { identifier, leaseDescriptor in
                 try await runOnSimulator(
                     action, request: simulatorRequest, identifier: identifier,
                     inheritedLeaseDescriptor: leaseDescriptor, onOutput: onOutput

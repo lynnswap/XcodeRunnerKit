@@ -22,6 +22,20 @@ struct SimulatorPoolTests {
         #expect(!calls.contains { $0.hasPrefix("uninstall ") && $0.hasSuffix(" com.apple.mobilesafari") })
     }
 
+    @Test(arguments: [XcodeBuildAction.build, .buildForTesting])
+    func buildOperationsDoNotRequireABootedDevice(action: XcodeBuildAction) async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try Data().write(to: fixture.root.appending(path: "fail-boot"))
+
+        let result = try await fixture.runner.run(action, request: fixture.request("build"))
+
+        #expect(result.succeeded)
+        let calls = try fixture.calls()
+        #expect(!calls.contains { $0.hasPrefix("bootstatus ") })
+        #expect(!calls.contains { $0.hasPrefix("listapps ") })
+    }
+
     @Test func concurrentOperationsUseDifferentDevicesAndIdleCleanupSkipsActiveLeases() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
@@ -40,6 +54,9 @@ struct SimulatorPoolTests {
         let second = try await runner.run(.test, request: fixture.request("second"))
         let activeIdentifier = try String(contentsOf: fixture.root.appending(path: "started-first"), encoding: .utf8)
         let idleIdentifier = try #require(second.simulatorIdentifier)
+        try "renamed idle device".write(
+            to: fixture.root.appending(path: "devices/" + idleIdentifier), atomically: true, encoding: .utf8
+        )
         try await SimulatorPool(directory: fixture.poolDirectory).removeIdleSimulators(
             executableURL: fixture.root.appending(path: "simctl")
         )
@@ -136,6 +153,9 @@ struct SimulatorPoolTests {
         let started = fixture.root.appending(path: "started-first")
         try await waitForFile(started)
         let identifier = try String(contentsOf: started, encoding: .utf8)
+        try "renamed active device".write(
+            to: fixture.root.appending(path: "devices/" + identifier), atomically: true, encoding: .utf8
+        )
         first.cancel()
         do {
             _ = try await first.value
@@ -237,11 +257,14 @@ struct SimulatorPoolTests {
                     touch "$root/cleanup-started-$3"
                     while [ -e "$root/cleanup-gate-$3" ]; do sleep 0.02; done
                     printf '<?xml version="1.0"?><plist version="1.0"><dict><key>com.example.TestHost</key><dict><key>ApplicationType</key><string>User</string></dict><key>com.apple.mobilesafari</key><dict><key>ApplicationType</key><string>System</string></dict></dict></plist>\\n';;
-                bootstatus) touch "$root/booted-$3";;
+                bootstatus)
+                    if [ -e "$root/fail-boot" ]; then echo boot-failed >&2; exit 9; fi
+                    touch "$root/booted-$3";;
                 delete) rm -f "$root/devices/$3" "$root/booted-$3";;
                 esac
                 """, to: root.appending(path: "simctl"))
             try writeScript("""
+                action="$1"
                 while [ "$#" -gt 0 ]; do
                     if [ "$1" = '-destination' ]; then
                         destination="$2"
@@ -250,7 +273,9 @@ struct SimulatorPoolTests {
                     shift
                 done
                 identifier=${destination##*id=}
-                [ -e "$FIXTURE_ROOT/booted-$identifier" ] || exit 9
+                case "$action" in
+                test|test-without-building) [ -e "$FIXTURE_ROOT/booted-$identifier" ] || exit 9;;
+                esac
                 if [ "$BLOCK_CLEANUP" = '1' ]; then touch "$FIXTURE_ROOT/cleanup-gate-$identifier"; fi
                 printf '%s' "$identifier" > "$STARTED_PATH"
                 while [ -n "$PAYLOAD_GATE" ] && [ -e "$PAYLOAD_GATE" ]; do sleep 0.02; done

@@ -121,8 +121,9 @@ Find installed runtimes and their supported device types with
 The runner leases a device exclusively for each operation. Devices are shared
 only when their runtime, device type, and selected Xcode match. Test operations
 wait for the Simulator to finish booting before launching xcodebuild. After a
-normal exit, including a failed test run, cleanup prepares the device for its
-next operation and leaves it booted. Cancellation or abnormal termination
+normal test exit, including a failed test run, cleanup prepares the device for
+its next operation and leaves it booted. Build operations reuse their destination
+without booting or changing runtime state. Cancellation or abnormal termination
 retires the device by deleting it.
 
 Cleanup removes installed user apps and resets keychain, privacy permissions,
