@@ -79,6 +79,11 @@ struct SimulatorPoolTests {
         let callsAfterCleanup = try fixture.calls()
         #expect(callsAfterCleanup.contains { $0.hasPrefix("delete " + idleIdentifier) })
         #expect(!callsAfterCleanup.contains { $0.hasPrefix("delete " + activeIdentifier) })
+        let remainingEntries = try FileManager.default.subpathsOfDirectory(atPath: fixture.poolDirectory.path)
+            .filter { URL(filePath: $0).lastPathComponent.hasPrefix("device-") }
+        let activeRecord = try #require(remainingEntries.first { $0.hasSuffix(".json") })
+        let activeEntry = String(activeRecord.dropLast(".json".count))
+        #expect(Set(remainingEntries) == Set([activeRecord, activeEntry + ".lock", activeEntry + ".processes.lock"]))
         try FileManager.default.removeItem(at: gate)
         let firstResult = try await first.value
 
@@ -185,6 +190,9 @@ struct SimulatorPoolTests {
         } catch let failure as XcodeBuildFailure {
             #expect(failure.result.status == .cancelled)
         }
+        let remainingEntries = try FileManager.default.subpathsOfDirectory(atPath: fixture.poolDirectory.path)
+            .filter { URL(filePath: $0).lastPathComponent.hasPrefix("device-") }
+        #expect(remainingEntries.isEmpty)
 
         let second = try await runner.run(.test, request: fixture.request("second"))
         #expect(second.simulatorIdentifier != identifier)

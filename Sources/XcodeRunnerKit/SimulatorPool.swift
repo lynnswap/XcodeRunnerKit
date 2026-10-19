@@ -55,7 +55,7 @@ public struct SimulatorPool: Sendable {
                             try Self.saveRecord(Record(identifier: record.identifier, isReady: false), at: recordURL)
                             try await Task.detached {
                                 try await tool.delete(identifier: record.identifier, name: Self.deviceName(for: recordURL))
-                                try FileManager.default.removeItem(at: recordURL)
+                                try Self.removeEntryFiles(for: recordURL)
                             }.value
                         } catch {
                             throw SimulatorCleanupFailure(
@@ -251,10 +251,24 @@ public struct SimulatorPool: Sendable {
 
     private static func retire(_ lease: Lease, identifier: String? = nil, tool: SimulatorTool) async throws {
         try await Task.detached {
-            guard let record = try readRecordIfPresent(lease.recordURL) else { return }
-            try await tool.delete(identifier: identifier ?? record.identifier, name: deviceName(for: lease.recordURL))
-            try FileManager.default.removeItem(at: lease.recordURL)
+            if let record = try readRecordIfPresent(lease.recordURL) {
+                try await tool.delete(identifier: identifier ?? record.identifier, name: deviceName(for: lease.recordURL))
+            }
+            let coordinator = try open(lease.recordURL.deletingLastPathComponent().appending(path: "pool.lock"))
+            try await withHandle(coordinator) {
+                try await lock(coordinator)
+                try removeEntryFiles(for: lease.recordURL)
+            }
         }.value
+    }
+
+    private static func removeEntryFiles(for recordURL: URL) throws {
+        // The caller holds the key coordinator and both entry locks. Remove the
+        // discovery record before allowing either lock path to name a new inode.
+        for url in [recordURL, recordURL.deletingPathExtension().appendingPathExtension("lock"), processLockURL(for: recordURL)] {
+            do { try FileManager.default.removeItem(at: url) }
+            catch let error as CocoaError where error.code == .fileNoSuchFile { }
+        }
     }
 
     private static func canReuse(after outcome: Result<XcodeBuildResult, any Error>) -> Bool {
