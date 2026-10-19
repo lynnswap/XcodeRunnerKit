@@ -77,8 +77,51 @@ def main():
             ], stdout=log, stderr=subprocess.STDOUT, env=child_environment)
             return jobs[name]
 
+        def diagnose_timeout(name):
+            print(f"Simulator lifecycle timeout: {name}; pool={pool}", flush=True)
+            for job_name, job in jobs.items():
+                print(f"Job {job_name}: pid={job.pid}, returncode={job.poll()}", flush=True)
+                log_path = root / (job_name + ".log")
+                print(f"Last 8000 bytes of {log_path}:", flush=True)
+                print(log_path.read_bytes()[-8000:].decode(errors="replace"), flush=True)
+
+            try:
+                holders = subprocess.run(
+                    ["/usr/sbin/lsof", "-nP", "+D", str(pool)],
+                    capture_output=True, text=True, timeout=20,
+                )
+                print("Pool file descriptors (lsof -nP +D):", flush=True)
+                print(holders.stdout, flush=True)
+                if holders.stderr:
+                    print(holders.stderr, flush=True)
+                identifiers = {job.pid for job in jobs.values()}
+                identifiers.update(int(fields[1]) for line in holders.stdout.splitlines()
+                                   if len(fields := line.split()) > 1 and fields[1].isdigit())
+                context = subprocess.run(
+                    ["/bin/ps", "-axo", "pid=,ppid=,pgid=,state=,etime=,comm="],
+                    check=True, capture_output=True, text=True, timeout=10,
+                )
+                processes = [(int(fields[0]), int(fields[1]), line)
+                             for line in context.stdout.splitlines()
+                             if len(fields := line.split(None, 5)) == 6]
+                while True:
+                    descendants = {pid for pid, parent, _ in processes if parent in identifiers}
+                    if descendants <= identifiers:
+                        break
+                    identifiers.update(descendants)
+                print("Job and pool-holder processes (PID PPID PGID STATE ELAPSED COMMAND):", flush=True)
+                for pid, _, line in processes:
+                    if pid in identifiers:
+                        print(line, flush=True)
+            except (OSError, subprocess.SubprocessError) as error:
+                print(f"Timeout process diagnostics failed: {error}", flush=True)
+
         def finish(name, succeeds=True):
-            code = jobs[name].wait(timeout=600)
+            try:
+                code = jobs[name].wait(timeout=600)
+            except subprocess.TimeoutExpired:
+                diagnose_timeout(name)
+                raise
             assert (code == 0) == succeeds, (name, code, (root / (name + ".log")).read_text()[-3000:])
 
         def used_identifier(name):
