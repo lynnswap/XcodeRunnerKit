@@ -50,31 +50,6 @@ jobs:
             --compilation-cache "$RUNNER_TEMP/CompilationCache" \
             --output-directory "$RUNNER_TEMP/XcodeRunnerKit-macos" \
             -- -parallel-testing-enabled NO -jobs 3
-      # Booting while the CLI builds slowed the build from about 1 to 9 minutes on this runner.
-      - name: Start the consumer Simulator
-        run: |
-          xcrun simctl create "XcodeRunnerKit-consumer-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
-            com.apple.CoreSimulator.SimDeviceType.iPhone-17 \
-            com.apple.CoreSimulator.SimRuntime.iOS-27-0 \
-            > "$RUNNER_TEMP/XcodeRunnerKit-consumer-udid"
-          udid=$(cat "$RUNNER_TEMP/XcodeRunnerKit-consumer-udid")
-          echo "CONSUMER_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
-          xcrun simctl bootstatus "$udid" -b
-      - name: Test the iOS consumer fixture
-        run: |
-          exec "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner" test \
-            --package "$GITHUB_WORKSPACE/Tests/Fixtures/BuildProbe" --scheme BuildProbe \
-            --destination "platform=iOS Simulator,id=$CONSUMER_SIMULATOR_UDID" \
-            --pool-directory "$RUNNER_TEMP/Pool" --maximum-concurrent-jobs 2 \
-            --compilation-cache "$RUNNER_TEMP/CompilationCache" \
-            --output-directory "$RUNNER_TEMP/XcodeRunnerKit-ios" \
-            -- -parallel-testing-enabled NO -jobs 3
-      - name: Delete the consumer Simulator
-        if: always()
-        run: |
-          if [[ -s "$RUNNER_TEMP/XcodeRunnerKit-consumer-udid" ]]; then
-            xcrun simctl delete "$(cat "$RUNNER_TEMP/XcodeRunnerKit-consumer-udid")"
-          fi
       - name: Check common runner host processes
         run: python3 Scripts/check-runner-host.py "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner-host"
       - name: Check separate-process capacity
@@ -90,7 +65,5 @@ jobs:
           path: |
             ${{ runner.temp }}/XcodeRunnerKit-macos/*/xcodebuild.log
             ${{ runner.temp }}/XcodeRunnerKit-macos/*/Results.xcresult
-            ${{ runner.temp }}/XcodeRunnerKit-ios/*/xcodebuild.log
-            ${{ runner.temp }}/XcodeRunnerKit-ios/*/Results.xcresult
           retention-days: 1
           if-no-files-found: ignore

@@ -271,10 +271,12 @@ xcodebuild test -scheme XcodeRunnerKit-Package \
 
 The `Scripts/check-*.py` scripts cover process cancellation, shared pools,
 compilation caching, Simulators, and host setup. Checks that take an executable
-path should use a CLI built from the same checkout. CI does not run
-`check-simulators.py`, which runs eight iOS test operations on real Simulators
-and takes about 25 minutes. Run it locally before merging changes to Simulator
-leasing, cleanup, or retirement:
+path should use a CLI built from the same checkout. CI runs only macOS
+operations, because booting a Simulator on the CI runner takes minutes and slows
+the other checks. `check-simulators.py` runs iOS tests on real Simulators
+through pooled, fresh, failed, and cancelled operations and takes a few minutes
+locally. Run it before merging changes to Simulator leasing, cleanup, retirement,
+or iOS destinations:
 
 ```sh
 swift build -c release --product xcode-runner
