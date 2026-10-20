@@ -3,8 +3,9 @@ import Foundation
 /// A runner installation folder under HostInstallation.runnersRoot.
 ///
 /// The host, the provisioner, the settings window, and storage migration read
-/// the same marker files through this type. Each consumer keeps its own
-/// requirements for the registration fields it reads.
+/// the same marker files through this type. Each consumer decodes only the
+/// registration fields it uses, so an unexpected value in another field does
+/// not hide an otherwise usable runner.
 package struct RunnerDirectory: Sendable, Hashable {
     package let url: URL
 
@@ -33,21 +34,33 @@ package struct RunnerDirectory: Sendable, Hashable {
         }
     }
 
-    /// The registration fields the host reads. Fields not listed here stay untouched in the file.
-    package func registration() throws -> RunnerRegistration {
-        try JSONDecoder().decode(RunnerRegistration.self, from: Data(contentsOf: registrationFile))
+    /// Decodes the registration fields that `Fields` declares, leaving the others unchecked.
+    package func registration<Fields: Decodable>(as fields: Fields.Type) throws -> Fields {
+        try JSONDecoder().decode(Fields.self, from: Data(contentsOf: registrationFile))
     }
 
-    /// The folders in a runners root, or none when the root does not exist.
-    package static func all(in root: URL) throws -> [RunnerDirectory] {
+    /// The folders in a runners root, and the entries whose type could not be read.
+    ///
+    /// The root itself may be missing. Each caller decides whether an unreadable
+    /// entry stops its work or is reported for that runner alone.
+    package static func scan(_ root: URL) throws -> RunnerDirectoryScan {
         let entries: [URL]
         do {
             entries = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
-            return []
+            return RunnerDirectoryScan()
         }
-        return try entries.filter { try $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true }
-            .map(RunnerDirectory.init(url:))
+        var scan = RunnerDirectoryScan()
+        for entry in entries {
+            do {
+                if try entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true {
+                    scan.directories.append(RunnerDirectory(url: entry))
+                }
+            } catch {
+                scan.unreadable.append(UnreadableRunnerEntry(directory: RunnerDirectory(url: entry), error: error))
+            }
+        }
+        return scan
     }
 
     private func itemExists(_ name: String) throws -> Bool {
@@ -60,11 +73,12 @@ package struct RunnerDirectory: Sendable, Hashable {
     }
 }
 
-/// Registration fields saved by the official runner in `.runner`.
-package struct RunnerRegistration: Decodable, Sendable {
-    package let agentId: Int?
-    package let agentName: String?
-    package let workFolder: String?
-    package let gitHubUrl: String?
-    package let serverUrl: String?
+package struct RunnerDirectoryScan: Sendable {
+    package var directories: [RunnerDirectory] = []
+    package var unreadable: [UnreadableRunnerEntry] = []
+}
+
+package struct UnreadableRunnerEntry: Sendable {
+    package let directory: RunnerDirectory
+    package let error: any Error
 }

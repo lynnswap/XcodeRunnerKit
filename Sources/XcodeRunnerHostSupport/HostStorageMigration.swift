@@ -208,8 +208,11 @@ extension HostInstallation {
     }
 
     private func hostedRegistrationBackups(storage: Storage, changingStorage: Bool = false) throws -> [RegistrationBackup] {
+        let scan = try runnerDirectories()
+        // A runner whose folder cannot be read might use this storage, so it stops the change.
+        if let unreadable = scan.unreadable.first { throw unreadable.error }
         var backups: [RegistrationBackup] = []
-        for runner in try runnerDirectories() {
+        for runner in scan.directories {
             let directory = runner.url
             let hosted = try runner.isHosted()
             let individual = try runner.hasIndividualService()

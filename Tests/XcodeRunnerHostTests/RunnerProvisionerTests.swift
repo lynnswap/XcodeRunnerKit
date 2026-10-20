@@ -185,6 +185,21 @@ struct RunnerProvisionerTests {
         #expect(await client.installations.count == 2)
     }
 
+    @Test func unusedRegistrationFieldsDoNotHideAnExistingRunner() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await client.addRunner(repository: firstRepository, identifier: 1, name: "existing")
+        // Provisioning reads only the runner ID, name, and repository URL.
+        let metadata = HostInstallation(homeDirectory: root).runnersRoot.appending(path: "existing/.runner")
+        var registration = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: metadata)) as? [String: Any])
+        registration["workFolder"] = 1
+        try JSONSerialization.data(withJSONObject: registration).write(to: metadata)
+        let statuses = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        #expect(statuses.first?.registeredCount == 1)
+        #expect(statuses.first?.errorMessage == nil)
+        #expect(await client.installations.isEmpty)
+    }
+
     @Test func eachRepositoryReceivesTheSharedCapacityAndArchiveIsPreparedOnce() async throws {
         let (root, client, provisioner) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

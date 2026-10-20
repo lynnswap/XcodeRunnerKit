@@ -29,9 +29,12 @@ struct RunnerSettingsRow: Identifiable, Sendable {
     var id: URL { directory }
 
     static func read(_ runner: RunnerDirectory, state: RunnerServiceState) -> Self {
+        struct Registration: Decodable {
+            var agentName: String?
+        }
         do {
             return Self(
-                directory: runner.url, name: try runner.registration().agentName ?? runner.name, state: state,
+                directory: runner.url, name: try runner.registration(as: Registration.self).agentName ?? runner.name, state: state,
                 configurationError: nil
             )
         } catch {

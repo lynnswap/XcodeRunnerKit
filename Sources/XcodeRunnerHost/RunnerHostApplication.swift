@@ -327,7 +327,9 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     }
 
     private func reconcile() async throws {
-        let requested = try RunnerDirectory.all(in: root).filter { try $0.isHosted() && $0.hasRegistration() }
+        let scan = try RunnerDirectory.scan(root)
+        if let unreadable = scan.unreadable.first { throw unreadable.error }
+        let requested = try scan.directories.filter { try $0.isHosted() && $0.hasRegistration() }
         let requestedURLs = Set(requested.map(\.url))
         for directory in runners.keys.filter({ !requestedURLs.contains($0) }) {
             let task = runners.removeValue(forKey: directory)?.task

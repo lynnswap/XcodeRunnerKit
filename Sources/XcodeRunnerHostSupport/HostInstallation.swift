@@ -34,8 +34,8 @@ package struct HostInstallation: Sendable {
     package var logsDirectory: URL { hostRoot.appending(path: "logs/runners") }
     package var applicationsDirectory: URL { homeDirectory.appending(path: "Applications") }
 
-    package func runnerDirectories() throws -> [RunnerDirectory] {
-        try RunnerDirectory.all(in: runnersRoot)
+    package func runnerDirectories() throws -> RunnerDirectoryScan {
+        try RunnerDirectory.scan(runnersRoot)
     }
     private var storageRecord: URL { hostRoot.appending(path: "storage-directory") }
     private var buildServiceRecord: URL { hostRoot.appending(path: "build-service-path") }

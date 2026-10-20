@@ -71,22 +71,29 @@ actor RunnerProvisioner {
         let replaceRegistration: Bool
     }
 
+    private struct Registration: Decodable {
+        let agentId: Int
+        let agentName: String?
+        let gitHubUrl: String?
+        let serverUrl: String?
+    }
+
     private struct LocalRunner {
         let directory: RunnerDirectory
         let name: String
-        let agentId: Int
-        let repositoryURL: String?
+        let registration: Registration
         let hasIndividualService: Bool
         let isHosted: Bool
 
         var repositoryFullName: String? {
-            guard let repositoryURL, let url = URL(string: repositoryURL), url.host()?.lowercased() == "github.com" else { return nil }
+            guard let rawURL = registration.gitHubUrl ?? registration.serverUrl,
+                  let url = URL(string: rawURL), url.host()?.lowercased() == "github.com" else { return nil }
             let name = url.path(percentEncoded: false).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             return name.split(separator: "/").count == 2 ? name : nil
         }
 
         func matches(_ remote: GitHubRunner) -> Bool {
-            agentId == remote.id && name == remote.name
+            registration.agentId == remote.id && name == remote.name
         }
 
         func belongs(
@@ -301,10 +308,9 @@ actor RunnerProvisioner {
         guard try !runner.isHosted(), try !runner.hasIndividualService(),
               try runner.incompleteInstallationOwner() == String(repository.id) else { return false }
         if try runner.hasRegistration() {
-            let registration = try runner.registration()
+            let registration = try runner.registration(as: Registration.self)
             let name = registration.agentName ?? runner.name
-            guard name == runner.name, let agentId = registration.agentId,
-                  remote.contains(where: { $0.id == agentId && $0.name == name }) else {
+            guard name == runner.name, remote.contains(where: { $0.id == registration.agentId && $0.name == name }) else {
                 throw ProvisioningError("The incomplete registration at \(runner.url.path(percentEncoded: false)) could not be matched to this repository on GitHub. It was left unchanged.")
             }
         } else if let registered = remote.first(where: { $0.name == runner.name }) {
@@ -317,16 +323,18 @@ actor RunnerProvisioner {
     }
 
     private func localRunners() throws -> (runners: [LocalRunner], problems: [RunnerProvisioningProblem]) {
+        let scan = try installation.runnerDirectories()
         var runners: [LocalRunner] = []
-        var problems: [RunnerProvisioningProblem] = []
-        for runner in try installation.runnerDirectories() {
+        // An entry whose type cannot be read is reported for that runner alone.
+        var problems: [RunnerProvisioningProblem] = scan.unreadable.map {
+            .unreadableRegistration(path: $0.directory.registrationFile.path(percentEncoded: false), reason: $0.error.localizedDescription)
+        }
+        for runner in scan.directories {
             do {
                 guard try runner.hasRegistration() else { continue }
-                let registration = try runner.registration()
-                guard let agentId = registration.agentId else { throw ProvisioningError("The registration has no runner ID.") }
+                let registration = try runner.registration(as: Registration.self)
                 runners.append(LocalRunner(
-                    directory: runner, name: registration.agentName ?? runner.name, agentId: agentId,
-                    repositoryURL: registration.gitHubUrl ?? registration.serverUrl,
+                    directory: runner, name: registration.agentName ?? runner.name, registration: registration,
                     hasIndividualService: try runner.hasIndividualService(), isHosted: try runner.isHosted()
                 ))
             } catch {
