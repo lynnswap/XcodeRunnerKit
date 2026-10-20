@@ -565,9 +565,10 @@ struct RunnerProvisionerTests {
                 && info.pbsi_status != UInt32(SZOMB)
         }
         defer { if childIsRunning() { kill(child.pid, SIGKILL) } }
-        _ = await provisioning.value
-        // A child left alive by cancellation keeps this wait running until the suite time limit fails the test.
+        // A surviving child keeps its output pipes open, so provisioning would never finish.
+        // Wait for the child first: the suite time limit can cancel this wait, then the deferred kill runs.
         try await waitUntil { !childIsRunning() }
+        _ = await provisioning.value
         let descriptor = open(installation.hostRoot.appending(path: "storage.lock").path(percentEncoded: false), O_RDWR)
         defer { if descriptor >= 0 { close(descriptor) } }
         #expect(descriptor >= 0)
