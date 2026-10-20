@@ -28,21 +28,18 @@ struct RunnerSettingsRow: Identifiable, Sendable {
 
     var id: URL { directory }
 
-    static func read(directory: URL, state: RunnerServiceState) -> Self {
+    static func read(_ runner: RunnerDirectory, state: RunnerServiceState) -> Self {
         struct Registration: Decodable {
             var agentName: String?
         }
         do {
-            let registration = try JSONDecoder().decode(
-                Registration.self, from: Data(contentsOf: directory.appending(path: ".runner"))
-            )
             return Self(
-                directory: directory, name: registration.agentName ?? directory.lastPathComponent, state: state,
+                directory: runner.url, name: try runner.registration(as: Registration.self).agentName ?? runner.name, state: state,
                 configurationError: nil
             )
         } catch {
             return Self(
-                directory: directory, name: directory.lastPathComponent, state: state,
+                directory: runner.url, name: runner.name, state: state,
                 configurationError: "Could not read this runner’s settings: \(error.localizedDescription)"
             )
         }

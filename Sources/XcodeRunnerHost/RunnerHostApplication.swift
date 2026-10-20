@@ -327,31 +327,26 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     }
 
     private func reconcile() async throws {
-        let directories = try FileManager.default.contentsOfDirectory(
-            at: root, includingPropertiesForKeys: [.isDirectoryKey]
-        )
-        let requested = try Set(directories.filter {
-            try $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
-                && FileManager.default.fileExists(atPath: $0.appending(path: ".xcode-runner-host").path(percentEncoded: false))
-                && FileManager.default.fileExists(atPath: $0.appending(path: ".runner").path(percentEncoded: false))
-        })
-        for directory in runners.keys.filter({ !requested.contains($0) }) {
+        let scan = try RunnerDirectory.scan(root)
+        if let unreadable = scan.unreadable.first { throw unreadable.error }
+        let requested = try scan.directories.filter { try $0.isHosted() && $0.hasRegistration() }
+        let requestedURLs = Set(requested.map(\.url))
+        for directory in runners.keys.filter({ !requestedURLs.contains($0) }) {
             let task = runners.removeValue(forKey: directory)?.task
             task?.cancel()
             await task?.value
         }
         try Task.checkCancellation()
-        for directory in requested where runners[directory] == nil {
-            if FileManager.default.fileExists(atPath: directory.appending(path: ".service").path(percentEncoded: false)) {
-                print("Skipped \(directory.lastPathComponent): uninstall its individual service before opting in.")
+        for runner in requested where runners[runner.url] == nil {
+            if try runner.hasIndividualService() {
+                print("Skipped \(runner.name): uninstall its individual service before opting in.")
                 continue
             }
-            runners[directory] = HostedRunner(task: Task { await serve(directory) }, state: .starting)
+            runners[runner.url] = HostedRunner(task: Task { await serve(runner.url) }, state: .starting)
         }
         settings.runnerScanError = nil
-        settings.runners = requested.sorted { $0.lastPathComponent < $1.lastPathComponent }.map { directory in
-            let state = runners[directory]?.state ?? .individualService
-            return RunnerSettingsRow.read(directory: directory, state: state)
+        settings.runners = requested.sorted { $0.name < $1.name }.map { runner in
+            RunnerSettingsRow.read(runner, state: runners[runner.url]?.state ?? .individualService)
         }
     }
 

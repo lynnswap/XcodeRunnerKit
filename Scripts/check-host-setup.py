@@ -574,7 +574,7 @@ exec /bin/bash "$XRK_FIXTURE_ENABLE_SCRIPT" "$@"
     subprocess.run(["xcrun", "swiftc", "-parse-as-library", "-swift-version", "6",
                     "-package-name", "XcodeRunnerKit",
                     *[str(scripts.parent / "Sources/XcodeRunnerHostSupport" / name) for name in
-                      ("HostInstallation.swift", "HostStorageMigration.swift")],
+                      ("HostInstallation.swift", "HostStorageMigration.swift", "RunnerDirectory.swift")],
                     str(storage_probe_source), "-o", str(storage_probe)], check=True)
 
     def request_storage(home, target):
