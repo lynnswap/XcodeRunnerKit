@@ -62,8 +62,12 @@ public struct XcodeRunner: Sendable {
         request: XcodeBuildRequest,
         onOutput: (@Sendable (Data) throws -> Void)?
     ) async -> XcodeBuildOutcome {
-        guard let configuration = request.simulator else {
-            return await runUnrestricted(action, request: request, onOutput: onOutput)
+        let configuration: SimulatorConfiguration
+        switch request.destination {
+        case .specifier(let destination):
+            return await runUnrestricted(action, request: request, destination: destination, onOutput: onOutput)
+        case .managedSimulator(let managed):
+            configuration = managed
         }
         let tool: SimulatorTool
         let selectedXcode: URL
@@ -120,12 +124,12 @@ public struct XcodeRunner: Sendable {
         onOutput: (@Sendable (Data) throws -> Void)?
     ) async -> XcodeBuildOutcome {
         var simulatorRequest = request
-        simulatorRequest.destination = "platform=iOS Simulator,id=" + identifier
         if !request.arguments.contains("-parallel-testing-enabled") {
             simulatorRequest.arguments = ["-parallel-testing-enabled", "NO"] + request.arguments
         }
+        // The UDID alone selects the device, whatever platform its runtime belongs to.
         return await runUnrestricted(
-            action, request: simulatorRequest, simulatorIdentifier: identifier,
+            action, request: simulatorRequest, destination: "id=" + identifier, simulatorIdentifier: identifier,
             inheritedLeaseDescriptor: inheritedLeaseDescriptor, onOutput: onOutput
         )
     }
@@ -133,6 +137,7 @@ public struct XcodeRunner: Sendable {
     private func runUnrestricted(
         _ action: XcodeBuildAction,
         request: XcodeBuildRequest,
+        destination: String,
         simulatorIdentifier: String? = nil,
         inheritedLeaseDescriptor: Int32? = nil,
         onOutput: (@Sendable (Data) throws -> Void)?
@@ -191,7 +196,7 @@ public struct XcodeRunner: Sendable {
             }
             let arguments = [action.rawValue] + commandSource.arguments + [
                 "-scheme", request.scheme,
-                "-destination", request.destination,
+                "-destination", destination,
                 "-derivedDataPath", commandDerivedData.path(percentEncoded: false),
                 "-resultBundlePath", bundleURL.path(percentEncoded: false),
             ] + request.arguments + buildSettings.sorted(by: { $0.key < $1.key }).map { "\($0.key)=\($0.value)" }

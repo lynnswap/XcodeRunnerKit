@@ -44,7 +44,8 @@ struct BuildOptions: ParsableArguments {
     @Option var project: String?
     @Option var package: String?
     @Option var scheme: String
-    @Option var destination = "platform=macOS"
+    @Option(help: "xcodebuild destination specifier (default: platform=macOS). Not used with Simulator options.")
+    var destination: String?
     @Option var outputDirectory: String?
     @Option var derivedData: String?
     @Option var developerDirectory: String?
@@ -95,7 +96,7 @@ struct BuildOptions: ParsableArguments {
             throw ValidationError("Specify exactly one of --workspace, --project, or --package.")
         }
         var request = XcodeBuildRequest(
-            source: source, scheme: scheme, destination: destination,
+            source: source, scheme: scheme, destination: try requestedDestination(),
             outputDirectory: outputDirectory.map(Self.url) ?? host?.storage.buildDirectory ?? Self.url("XcodeRunnerOutput")
         )
         request.derivedDataDirectory = derivedData.map(Self.url)
@@ -111,16 +112,6 @@ struct BuildOptions: ParsableArguments {
             request.compilationCache = cache
         } else if cacheDiagnostics || !prefixMappings.isEmpty {
             throw ValidationError("Specify --compilation-cache with cache diagnostics or prefix mappings.")
-        }
-        if let simulatorRuntime, let simulatorDeviceType {
-            request.simulator = SimulatorConfiguration(
-                runtimeIdentifier: simulatorRuntime, deviceTypeIdentifier: simulatorDeviceType
-            )
-            request.simulator?.reusesDevice = !freshSimulator
-        } else if simulatorRuntime != nil || simulatorDeviceType != nil {
-            throw ValidationError("Specify both --simulator-runtime and --simulator-device-type.")
-        } else if freshSimulator {
-            throw ValidationError("Specify --simulator-runtime and --simulator-device-type with --fresh-simulator.")
         }
         request.environment = try Self.assignments(environment)
         request.buildSettings = try Self.assignments(settings)
@@ -183,6 +174,24 @@ struct BuildOptions: ParsableArguments {
 
     private static func writeError(_ line: String) {
         try? FileHandle.standardError.write(contentsOf: Data((line + "\n").utf8))
+    }
+
+    private func requestedDestination() throws -> XcodeBuildDestination {
+        guard let simulatorRuntime, let simulatorDeviceType else {
+            if simulatorRuntime != nil || simulatorDeviceType != nil {
+                throw ValidationError("Specify both --simulator-runtime and --simulator-device-type.")
+            }
+            if freshSimulator {
+                throw ValidationError("Specify --simulator-runtime and --simulator-device-type with --fresh-simulator.")
+            }
+            return .specifier(destination ?? "platform=macOS")
+        }
+        guard destination == nil else {
+            throw ValidationError("Specify either --destination or the Simulator options, not both.")
+        }
+        var configuration = SimulatorConfiguration(runtimeIdentifier: simulatorRuntime, deviceTypeIdentifier: simulatorDeviceType)
+        configuration.reusesDevice = !freshSimulator
+        return .managedSimulator(configuration)
     }
 
     private static func url(_ path: String) -> URL {
