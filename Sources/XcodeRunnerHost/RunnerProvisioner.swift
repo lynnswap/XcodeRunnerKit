@@ -71,29 +71,22 @@ actor RunnerProvisioner {
         let replaceRegistration: Bool
     }
 
-    private struct Registration: Decodable {
-        let agentId: Int
-        let agentName: String?
-        let gitHubUrl: String?
-        let serverUrl: String?
-    }
-
     private struct LocalRunner {
-        let directory: URL
+        let directory: RunnerDirectory
         let name: String
-        let registration: Registration
+        let agentId: Int
+        let repositoryURL: String?
         let hasIndividualService: Bool
         let isHosted: Bool
 
         var repositoryFullName: String? {
-            guard let rawURL = registration.gitHubUrl ?? registration.serverUrl,
-                  let url = URL(string: rawURL), url.host()?.lowercased() == "github.com" else { return nil }
+            guard let repositoryURL, let url = URL(string: repositoryURL), url.host()?.lowercased() == "github.com" else { return nil }
             let name = url.path(percentEncoded: false).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             return name.split(separator: "/").count == 2 ? name : nil
         }
 
         func matches(_ remote: GitHubRunner) -> Bool {
-            registration.agentId == remote.id && name == remote.name
+            agentId == remote.id && name == remote.name
         }
 
         func belongs(
@@ -258,16 +251,14 @@ actor RunnerProvisioner {
                             while true {
                                 let candidate = Self.runnerName(hostName: hostName, repository: repository, slot: nextSlot)
                                 nextSlot += 1
-                                let directory = installation.runnersRoot.appending(path: candidate)
+                                let directory = RunnerDirectory(url: installation.runnersRoot.appending(path: candidate))
                                 if try canResumeInstallation(at: directory, repository: repository, remote: remote) {
                                     name = candidate
-                                    replaceRegistration = !FileManager.default.fileExists(
-                                        atPath: directory.appending(path: ".runner").path(percentEncoded: false)
-                                    ) && remote.contains(where: { $0.name == candidate })
+                                    replaceRegistration = try !directory.hasRegistration() && remote.contains(where: { $0.name == candidate })
                                     break
                                 }
                                 if !remote.contains(where: { $0.name == candidate }),
-                                   !FileManager.default.fileExists(atPath: directory.path(percentEncoded: false)) {
+                                   !FileManager.default.fileExists(atPath: directory.url.path(percentEncoded: false)) {
                                     name = candidate
                                     break
                                 }
@@ -305,25 +296,18 @@ actor RunnerProvisioner {
     }
 
     private func canResumeInstallation(
-        at directory: URL, repository: GitHubRepository, remote: [GitHubRunner]
+        at runner: RunnerDirectory, repository: GitHubRepository, remote: [GitHubRunner]
     ) throws -> Bool {
-        let manager = FileManager.default
-        guard !manager.fileExists(atPath: directory.appending(path: ".xcode-runner-host").path(percentEncoded: false)),
-              !manager.fileExists(atPath: directory.appending(path: ".service").path(percentEncoded: false)) else { return false }
-        let owner: String
-        do {
-            owner = try String(contentsOf: directory.appending(path: ".xcode-runner-installation"), encoding: .utf8)
-        } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return false }
-        guard owner.trimmingCharacters(in: .whitespacesAndNewlines) == String(repository.id) else { return false }
-        let metadata = directory.appending(path: ".runner")
-        if manager.fileExists(atPath: metadata.path(percentEncoded: false)) {
-            let registration = try JSONDecoder().decode(Registration.self, from: Data(contentsOf: metadata))
-            let name = registration.agentName ?? directory.lastPathComponent
-            guard name == directory.lastPathComponent,
-                  remote.contains(where: { $0.id == registration.agentId && $0.name == name }) else {
-                throw ProvisioningError("The incomplete registration at \(directory.path(percentEncoded: false)) could not be matched to this repository on GitHub. It was left unchanged.")
+        guard try !runner.isHosted(), try !runner.hasIndividualService(),
+              try runner.incompleteInstallationOwner() == String(repository.id) else { return false }
+        if try runner.hasRegistration() {
+            let registration = try runner.registration()
+            let name = registration.agentName ?? runner.name
+            guard name == runner.name, let agentId = registration.agentId,
+                  remote.contains(where: { $0.id == agentId && $0.name == name }) else {
+                throw ProvisioningError("The incomplete registration at \(runner.url.path(percentEncoded: false)) could not be matched to this repository on GitHub. It was left unchanged.")
             }
-        } else if let registered = remote.first(where: { $0.name == directory.lastPathComponent }) {
+        } else if let registered = remote.first(where: { $0.name == runner.name }) {
             // The official runner registers remotely before saving its local .runner settings.
             guard registered.status == "offline", !registered.busy else {
                 throw ProvisioningError("The incomplete runner \(registered.name) must be offline and idle before its registration can be recovered. It was left unchanged.")
@@ -333,26 +317,22 @@ actor RunnerProvisioner {
     }
 
     private func localRunners() throws -> (runners: [LocalRunner], problems: [RunnerProvisioningProblem]) {
-        let manager = FileManager.default
-        let directories: [URL]
-        do {
-            directories = try manager.contentsOfDirectory(at: installation.runnersRoot, includingPropertiesForKeys: [.isDirectoryKey])
-        } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return ([], []) }
         var runners: [LocalRunner] = []
         var problems: [RunnerProvisioningProblem] = []
-        for directory in directories {
-            let metadata = directory.appending(path: ".runner")
+        for runner in try installation.runnerDirectories() {
             do {
-                guard try directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true,
-                      manager.fileExists(atPath: metadata.path(percentEncoded: false)) else { continue }
-                let registration = try JSONDecoder().decode(Registration.self, from: Data(contentsOf: metadata))
+                guard try runner.hasRegistration() else { continue }
+                let registration = try runner.registration()
+                guard let agentId = registration.agentId else { throw ProvisioningError("The registration has no runner ID.") }
                 runners.append(LocalRunner(
-                    directory: directory, name: registration.agentName ?? directory.lastPathComponent, registration: registration,
-                    hasIndividualService: manager.fileExists(atPath: directory.appending(path: ".service").path(percentEncoded: false)),
-                    isHosted: manager.fileExists(atPath: directory.appending(path: ".xcode-runner-host").path(percentEncoded: false))
+                    directory: runner, name: registration.agentName ?? runner.name, agentId: agentId,
+                    repositoryURL: registration.gitHubUrl ?? registration.serverUrl,
+                    hasIndividualService: try runner.hasIndividualService(), isHosted: try runner.isHosted()
                 ))
             } catch {
-                problems.append(.unreadableRegistration(path: metadata.path(percentEncoded: false), reason: error.localizedDescription))
+                problems.append(.unreadableRegistration(
+                    path: runner.registrationFile.path(percentEncoded: false), reason: error.localizedDescription
+                ))
             }
         }
         return (runners, problems)

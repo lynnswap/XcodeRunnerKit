@@ -208,19 +208,16 @@ extension HostInstallation {
     }
 
     private func hostedRegistrationBackups(storage: Storage, changingStorage: Bool = false) throws -> [RegistrationBackup] {
-        let manager = FileManager.default
-        let directories: [URL]
-        do {
-            directories = try manager.contentsOfDirectory(at: runnersRoot, includingPropertiesForKeys: [.isDirectoryKey])
-        } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return [] }
         var backups: [RegistrationBackup] = []
-        for directory in directories where try directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true {
-            let hosted = try migrationItemExists(at: directory.appending(path: ".xcode-runner-host"))
-            let individual = try migrationItemExists(at: directory.appending(path: ".service"))
+        for runner in try runnerDirectories() {
+            let directory = runner.url
+            let hosted = try runner.isHosted()
+            let individual = try runner.hasIndividualService()
             guard hosted || individual else { continue }
             if individual && !changingStorage { continue }
-            let file = directory.appending(path: ".runner")
-            guard try migrationItemExists(at: file) else { continue }
+            guard try runner.hasRegistration() else { continue }
+            // Keep the original bytes: rewriting preserves unknown keys and a BOM, and rollback restores them.
+            let file = runner.registrationFile
             let data = try Data(contentsOf: file)
             let object = try registrationObject(data)
             if individual {
