@@ -11,7 +11,7 @@ public struct XcodeRunner: Sendable {
     /// require a launchd environment setting or restarting the calling process.
     public var buildServiceExecutableURL: URL?
     public var executionPool: HostExecutionPool?
-    /// A shared Simulator pool. Defaults to the execution pool's Simulators directory,
+    /// A shared Simulator pool. When nil, runs use executionPool.simulatorPool,
     /// or SimulatorPool.defaultDirectory when no execution pool is configured.
     public var simulatorPool: SimulatorPool?
     package var hostStorage: HostInstallation.Storage?
@@ -81,9 +81,7 @@ public struct XcodeRunner: Sendable {
         selectedRequest.environment["DEVELOPER_DIR"] = selectedXcode.path(percentEncoded: false)
         let simulatorRequest = selectedRequest
         if configuration.reusesDevice {
-            let pool = simulatorPool ?? SimulatorPool(
-                directory: executionPool?.directory.appending(path: "Simulators") ?? SimulatorPool.defaultDirectory
-            )
+            let pool = simulatorPool ?? executionPool?.simulatorPool ?? SimulatorPool()
             return await pool.withSimulator(action: action, configuration: configuration, developerDirectory: selectedXcode, tool: tool) { identifier, leaseDescriptor in
                 await runOnSimulator(
                     action, request: simulatorRequest, identifier: identifier,

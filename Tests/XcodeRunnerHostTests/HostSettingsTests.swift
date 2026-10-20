@@ -5,13 +5,13 @@ import XcodeRunnerKit
 
 @MainActor @Suite(.timeLimit(.minutes(1)))
 struct HostSettingsTests {
-    private func model(at root: URL) throws -> HostSettingsModel {
-        try HostSettingsModel(installation: HostInstallation(homeDirectory: root.appending(path: "Home")))
+    private func model(at root: URL) -> HostSettingsModel {
+        HostSettingsModel(installation: HostInstallation(homeDirectory: root.appending(path: "Home")))
     }
 
     @Test func readsDoNotConfigurePoolAndApplyUsesHostRoot() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
-        let settings = try model(at: root)
+        let settings = model(at: root)
         #expect(!settings.hasLoadedPoolStatus)
         await settings.applyCapacity()
         #expect(!FileManager.default.fileExists(atPath: settings.pool.directory.path()))
@@ -31,7 +31,7 @@ struct HostSettingsTests {
 
     @Test func refreshPreservesEditsAndShowsExternalCapacityChanges() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
-        let settings = try model(at: root)
+        let settings = model(at: root)
         await settings.refreshPoolStatus()
         settings.capacityInput = "6"
         await settings.applyCapacity()
@@ -50,7 +50,7 @@ struct HostSettingsTests {
 
     @Test func firstReadPreservesInputWhileLoadingSavedLimit() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
-        let settings = try model(at: root)
+        let settings = model(at: root)
         try await settings.pool.updateMaximumConcurrentJobs(to: 6)
         settings.capacityInput = "3"
         await settings.applyCapacity()
@@ -65,7 +65,7 @@ struct HostSettingsTests {
 
     @Test func invalidInputDoesNotReplaceSavedCapacity() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
-        let settings = try model(at: root)
+        let settings = model(at: root)
         await settings.refreshPoolStatus()
         await settings.applyCapacity()
         for input in ["0", "-1", "1.5", ""] {
@@ -89,7 +89,7 @@ struct HostSettingsTests {
         let record = installation.hostRoot.appending(path: "github-host.json")
         let repository = GitHubRepository(id: 1, fullName: "owner/Project")
         try GitHubHostConfiguration(repositories: [repository]).save(to: record)
-        let settings = try model(at: root)
+        let settings = model(at: root)
         try await settings.pool.updateMaximumConcurrentJobs(to: 4)
         await settings.refreshPoolStatus()
         let lock = settings.pool.directory.appending(path: "pool.lock")
@@ -116,7 +116,7 @@ struct HostSettingsTests {
         let record = installation.hostRoot.appending(path: "github-host.json")
         let repository = GitHubRepository(id: 1, fullName: "owner/Project")
         try GitHubHostConfiguration(repositories: [repository]).save(to: record)
-        let settings = try model(at: root)
+        let settings = model(at: root)
         try await settings.pool.updateMaximumConcurrentJobs(to: 4)
         await settings.refreshPoolStatus()
         settings.github.selectedRepositoryIDs = []
@@ -135,7 +135,7 @@ struct HostSettingsTests {
 
     @Test func shrinkingLimitShowsJobsStillRunning() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
-        let settings = try model(at: root)
+        let settings = model(at: root)
         await settings.refreshPoolStatus()
         settings.capacityInput = "2"
         await settings.applyCapacity()
@@ -166,7 +166,7 @@ struct HostSettingsTests {
 
     @Test func refreshShowsSharedWaitingCountsByPriority() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
-        let settings = try model(at: root)
+        let settings = model(at: root)
         await settings.refreshPoolStatus()
         settings.capacityInput = "1"
         await settings.applyCapacity()
@@ -233,7 +233,7 @@ struct HostSettingsTests {
 
     @Test func readFailureDoesNotPresentOldStatusAsCurrent() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
-        let settings = try model(at: root)
+        let settings = model(at: root)
         await settings.refreshPoolStatus()
         await settings.applyCapacity()
         #expect(settings.poolStatus?.maximumConcurrentJobs == 4)
@@ -257,7 +257,7 @@ struct HostSettingsTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let installation = HostInstallation(homeDirectory: root.appending(path: "Home"))
         let active = try installation.initializeStorage(at: root.appending(path: "Active"))
-        let settings = try HostSettingsModel(installation: installation)
+        let settings = HostSettingsModel(installation: installation)
         settings.storageDidBecomeAvailable(active)
         settings.hostState = "Running"
         let next = root.appending(path: "Next")
@@ -282,7 +282,7 @@ struct HostSettingsTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let installation = HostInstallation(homeDirectory: root.appending(path: "Home"))
         let active = try installation.initializeStorage(at: root.appending(path: "Active"))
-        let settings = try HostSettingsModel(installation: installation)
+        let settings = HostSettingsModel(installation: installation)
         settings.storageDidBecomeAvailable(active)
         settings.hostState = "Running"
         let previous = root.appending(path: "Previous selection")
@@ -325,7 +325,7 @@ struct HostSettingsTests {
     @Test func storageSelectionRemainsUsableAfterStartupFailure() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let settings = try model(at: root)
+        let settings = model(at: root)
         settings.storagePreparationFailed(CocoaError(.fileWriteNoPermission))
         #expect(settings.hostState == "Needs attention")
         #expect(settings.storageError != nil)

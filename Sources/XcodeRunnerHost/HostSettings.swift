@@ -53,7 +53,7 @@ final class HostSettingsModel {
     private(set) var saveError: String?
     private(set) var isSaving = false
     private(set) var hasLoadedPoolStatus = false
-    var capacityInput = "4"
+    var capacityInput = String(HostInstallation.defaultMaximumConcurrentJobs)
     private(set) var activeStorage: HostInstallation.Storage?
     private(set) var storageError: String?
     private(set) var storageSaveError: String?
@@ -61,10 +61,10 @@ final class HostSettingsModel {
     private(set) var isSavingStorage = false
     var storageDirectoryInput = ""
 
-    init(installation: HostInstallation) throws {
+    init(installation: HostInstallation) {
         self.installation = installation
         // Reading status does not initialize the pool. Only Apply or a job can do that.
-        self.pool = try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4)
+        self.pool = HostExecutionPool(directory: installation.poolDirectory)
         self.github = GitHubHostSettings(installation: installation, pool: pool)
         do {
             savedStorageDirectory = try installation.requestedStorageDirectory() ?? installation.storage()?.directory
@@ -150,7 +150,7 @@ final class HostSettingsModel {
 
     func refreshPoolStatus() async {
         do {
-            let previousInput = poolStatus.map { String($0.maximumConcurrentJobs) } ?? "4"
+            let previousInput = String(poolStatus?.maximumConcurrentJobs ?? HostInstallation.defaultMaximumConcurrentJobs)
             let status = try await pool.status()
             poolStatus = status
             poolError = nil

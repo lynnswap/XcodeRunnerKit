@@ -12,10 +12,13 @@ package struct HostInstallation: Sendable {
         self.homeDirectory = homeDirectory.standardizedFileURL.resolvingSymlinksInPath()
     }
 
+    /// The limit a host's pool starts with until its settings change it.
+    package static let defaultMaximumConcurrentJobs = 4
+
     package var hostRoot: URL { homeDirectory.appending(path: "Library/Application Support/XcodeRunnerKit") }
     package var runnersRoot: URL { homeDirectory.appending(path: "Library/XcodeRunnerKit/runners") }
     package var toolsDirectory: URL { hostRoot.appending(path: "bin") }
-    package var poolDirectory: URL { hostRoot.appending(path: "Pool") }
+    package var poolDirectory: URL { Self.poolDirectory(hostRoot: hostRoot) }
     package var logsDirectory: URL { hostRoot.appending(path: "logs/runners") }
     package var applicationsDirectory: URL { homeDirectory.appending(path: "Applications") }
     private var storageRecord: URL { hostRoot.appending(path: "storage-directory") }
@@ -193,19 +196,32 @@ package struct HostInstallation: Sendable {
     package static func hostedConfiguration(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> (storage: Storage, poolDirectory: URL, buildServiceExecutableURL: URL?)? {
+        guard let hosted = try hostedLocations(environment) else { return nil }
+        return (
+            Storage(directory: hosted.storageDirectory),
+            poolDirectory(hostRoot: hosted.hostRoot),
+            try buildServiceExecutableURL(hostRoot: hosted.hostRoot)
+        )
+    }
+
+    /// The pool a hosted job uses. Unlike hostedConfiguration, this reads no saved host settings.
+    package static func hostedPoolDirectory(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> URL? {
+        try hostedLocations(environment).map { poolDirectory(hostRoot: $0.hostRoot) }
+    }
+
+    private static func hostedLocations(_ environment: [String: String]) throws -> (storageDirectory: URL, hostRoot: URL)? {
         let directory = environment["XCODE_RUNNER_HOST_STORAGE_DIRECTORY"]
         let root = environment["XCODE_RUNNER_HOST_ROOT"]
         guard directory != nil || root != nil else { return nil }
         guard let directory, let root, !directory.isEmpty, !root.isEmpty else {
             throw ConfigurationError.incompleteHostEnvironment
         }
-        let hostRoot = URL(filePath: root)
-        return (
-            Storage(directory: URL(filePath: directory)),
-            hostRoot.appending(path: "Pool"),
-            try buildServiceExecutableURL(hostRoot: hostRoot)
-        )
+        return (URL(filePath: directory), URL(filePath: root))
     }
+
+    private static func poolDirectory(hostRoot: URL) -> URL { hostRoot.appending(path: "Pool") }
 
     package enum ConfigurationError: LocalizedError {
         case invalidStorageRecord(URL)

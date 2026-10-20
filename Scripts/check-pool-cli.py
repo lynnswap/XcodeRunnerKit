@@ -2,6 +2,7 @@
 """Verify pool administration, admission priorities, and Xcode commands."""
 import argparse
 import json
+import os
 from pathlib import Path
 import shutil
 import signal
@@ -37,9 +38,9 @@ def main():
 
     signal.signal(signal.SIGTERM, interrupt)
 
-    def command(*values, success=True, timeout=10):
+    def command(*values, success=True, timeout=10, env=None):
         job = subprocess.Popen([executable, *map(str, values)], stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, text=True)
+                               stderr=subprocess.PIPE, text=True, env=env)
         try:
             stdout, stderr = job.communicate(timeout=timeout)
         except BaseException:
@@ -188,8 +189,25 @@ exec "$(xcrun --find clang)" "$@"
         command("pool", "--help")
         command("pool", "status", "--help")
         command("pool", "configure", "--help")
-        command("pool", "status", success=False)
-        command("pool", "configure", "--maximum-concurrent-jobs", "4", success=False)
+        # Without --pool-directory, pool commands use the installed host's pool under HOME.
+        host_home = root / "Host home"
+        host_environment = {key: value for key, value in os.environ.items()
+                            if not key.startswith("XCODE_RUNNER_HOST_")}
+        host_environment["HOME"] = str(host_home)
+        assert "not configured" in command("pool", "status", env=host_environment).stdout
+        configured = command("pool", "configure", "--maximum-concurrent-jobs", "4", "--json", env=host_environment)
+        assert json.loads(configured.stdout) == expected_status(4, 0)
+        assert (host_home / "Library/Application Support/XcodeRunnerKit/Pool/capacity").read_text() == "4"
+        assert json.loads(command("pool", "status", "--json", env=host_environment).stdout) == expected_status(4, 0)
+        result = command("build", "--package", root / "Missing", "--scheme", "Fixture",
+                         "--pool-directory", root / "Unconfigured pool", success=False)
+        assert "has no maximum concurrent job count" in result.stderr, result.stderr
+        # An invalid initial limit fails the same way whether or not the pool already has a saved limit.
+        for directory in (root / "Unconfigured pool", pool):
+            result = command("build", "--package", root / "Missing", "--scheme", "Fixture",
+                             "--pool-directory", directory, "--maximum-concurrent-jobs", "0", success=False)
+            assert "must be positive" in result.stderr, result.stderr
+        assert not (root / "Unconfigured pool/capacity").exists()
         for action in ACTIONS:
             help_text = command(action, "--help").stdout
             assert all(option in help_text for option in ("--scheme", "--compilation-cache", "--priority"))
@@ -221,8 +239,9 @@ exec "$(xcrun --find clang)" "$@"
         for action, priority in (("build-for-testing", "high"), ("test-without-building", "low"),
                                  ("build", "medium"), ("test", None)):
             priority_arguments = ["--priority", priority] if priority else []
-            pool_arguments = [] if action == "build" else [
-                "--pool-directory", pool, "--maximum-concurrent-jobs", "2"]
+            # An existing pool keeps its saved limit, so the test action omits it.
+            pool_arguments = {"build": [], "test": ["--pool-directory", pool]}.get(
+                action, ["--pool-directory", pool, "--maximum-concurrent-jobs", "2"])
             result = command(action, "--package", package, "--scheme", "BuildProbe",
                              "--destination", "platform=macOS,arch=arm64",
                              "--derived-data", root / "FixtureDerivedData",
@@ -254,7 +273,7 @@ exec "$(xcrun --find clang)" "$@"
                          "--output-directory", root / "CleanupFailureOutput", success=False)
         assert result.returncode == 65, (result.returncode, result.stdout, result.stderr)
         assert "Log: " in result.stderr and "fake-deletion-failed" in result.stderr, result.stderr
-        print("PASS: CLI status/configure, live shrink, priority admission and counts, invalid input, existing Xcode actions, cleanup failure exit status")
+        print("PASS: CLI status/configure, live shrink, priority admission and counts, invalid input, existing Xcode actions, host pool defaults, cleanup failure exit status")
 
 
 if __name__ == "__main__":

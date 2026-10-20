@@ -282,7 +282,7 @@ def main():
                     [str(executable), str(unconfigured), "update", str(capacity)], capture_output=True
                 )
                 assert result.returncode != 0
-                assert "invalidCapacity" in result.stderr.decode()
+                assert "invalidMaximumConcurrentJobs" in result.stderr.decode()
                 assert status(unconfigured)["maximumConcurrentJobs"] == 3
 
             unreadable = unconfigured / "pool/capacity"
@@ -318,7 +318,7 @@ def main():
             (unconfigured / "pool/capacity").write_text("")
             result = subprocess.run([str(executable), str(unconfigured), "status"], capture_output=True)
             assert result.returncode != 0
-            assert "invalidStoredCapacity" in result.stderr.decode()
+            assert "invalidStoredMaximumConcurrentJobs" in result.stderr.decode()
 
             for index, value in enumerate(("0", "invalid")):
                 invalid = root / f"invalid-{index}"
@@ -328,7 +328,7 @@ def main():
                 job = start(name, 2, invalid)
                 assert job.wait(timeout=10) != 0
                 assert not started(name), "Invalid saved capacity executed a payload"
-                assert "invalidStoredCapacity" in (root / (name + ".log")).read_text()
+                assert "invalidStoredMaximumConcurrentJobs" in (root / (name + ".log")).read_text()
 
             print("PASS: stored capacities, differing callers, live shrink/grow, priorities, same-priority FIFO, queued counts, cancellation, process exit, invalid configuration, I/O failures")
         finally:

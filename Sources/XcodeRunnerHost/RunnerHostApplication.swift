@@ -149,7 +149,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         self.root = root.resolvingSymlinksInPath()
         self.logs = logs
         self.installation = installation
-        self.settings = try HostSettingsModel(installation: installation)
+        self.settings = HostSettingsModel(installation: installation)
         guard let executable = Bundle.main.executableURL else {
             throw ValidationError("Cannot locate the runner host executable.")
         }

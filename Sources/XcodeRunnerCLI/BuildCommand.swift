@@ -64,7 +64,7 @@ struct BuildOptions: ParsableArguments {
     var freshSimulator = false
     @Option(help: "Local directory shared by every repository runner on this Mac.")
     var poolDirectory: String?
-    @Option(help: "Capacity for a new shared pool. Existing pools use their saved capacity. Required with --pool-directory.")
+    @Option(help: "Maximum concurrent jobs saved when this run creates the pool at --pool-directory. Existing pools keep their saved limit.")
     var maximumConcurrentJobs: Int?
     @Option(
         help: "Local admission priority with --pool-directory: high, medium, or low (default: medium). Running jobs continue; GitHub dispatch is unaffected.",
@@ -128,14 +128,16 @@ struct BuildOptions: ParsableArguments {
         var runner = XcodeRunner(developerDirectory: developerDirectory.map(Self.url))
         runner.buildServiceExecutableURL = buildServicePath.map(Self.url) ?? host?.buildServiceExecutableURL
         runner.hostStorage = host?.storage
-        if let poolDirectory, let maximumConcurrentJobs {
-            runner.executionPool = try HostExecutionPool(
-                directory: Self.url(poolDirectory), initialCapacity: maximumConcurrentJobs
-            )
-        } else if poolDirectory != nil || maximumConcurrentJobs != nil {
-            throw ValidationError("Specify both --pool-directory and --maximum-concurrent-jobs.")
+        if let poolDirectory {
+            var pool = HostExecutionPool(directory: Self.url(poolDirectory))
+            pool.initialMaximumConcurrentJobs = maximumConcurrentJobs
+            runner.executionPool = pool
+        } else if maximumConcurrentJobs != nil {
+            throw ValidationError("Specify --pool-directory with --maximum-concurrent-jobs.")
         } else if let host {
-            runner.executionPool = try HostExecutionPool(directory: host.poolDirectory, initialCapacity: 4)
+            var pool = HostExecutionPool(directory: host.poolDirectory)
+            pool.initialMaximumConcurrentJobs = HostInstallation.defaultMaximumConcurrentJobs
+            runner.executionPool = pool
         }
         let configuredRunner = runner
         let executionPriority = priority
