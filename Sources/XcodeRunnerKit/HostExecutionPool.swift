@@ -3,23 +3,20 @@ import Foundation
 
 /// Shares an execution limit between cooperating processes on one Mac.
 ///
-/// Repository runners share one local directory. Its saved capacity limits new
-/// operations; a caller's capacity initializes an empty pool.
-/// Do not remove the directory or its lock files while jobs are running.
+/// Repository runners share one local directory. Its saved maximum limits new
+/// operations. Do not remove the directory or its lock files while jobs are running.
 public struct HostExecutionPool: Sendable {
     /// The shared directory, with symlinks resolved when the pool is created.
     public let directory: URL
-    private let initialCapacity: Int
-
-    /// Creates a pool with a capacity to use when its first slot acquisition initializes the directory.
+    /// The limit saved by the first slot acquisition in an unconfigured pool.
     ///
-    /// Creating the value does not configure the directory.
-    public init(directory: URL, initialCapacity: Int) throws {
-        guard initialCapacity > 0 else {
-            throw ConfigurationError.invalidCapacity
-        }
+    /// A configured pool keeps its saved limit. When this is nil, acquiring a
+    /// slot in an unconfigured pool throws ConfigurationError.notConfigured.
+    public var initialMaximumConcurrentJobs: Int?
+
+    /// Refers to a pool directory without reading or configuring it.
+    public init(directory: URL) {
         self.directory = directory.resolvingSymlinksInPath()
-        self.initialCapacity = initialCapacity
     }
 
     /// The admission order for waiting operations. Running operations are never preempted.
@@ -91,7 +88,7 @@ public struct HostExecutionPool: Sendable {
     /// Operations already holding slots continue. After a decrease, waiting
     /// operations start only when the active count is below the new limit.
     public func updateMaximumConcurrentJobs(to capacity: Int) async throws {
-        guard capacity > 0 else { throw ConfigurationError.invalidCapacity }
+        guard capacity > 0 else { throw ConfigurationError.invalidMaximumConcurrentJobs }
         try Task.checkCancellation()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let coordinator = try Self.open(directory.appending(path: "pool.lock"))
@@ -158,7 +155,7 @@ public struct HostExecutionPool: Sendable {
                 slot = try await Self.withHandle(coordinator) {
                     try await Self.lock(coordinator)
                     guard let capacity = try savedCapacity() else {
-                        throw ConfigurationError.invalidStoredCapacity(directory: directory)
+                        throw ConfigurationError.invalidStoredMaximumConcurrentJobs(directory: directory)
                     }
                     let slots = try inspectSlots()
                     guard slots.activeJobCount < capacity else { return nil }
@@ -202,7 +199,11 @@ public struct HostExecutionPool: Sendable {
         let coordinator = try Self.open(directory.appending(path: "pool.lock"))
         return try await Self.withHandle(coordinator) {
             try await Self.lock(coordinator)
-            if try savedCapacity() == nil { try saveCapacity(initialCapacity) }
+            if try savedCapacity() == nil {
+                guard let initialMaximumConcurrentJobs else { throw ConfigurationError.notConfigured(directory: directory) }
+                guard initialMaximumConcurrentJobs > 0 else { throw ConfigurationError.invalidMaximumConcurrentJobs }
+                try saveCapacity(initialMaximumConcurrentJobs)
+            }
             let previousSequence = try inspectWaiters().map(\.sequence).max() ?? -1
             let (sequence, overflow) = previousSequence.addingReportingOverflow(1)
             guard !overflow else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(EOVERFLOW)) }
@@ -264,7 +265,7 @@ public struct HostExecutionPool: Sendable {
         }
         guard let value = String(data: stored, encoding: .utf8),
               let capacity = Int(value), capacity > 0 else {
-            throw ConfigurationError.invalidStoredCapacity(directory: directory)
+            throw ConfigurationError.invalidStoredMaximumConcurrentJobs(directory: directory)
         }
         return capacity
     }
@@ -300,16 +301,19 @@ public struct HostExecutionPool: Sendable {
     }
 
     public enum ConfigurationError: Error, LocalizedError {
-        case invalidCapacity
-        case invalidStoredCapacity(directory: URL)
+        case invalidMaximumConcurrentJobs
+        case notConfigured(directory: URL)
+        case invalidStoredMaximumConcurrentJobs(directory: URL)
         case invalidStoredWaiter(URL)
 
         public var errorDescription: String? {
             switch self {
-            case .invalidCapacity:
+            case .invalidMaximumConcurrentJobs:
                 return "The maximum concurrent job count must be positive."
-            case .invalidStoredCapacity(let directory):
-                return "The pool at \(directory.path(percentEncoded: false)) has an invalid saved capacity. Expected a positive integer."
+            case .notConfigured(let directory):
+                return "The pool at \(directory.path(percentEncoded: false)) has no maximum concurrent job count. Configure the pool or provide an initial maximum."
+            case .invalidStoredMaximumConcurrentJobs(let directory):
+                return "The pool at \(directory.path(percentEncoded: false)) has an invalid saved maximum concurrent job count. Expected a positive integer."
             case .invalidStoredWaiter(let url):
                 return "The waiting record at \(url.path(percentEncoded: false)) has an invalid sequence or priority."
             }

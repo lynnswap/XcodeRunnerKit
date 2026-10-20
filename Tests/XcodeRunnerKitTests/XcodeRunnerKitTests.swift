@@ -8,7 +8,7 @@ struct XcodeRunnerKitTests {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let pool = try HostExecutionPool(directory: root.appending(path: "pool"), initialCapacity: 1)
+        let pool = Self.pool(at: root, initialMaximumConcurrentJobs: 1)
         let executable = try script("touch \"$STARTED_PATH\"; while [ ! -e \"$RELEASE_PATH\" ]; do sleep 0.02; done", at: root)
         var configuredRunner = XcodeRunner(executableURL: executable)
         configuredRunner.executionPool = pool
@@ -135,7 +135,7 @@ struct XcodeRunnerKitTests {
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root)
         request.environment["READY_PATH"] = marker.path(percentEncoded: false)
         var runner = XcodeRunner(executableURL: executable)
-        runner.executionPool = try HostExecutionPool(directory: root.appending(path: "pool"), initialCapacity: 1)
+        runner.executionPool = Self.pool(at: root, initialMaximumConcurrentJobs: 1)
         let configuredRunner = runner
         let task = Task { try await configuredRunner.run(.test, request: request) }
         let clock = ContinuousClock()
@@ -176,7 +176,7 @@ struct XcodeRunnerKitTests {
         let blocked = root.appending(path: "pool")
         try Data().write(to: blocked)
         let marker = root.appending(path: "unexpected-payload")
-        let pool = try HostExecutionPool(directory: blocked, initialCapacity: 2)
+        let pool = Self.pool(at: root, initialMaximumConcurrentJobs: 2)
         do {
             try await pool.withSlot { try Data().write(to: marker) }
             Issue.record("A pool I/O failure bypassed the limit.")
@@ -208,7 +208,7 @@ struct XcodeRunnerKitTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: simulator.path)
         let executable = try script("[ -e \(booted.path) ] || exit 9; printf '%s\\n' \"$@\"; exit \(exitCode)", at: root)
         var runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
-        runner.executionPool = try HostExecutionPool(directory: root.appending(path: "pool"), initialCapacity: 1)
+        runner.executionPool = Self.pool(at: root, initialMaximumConcurrentJobs: 1)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
         request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
         request.simulator?.reusesDevice = false
@@ -347,7 +347,7 @@ struct XcodeRunnerKitTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: simulator.path)
         let executable = try script("printf 'completed payload\\n'; exit \(exitCode)", at: root)
         var runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
-        runner.executionPool = try HostExecutionPool(directory: root.appending(path: "pool"), initialCapacity: 1)
+        runner.executionPool = Self.pool(at: root, initialMaximumConcurrentJobs: 1)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
         request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
         request.simulator?.reusesDevice = false
@@ -380,6 +380,12 @@ struct XcodeRunnerKitTests {
         #expect(FileManager.default.fileExists(atPath: deleted.path))
         let pool = try #require(configuredRunner.executionPool)
         try await pool.withSlot {}
+    }
+
+    private static func pool(at root: URL, initialMaximumConcurrentJobs: Int) -> HostExecutionPool {
+        var pool = HostExecutionPool(directory: root.appending(path: "pool"))
+        pool.initialMaximumConcurrentJobs = initialMaximumConcurrentJobs
+        return pool
     }
 
     private func script(_ body: String, at root: URL) throws -> URL {

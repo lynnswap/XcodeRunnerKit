@@ -12,7 +12,7 @@ public struct SimulatorPool: Sendable {
     public let directory: URL
 
     public static var defaultDirectory: URL {
-        HostInstallation().poolDirectory.appending(path: "Simulators")
+        HostExecutionPool(directory: HostInstallation().poolDirectory).simulatorPoolDirectory
     }
 
     public init(directory: URL = Self.defaultDirectory) {
@@ -361,4 +361,11 @@ public struct SimulatorPool: Sendable {
     private static func posixError() -> NSError {
         NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
     }
+}
+
+extension HostExecutionPool {
+    /// The Simulator registry that XcodeRunner and `pool clean-simulators` use with this pool.
+    public var simulatorPool: SimulatorPool { SimulatorPool(directory: simulatorPoolDirectory) }
+
+    fileprivate var simulatorPoolDirectory: URL { directory.appending(path: "Simulators") }
 }

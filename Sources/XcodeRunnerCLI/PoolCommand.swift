@@ -10,7 +10,7 @@ struct Pool: AsyncParsableCommand {
 
     struct Status: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Show capacity, active jobs, and waiting jobs by priority without initializing the pool."
+            abstract: "Show the maximum concurrent jobs, active jobs, and waiting jobs by priority without initializing the pool."
         )
 
         @OptionGroup private var options: PoolOptions
@@ -18,32 +18,25 @@ struct Pool: AsyncParsableCommand {
         var json = false
 
         mutating func run() async throws {
-            let pool = try options.pool()
-            let status = try await pool.status()
-            if json {
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.sortedKeys]
-                let data = try encoder.encode(status)
-                try FileHandle.standardOutput.write(contentsOf: data + Data("\n".utf8))
-            } else {
-                printStatus(status)
-            }
+            try report(await options.pool().status(), json: json)
         }
     }
 
     struct Configure: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Set the pool capacity while existing jobs continue running."
+            abstract: "Set the maximum concurrent jobs while existing jobs continue running."
         )
 
         @OptionGroup private var options: PoolOptions
         @Option(help: "Maximum number of concurrent jobs; must be positive.")
         var maximumConcurrentJobs: Int
+        @Flag(help: "Write the resulting status as JSON.")
+        var json = false
 
         mutating func run() async throws {
-            let pool = try options.pool(initialCapacity: maximumConcurrentJobs)
+            let pool = try options.pool()
             try await pool.updateMaximumConcurrentJobs(to: maximumConcurrentJobs)
-            printStatus(try await pool.status())
+            try report(await pool.status(), json: json)
         }
     }
 
@@ -57,9 +50,7 @@ struct Pool: AsyncParsableCommand {
         var developerDirectory: String?
 
         mutating func run() async throws {
-            let executionPool = try options.pool()
-            let pool = SimulatorPool(directory: executionPool.directory.appending(path: "Simulators"))
-            try await pool.removeIdleSimulators(
+            try await options.pool().simulatorPool.removeIdleSimulators(
                 developerDirectory: developerDirectory.map {
                     URL(filePath: $0, relativeTo: URL.currentDirectory()).standardizedFileURL
                 }
@@ -69,18 +60,25 @@ struct Pool: AsyncParsableCommand {
 }
 
 private struct PoolOptions: ParsableArguments {
-    @Option(help: "Local directory shared by every repository runner on this Mac.")
-    var poolDirectory: String
+    @Option(help: "Local directory shared by every repository runner on this Mac. Defaults to the installed host's pool.")
+    var poolDirectory: String?
 
-    func pool(initialCapacity: Int = 1) throws -> HostExecutionPool {
-        try HostExecutionPool(
-            directory: URL(filePath: poolDirectory, relativeTo: URL.currentDirectory()).standardizedFileURL,
-            initialCapacity: initialCapacity
-        )
+    func pool() throws -> HostExecutionPool {
+        if let poolDirectory {
+            return HostExecutionPool(directory: URL(filePath: poolDirectory, relativeTo: URL.currentDirectory()).standardizedFileURL)
+        }
+        return HostExecutionPool(directory: try HostInstallation.hostedConfiguration()?.poolDirectory ?? HostInstallation().poolDirectory)
     }
 }
 
-private func printStatus(_ status: HostExecutionPool.Status?) {
+private func report(_ status: HostExecutionPool.Status?, json: Bool) throws {
+    if json {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(status)
+        try FileHandle.standardOutput.write(contentsOf: data + Data("\n".utf8))
+        return
+    }
     guard let status else {
         print("Pool is not configured.")
         return

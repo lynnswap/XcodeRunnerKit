@@ -12,6 +12,9 @@ package struct HostInstallation: Sendable {
         self.homeDirectory = homeDirectory.standardizedFileURL.resolvingSymlinksInPath()
     }
 
+    /// The limit a host's pool starts with until its settings change it.
+    package static let defaultMaximumConcurrentJobs = 4
+
     package var hostRoot: URL { homeDirectory.appending(path: "Library/Application Support/XcodeRunnerKit") }
     package var runnersRoot: URL { homeDirectory.appending(path: "Library/XcodeRunnerKit/runners") }
     package var toolsDirectory: URL { hostRoot.appending(path: "bin") }

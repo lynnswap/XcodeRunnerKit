@@ -136,8 +136,8 @@ A fresh device is deleted after the operation, including on failure or managed
 cancellation.
 
 With `--pool-directory`, the device registry lives in that pool's `Simulators`
-subdirectory. Without an execution pool, the runner uses
-`SimulatorPool.defaultDirectory`. Keep the registry in a persistent local
+subdirectory (`HostExecutionPool.simulatorPool` in Swift). Without an execution
+pool, the runner uses `SimulatorPool.defaultDirectory`. Keep the registry in a persistent local
 directory; clean its devices before removing a temporary pool directory.
 In Swift, assign a separate pool if needed:
 
@@ -151,6 +151,9 @@ Remove idle devices from an execution pool when they are no longer needed:
 ```sh
 xcode-runner pool clean-simulators --pool-directory /path/to/shared-pool
 ```
+
+The `pool` commands use the installed host's pool when `--pool-directory` is
+omitted.
 
 Devices in use continue running. Add `--developer-directory` to clean only
 devices registered with a particular Xcode. Swift callers can use
@@ -171,8 +174,9 @@ xcode-runner test --package /path/to/Package --scheme PackageName \
   --pool-directory /path/to/shared-pool --maximum-concurrent-jobs 4
 ```
 
-`--maximum-concurrent-jobs` sets the initial limit. Once the pool exists,
-change its saved limit with:
+`--maximum-concurrent-jobs` sets the limit when the run creates the pool. Later
+runs can omit it because the pool keeps its saved limit. Change the saved limit
+with:
 
 ```sh
 xcode-runner pool configure --pool-directory /path/to/shared-pool --maximum-concurrent-jobs 8
@@ -186,10 +190,8 @@ use the same macOS user and local pool directory.
 In Swift, attach a pool to the runner:
 
 ```swift
-let pool = try HostExecutionPool(
-    directory: URL(filePath: "/path/to/shared-pool"),
-    initialCapacity: 4
-)
+var pool = HostExecutionPool(directory: URL(filePath: "/path/to/shared-pool"))
+pool.initialMaximumConcurrentJobs = 4
 var runner = XcodeRunner()
 runner.executionPool = pool
 
@@ -197,6 +199,8 @@ let status = try await pool.status()
 try await pool.updateMaximumConcurrentJobs(to: 8)
 ```
 
+`initialMaximumConcurrentJobs` applies only when an operation finds the pool
+unconfigured; without it, that operation fails instead of creating the pool.
 `status()` returns `nil` for an unused pool without creating it.
 `--priority high|medium|low`, or `runner.run(..., priority: .high)` in Swift,
 sets the queue priority. Higher priorities start first; equal priorities start

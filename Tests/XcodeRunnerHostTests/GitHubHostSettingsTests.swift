@@ -36,7 +36,7 @@ struct GitHubHostSettingsTests {
             return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
         })
         let model = GitHubHostSettings(
-            installation: installation, pool: try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4),
+            installation: installation, pool: HostExecutionPool(directory: installation.poolDirectory),
             client: client, authentication: GitHubAuthentication(client: client, store: MemoryGitHubCredentialStore()),
             openURL: { _ in Issue.record("Authorization should fail before opening a browser."); return false }
         )
@@ -71,7 +71,7 @@ struct GitHubHostSettingsTests {
         let client = await transport.client
         let authentication = GitHubAuthentication(client: client, store: MemoryGitHubCredentialStore(), sleep: { _ in })
         let model = GitHubHostSettings(
-            installation: installation, pool: try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4),
+            installation: installation, pool: HostExecutionPool(directory: installation.poolDirectory),
             client: client, authentication: authentication, openURL: { _ in true }
         )
         model.clientIDInput = "candidate-app"
@@ -128,7 +128,7 @@ struct GitHubHostSettingsTests {
             .init(path: "/repos/owner/Renamed/actions/runners", body: #"{"runners":[{"id":1,"name":"existing","status":"online","busy":false,"labels":[]}]}"#),
         ] : []))
         let client = await transport.client
-        let pool = try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 1)
+        let pool = HostExecutionPool(directory: installation.poolDirectory)
         try await pool.updateMaximumConcurrentJobs(to: 1)
         let model = GitHubHostSettings(
             installation: installation, pool: pool, client: client,
@@ -174,7 +174,7 @@ struct GitHubHostSettingsTests {
             .init(path: "/repos/owner/Project/actions/runners", body: #"{"runners":[{"id":1,"name":"existing","status":"online","busy":false,"labels":[]}]}"#),
         ])
         let client = await transport.client
-        let pool = try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 1)
+        let pool = HostExecutionPool(directory: installation.poolDirectory)
         try await pool.updateMaximumConcurrentJobs(to: 1)
         let model = GitHubHostSettings(
             installation: installation, pool: pool, client: client,
@@ -220,7 +220,7 @@ struct GitHubHostSettingsTests {
         let authentication = GitHubAuthentication(client: client, store: store, appStore: appStore)
         try await authentication.configureTestApp(clientID: previous.clientID, clientSecret: "previous-secret")
         let model = GitHubHostSettings(
-            installation: installation, pool: try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4),
+            installation: installation, pool: HostExecutionPool(directory: installation.poolDirectory),
             client: client, authentication: authentication
         )
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: installation.hostRoot.path(percentEncoded: false))
@@ -236,7 +236,7 @@ struct GitHubHostSettingsTests {
             URLQueryItem(name: "client_secret", value: "previous-secret")
         ) == true)
         let restored = GitHubHostSettings(
-            installation: installation, pool: try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4),
+            installation: installation, pool: HostExecutionPool(directory: installation.poolDirectory),
             client: client, authentication: restoredAuthentication
         )
         await restored.restore()
@@ -272,7 +272,7 @@ struct GitHubHostSettingsTests {
         try await original.configureTestApp(clientID: previous.clientID, clientSecret: "previous-secret")
         let originalData = try #require(appStore.read())
         let model = GitHubHostSettings(
-            installation: installation, pool: try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4),
+            installation: installation, pool: HostExecutionPool(directory: installation.poolDirectory),
             client: client, authentication: GitHubAuthentication(
                 client: client, store: store, appStore: RejectingGitHubCredentialWrites(store: appStore)
             )
@@ -302,7 +302,7 @@ struct GitHubHostSettingsTests {
         try await authentication.stageCreatedApp(app)
         let restoredAuthentication = GitHubAuthentication(client: client, store: MemoryGitHubCredentialStore(), appStore: appStore)
         let model = GitHubHostSettings(
-            installation: installation, pool: try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4),
+            installation: installation, pool: HostExecutionPool(directory: installation.poolDirectory),
             client: client, authentication: restoredAuthentication
         )
         await model.restore()
@@ -361,7 +361,7 @@ struct GitHubHostSettingsTests {
         let authentication = GitHubAuthentication(client: client, store: MemoryGitHubCredentialStore(), appStore: appStore)
         try await authentication.stageCreatedApp(app)
         let model = GitHubHostSettings(
-            installation: installation, pool: try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4),
+            installation: installation, pool: HostExecutionPool(directory: installation.poolDirectory),
             client: client, authentication: authentication
         )
         await model.restore()
@@ -402,7 +402,7 @@ struct GitHubHostSettingsTests {
             }
             return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
         })
-        let pool = try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4)
+        let pool = HostExecutionPool(directory: installation.poolDirectory)
         try await pool.updateMaximumConcurrentJobs(to: 24)
         let model = GitHubHostSettings(
             installation: installation, pool: pool, client: client,
@@ -434,7 +434,7 @@ struct GitHubHostSettingsTests {
              HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!)
         })
         let model = GitHubHostSettings(
-            installation: installation, pool: try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4),
+            installation: installation, pool: HostExecutionPool(directory: installation.poolDirectory),
             client: client, authentication: GitHubAuthentication(client: client, store: store)
         )
         await model.restore()
@@ -461,7 +461,7 @@ struct GitHubHostSettingsTests {
              HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!)
         })
         let model = GitHubHostSettings(
-            installation: installation, pool: try HostExecutionPool(directory: installation.poolDirectory, initialCapacity: 4),
+            installation: installation, pool: HostExecutionPool(directory: installation.poolDirectory),
             client: client, authentication: GitHubAuthentication(client: client, store: store)
         )
         await model.restore()
@@ -481,7 +481,7 @@ struct GitHubHostSettingsTests {
         let record = installation.hostRoot.appending(path: "github-host.json")
         let repository = GitHubRepository(id: 1, fullName: "owner/Project")
         try GitHubHostConfiguration(clientID: "app", repositories: [repository]).save(to: record)
-        let model = try HostSettingsModel(installation: installation)
+        let model = HostSettingsModel(installation: installation)
         model.github.storageIsReady = true
         await model.refreshPoolStatus()
         model.capacityInput = "24"
