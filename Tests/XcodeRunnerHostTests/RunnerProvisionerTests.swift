@@ -4,6 +4,7 @@ import Testing
 import XcodeRunnerKit
 @testable import XcodeRunnerHost
 
+@Suite(.timeLimit(.minutes(1)))
 struct RunnerProvisionerTests {
     private let firstRepository = GitHubRepository(id: 1, fullName: "example/First")
     private let secondRepository = GitHubRepository(id: 2, fullName: "example/Second")
@@ -552,18 +553,8 @@ struct RunnerProvisionerTests {
         }
         defer { provisioning.cancel() }
         let marker = root.appending(path: "child.json")
-        let clock = ContinuousClock()
-        var deadline = clock.now.advanced(by: .seconds(5))
-        while !FileManager.default.fileExists(atPath: marker.path(percentEncoded: false)), clock.now < deadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        try await waitUntil { FileManager.default.fileExists(atPath: marker.path(percentEncoded: false)) }
         provisioning.cancel()
-        guard FileManager.default.fileExists(atPath: marker.path(percentEncoded: false)) else {
-            let statuses = await provisioning.value
-            let errors = statuses.compactMap(\.errorMessage).joined(separator: "\n")
-            Issue.record("Installer child did not start.\n\(errors)")
-            return
-        }
         struct Child: Decodable { let pid: Int32; let group: Int32 }
         let child = try JSONDecoder().decode(Child.self, from: Data(contentsOf: marker))
         #expect(child.group != getpgrp())
@@ -574,15 +565,10 @@ struct RunnerProvisionerTests {
                 && info.pbsi_status != UInt32(SZOMB)
         }
         defer { if childIsRunning() { kill(child.pid, SIGKILL) } }
-        // Bound failures of the previous implementation, which left this child and its output pipes alive.
-        deadline = clock.now.advanced(by: .seconds(3))
-        while childIsRunning(), clock.now < deadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        let survivedCancellation = childIsRunning()
-        if survivedCancellation { kill(child.pid, SIGKILL) }
+        // A surviving child keeps its output pipes open, so provisioning would never finish.
+        // Wait for the child first: the suite time limit can cancel this wait, then the deferred kill runs.
+        try await waitUntil { !childIsRunning() }
         _ = await provisioning.value
-        #expect(!survivedCancellation)
         let descriptor = open(installation.hostRoot.appending(path: "storage.lock").path(percentEncoded: false), O_RDWR)
         defer { if descriptor >= 0 { close(descriptor) } }
         #expect(descriptor >= 0)

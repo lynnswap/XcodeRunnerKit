@@ -10,14 +10,10 @@ private struct RejectingGitHubCredentialWrites: GitHubCredentialStore {
     func remove() { store.remove() }
 }
 
-@MainActor
+@MainActor @Suite(.timeLimit(.minutes(1)))
 struct GitHubHostSettingsTests {
     private func waitForSignIn(_ model: GitHubHostSettings) async throws {
-        for _ in 0..<100 {
-            if !model.isConnecting { break }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        #expect(!model.isConnecting)
+        try await waitUntil { !model.isConnecting }
         await model.shutDown()
     }
 
