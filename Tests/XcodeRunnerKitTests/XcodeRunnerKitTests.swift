@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import XcodeRunnerKit
 
+@Suite(.timeLimit(.minutes(1)))
 struct XcodeRunnerKitTests {
     @Test func runnerPassesOperationPriorityToTheSharedPool() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
@@ -138,17 +139,8 @@ struct XcodeRunnerKitTests {
         runner.executionPool = Self.pool(at: root, initialMaximumConcurrentJobs: 1)
         let configuredRunner = runner
         let task = Task { try await configuredRunner.run(.test, request: request) }
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(10))
-        while !FileManager.default.fileExists(atPath: marker.path(percentEncoded: false)) && clock.now < deadline {
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        guard FileManager.default.fileExists(atPath: marker.path(percentEncoded: false)) else {
-            task.cancel()
-            _ = try? await task.value
-            Issue.record("The tool did not become ready.")
-            return
-        }
+        defer { task.cancel() }
+        try await waitForFile(marker)
         let pids = try String(contentsOf: marker, encoding: .utf8).split(whereSeparator: \.isWhitespace).compactMap { Int32($0) }
         #expect(pids.count == 2)
         task.cancel()
@@ -160,12 +152,9 @@ struct XcodeRunnerKitTests {
         }
         let pool = try #require(configuredRunner.executionPool)
         try await pool.withSlot {}
+        // A surviving process keeps this wait running until the suite time limit fails the test.
         for pid in pids {
-            let reapingDeadline = clock.now.advanced(by: .seconds(10))
-            while kill(pid, 0) == 0 && clock.now < reapingDeadline {
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            #expect(kill(pid, 0) == -1, "Process \(pid) remained after cancellation.")
+            try await waitUntil { kill(pid, 0) == -1 }
         }
     }
 
@@ -306,12 +295,8 @@ struct XcodeRunnerKitTests {
         request.simulator?.reusesDevice = false
         let configured = request
         let task = Task { try await runner.run(.test, request: configured) }
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(10))
-        while !FileManager.default.fileExists(atPath: ready.path), clock.now < deadline {
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        #expect(FileManager.default.fileExists(atPath: ready.path))
+        defer { task.cancel() }
+        try await waitForFile(ready)
         task.cancel()
         do {
             _ = try await task.value
@@ -354,18 +339,11 @@ struct XcodeRunnerKitTests {
         let configuredRunner = runner
         let configuredRequest = request
         let task = Task { try await configuredRunner.run(.test, request: configuredRequest) }
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(10))
-        while !FileManager.default.fileExists(atPath: ready.path), clock.now < deadline {
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        guard FileManager.default.fileExists(atPath: ready.path) else {
+        defer {
             task.cancel()
-            try Data().write(to: finish)
-            _ = try? await task.value
-            Issue.record("Simulator deletion did not become ready.")
-            return
+            try? Data().write(to: finish)
         }
+        try await waitForFile(ready)
         task.cancel()
         try Data().write(to: finish)
         do {
@@ -396,20 +374,10 @@ struct XcodeRunnerKitTests {
     }
 
     private func waitForFile(_ url: URL) async throws {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(10))
-        while !FileManager.default.fileExists(atPath: url.path), clock.now < deadline {
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        try #require(FileManager.default.fileExists(atPath: url.path), "The tool did not become ready.")
+        try await waitUntil { FileManager.default.fileExists(atPath: url.path) }
     }
 
     private func waitForWaitingCount(_ count: Int, at priority: HostExecutionPool.Priority, in pool: HostExecutionPool) async throws {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(10))
-        while try await pool.status()?.waitingJobCounts[priority] != count, clock.now < deadline {
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        try #require(try await pool.status()?.waitingJobCounts[priority] == count)
+        try await waitUntil { try await pool.status()?.waitingJobCounts[priority] == count }
     }
 }
