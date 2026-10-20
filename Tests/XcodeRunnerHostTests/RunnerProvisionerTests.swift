@@ -172,7 +172,7 @@ struct RunnerProvisionerTests {
         let (root, client, provisioner) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
         try await client.addRunner(repository: firstRepository, identifier: 1, name: "existing", busy: true)
-        let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 3, token: "access-token")
+        let statuses = try await provisioner.reconcile(repositories: [firstRepository], capacity: 3, token: "access-token")
         let status = try #require(statuses.first)
         #expect(status.registeredCount == 3)
         #expect(status.onlineCount == 3)
@@ -180,7 +180,7 @@ struct RunnerProvisionerTests {
         #expect(status.errorMessage == nil)
         #expect(await client.installations.count == 2)
         #expect(await client.tokenRequests == 1)
-        let repeated = await provisioner.reconcile(repositories: [firstRepository], capacity: 3, token: "access-token")
+        let repeated = try await provisioner.reconcile(repositories: [firstRepository], capacity: 3, token: "access-token")
         #expect(repeated.first?.registeredCount == 3)
         #expect(await client.installations.count == 2)
     }
@@ -188,7 +188,7 @@ struct RunnerProvisionerTests {
     @Test func eachRepositoryReceivesTheSharedCapacityAndArchiveIsPreparedOnce() async throws {
         let (root, client, provisioner) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
-        let statuses = await provisioner.reconcile(
+        let statuses = try await provisioner.reconcile(
             repositories: [firstRepository, secondRepository], capacity: 2, token: "access-token"
         )
         #expect(statuses.map(\.registeredCount) == [2, 2])
@@ -205,7 +205,7 @@ struct RunnerProvisionerTests {
         let metadata = directory.appending(path: ".runner")
         let malformed = Data(#"{"agentId":"#.utf8)
         try malformed.write(to: metadata)
-        let statuses = await provisioner.reconcile(
+        let statuses = try await provisioner.reconcile(
             repositories: [firstRepository, secondRepository], capacity: 1, token: "access-token"
         )
         #expect(statuses.map(\.registeredCount) == [1, 1])
@@ -229,7 +229,7 @@ struct RunnerProvisionerTests {
         let metadata = directory.appending(path: ".runner")
         let malformed = Data(#"{"agentId":"#.utf8)
         try malformed.write(to: metadata)
-        let statuses = await provisioner.reconcile(
+        let statuses = try await provisioner.reconcile(
             repositories: [firstRepository, secondRepository], capacity: 1, token: "access-token"
         )
         #expect(statuses.map(\.registeredCount) == [0, 1])
@@ -249,7 +249,7 @@ struct RunnerProvisionerTests {
             repository: firstRepository, identifier: 2, name: "existing-second",
             labels: ["self-hosted", "macOS", "ARM64", "m1pro", "xcode-runnerkit", "ci-batch"]
         )
-        _ = await provisioner.reconcile(repositories: [firstRepository, secondRepository], capacity: 3, token: "access-token")
+        _ = try await provisioner.reconcile(repositories: [firstRepository, secondRepository], capacity: 3, token: "access-token")
         let requests = await client.installations
         #expect(requests.count == 4)
         #expect(requests.allSatisfy { $0.labels == ["m1pro", "xcode-runnerkit"] })
@@ -260,7 +260,7 @@ struct RunnerProvisionerTests {
         defer { try? FileManager.default.removeItem(at: root) }
         try await client.addRunner(repository: firstRepository, identifier: 1, name: "busy", busy: true)
         try await client.addRunner(repository: firstRepository, identifier: 2, name: "idle")
-        let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        let statuses = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
         let status = try #require(statuses.first)
         #expect(status.registeredCount == 2)
         #expect(status.excessCount == 1)
@@ -277,7 +277,7 @@ struct RunnerProvisionerTests {
         try await client.addRunner(
             repository: firstRepository, identifier: 2, name: "unmatched-local-id", localIdentifier: 3
         )
-        let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        let statuses = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
         #expect(statuses.first?.registeredCount == 1)
         #expect(await client.installations.count == 1)
     }
@@ -289,7 +289,7 @@ struct RunnerProvisionerTests {
         try await client.addRunner(repository: renamed, identifier: 1, name: "existing-first", localRepository: firstRepository)
         try await client.addRunner(repository: renamed, identifier: 2, name: "existing-second", localRepository: firstRepository)
         await client.resolveRepository(firstRepository.fullName, as: .success(renamed))
-        let statuses = await provisioner.reconcile(repositories: [renamed], capacity: 2, token: "access-token")
+        let statuses = try await provisioner.reconcile(repositories: [renamed], capacity: 2, token: "access-token")
         #expect(statuses.first?.registeredCount == 2)
         #expect(statuses.first?.errorMessage == nil)
         #expect(await client.installations.isEmpty)
@@ -304,7 +304,7 @@ struct RunnerProvisionerTests {
         try await client.addRunner(repository: renamed, identifier: 1, name: "existing", localRepository: firstRepository)
         await client.addRemoteRunner(repository: secondRepository, identifier: 1, name: "existing")
         await client.resolveRepository(firstRepository.fullName, as: .success(renamed))
-        let statuses = await provisioner.reconcile(repositories: [renamed, secondRepository], capacity: 1, token: "access-token")
+        let statuses = try await provisioner.reconcile(repositories: [renamed, secondRepository], capacity: 1, token: "access-token")
         #expect(statuses.map(\.registeredCount) == [1, 1])
         let installed = await client.installations
         #expect(installed.count == 1)
@@ -318,7 +318,7 @@ struct RunnerProvisionerTests {
         let renamed = GitHubRepository(id: firstRepository.id, fullName: "example/Renamed")
         try await client.addRunner(repository: renamed, identifier: 1, name: "existing", localRepository: firstRepository)
         await client.resolveRepository(firstRepository.fullName, as: .failure(URLError(.networkConnectionLost)))
-        let statuses = await provisioner.reconcile(repositories: [renamed], capacity: 1, token: "access-token")
+        let statuses = try await provisioner.reconcile(repositories: [renamed], capacity: 1, token: "access-token")
         #expect(statuses.first?.errorMessage != nil)
         #expect(await client.installations.isEmpty)
         #expect(await client.archiveRequests == 0)
@@ -328,7 +328,7 @@ struct RunnerProvisionerTests {
         let (root, client, provisioner) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
         try await client.addRunner(repository: firstRepository, identifier: 1, name: "individual", individualService: true)
-        let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        let statuses = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
         #expect(statuses.first?.registeredCount == 1)
         #expect(statuses.first?.errorMessage?.contains("individual service") == true)
         #expect(FileManager.default.fileExists(atPath: root.appending(path: "Library/XcodeRunnerKit/runners/individual/.service").path(percentEncoded: false)))
@@ -338,7 +338,7 @@ struct RunnerProvisionerTests {
         let (root, client, provisioner) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
         await client.configureFailure(repository: firstRepository.id)
-        let statuses = await provisioner.reconcile(
+        let statuses = try await provisioner.reconcile(
             repositories: [firstRepository, secondRepository], capacity: 1, token: "access-token"
         )
         #expect(statuses.first?.errorMessage == "Repository access denied.")
@@ -356,8 +356,18 @@ struct RunnerProvisionerTests {
             installation: HostInstallation(homeDirectory: root), installerURL: root.appending(path: "unused.sh"),
             client: await transport.client
         )
-        let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "revoked-token")
-        #expect(statuses.first?.requiresAuthentication == (statusCode == 401))
+        let statuses: [RepositoryRunnerStatus]
+        do {
+            statuses = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "revoked-token")
+            #expect(statusCode != 401)
+        } catch let failure as RunnerProvisioningAuthenticationFailure {
+            #expect(statusCode == 401)
+            guard case .response(status: 401, message: _) = failure.underlyingError else {
+                Issue.record("A rejected token was reported as \(failure.underlyingError).")
+                return
+            }
+            statuses = failure.statuses
+        }
         #expect(statuses.first?.errorMessage?.contains("Rejected credential") == true)
     }
 
@@ -365,7 +375,7 @@ struct RunnerProvisionerTests {
         let (root, client, provisioner) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
         await client.configureFailure(installation: 2)
-        let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 3, token: "access-token")
+        let statuses = try await provisioner.reconcile(repositories: [firstRepository], capacity: 3, token: "access-token")
         #expect(statuses.first?.registeredCount == 1)
         #expect(statuses.first?.errorMessage?.contains("[redacted]") == true)
         #expect(statuses.first?.errorMessage?.contains("short-lived-registration-token") == false)
@@ -376,7 +386,7 @@ struct RunnerProvisionerTests {
         let (root, client, provisioner) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
         await client.configureFailure(installation: 1, afterRegistration: true)
-        let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 2, token: "access-token")
+        let statuses = try await provisioner.reconcile(repositories: [firstRepository], capacity: 2, token: "access-token")
         #expect(statuses.first?.registeredCount == 1)
         #expect(statuses.first?.errorMessage == "Installation failed after registration.")
     }
@@ -386,7 +396,7 @@ struct RunnerProvisionerTests {
         defer { try? FileManager.default.removeItem(at: root) }
         await client.configurePendingFailures(count: 3)
         for _ in 0..<3 {
-            let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+            let statuses = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
             #expect(statuses.first?.errorMessage == "Installation was interrupted.")
         }
         let requests = await client.installations
@@ -400,10 +410,10 @@ struct RunnerProvisionerTests {
         let (root, client, provisioner) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
         await client.configurePendingFailures(count: 1, afterRegistration: true)
-        let first = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        let first = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
         #expect(first.first?.registeredCount == 0)
         #expect(first.first?.errorMessage == "Installation was interrupted.")
-        let retried = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        let retried = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
         #expect(retried.first?.registeredCount == 1)
         #expect(retried.first?.errorMessage == nil)
         let requests = await client.installations
@@ -417,9 +427,9 @@ struct RunnerProvisionerTests {
         let (root, client, provisioner) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
         await client.configurePendingFailures(count: 1, beforeLocalSettings: true)
-        let first = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        let first = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
         #expect(first.first?.errorMessage == "Installation was interrupted.")
-        let retried = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        let retried = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
         #expect(retried.first?.registeredCount == 1)
         #expect(retried.first?.errorMessage == nil)
         let requests = await client.installations
@@ -441,7 +451,7 @@ struct RunnerProvisionerTests {
         await client.addRemoteRunner(
             repository: firstRepository, identifier: 1, name: name, online: state == "online", busy: state == "busy"
         )
-        let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        let statuses = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
         #expect(statuses.first?.errorMessage?.contains("must be offline and idle") == true)
         #expect(await client.installations.isEmpty)
     }
@@ -458,7 +468,7 @@ struct RunnerProvisionerTests {
         if !owner.isEmpty {
             try owner.write(to: directory.appending(path: ".xcode-runner-installation"), atomically: true, encoding: .utf8)
         }
-        let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        let statuses = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
         #expect(statuses.first?.registeredCount == 1)
         #expect(await client.installations.first?.runnerName != name)
         #expect(await client.installations.allSatisfy { !$0.replaceRegistration })
@@ -477,7 +487,7 @@ struct RunnerProvisionerTests {
             to: directory.appending(path: ".xcode-runner-installation"), atomically: true, encoding: .utf8
         )
         let metadata = try Data(contentsOf: directory.appending(path: ".runner"))
-        let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        let statuses = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
         #expect(statuses.first?.errorMessage?.contains("could not be matched") == true)
         #expect(await client.installations.isEmpty)
         #expect(try Data(contentsOf: directory.appending(path: ".runner")) == metadata)
@@ -505,7 +515,7 @@ struct RunnerProvisionerTests {
             installation: installation, installerURL: installer, client: client,
             prepareArchive: { _ in archive }
         )
-        let statuses = await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        let statuses = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
         #expect(try String(contentsOf: root.appending(path: "token-input"), encoding: .utf8) == "short-lived-registration-token")
         #expect(try String(contentsOf: root.appending(path: "repository-id"), encoding: .utf8) == String(firstRepository.id))
         #expect(try String(contentsOf: root.appending(path: "replace-registration"), encoding: .utf8) == "0")
@@ -550,7 +560,7 @@ struct RunnerProvisionerTests {
             installation: installation, installerURL: installer, client: client, prepareArchive: { _ in archive }
         )
         let provisioning = Task {
-            await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+            try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
         }
         defer { provisioning.cancel() }
         let marker = root.appending(path: "child.json")
@@ -569,7 +579,7 @@ struct RunnerProvisionerTests {
         // A surviving child keeps its output pipes open, so provisioning would never finish.
         // Wait for the child first: the suite time limit can cancel this wait, then the deferred kill runs.
         try await waitUntil { !childIsRunning() }
-        _ = await provisioning.value
+        _ = try await provisioning.value
         let descriptor = open(installation.hostRoot.appending(path: "storage.lock").path(percentEncoded: false), O_RDWR)
         defer { if descriptor >= 0 { close(descriptor) } }
         #expect(descriptor >= 0)

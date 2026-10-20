@@ -176,7 +176,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installStatusItem()
-        settings.hostState = "Preparing storage"
+        settings.hostState = .preparingStorage
         for number in [SIGTERM, SIGINT] {
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
@@ -190,7 +190,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 try Task.checkCancellation()
                 environment = installation.environment(for: storage)
                 settings.storageDidBecomeAvailable(storage)
-                settings.hostState = "Running"
+                settings.hostState = .running
                 startRunnerMonitoring()
                 await settings.github.restore()
                 try Task.checkCancellation()
@@ -303,7 +303,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private func beginShutdown() {
         guard !stopping else { return }
         stopping = true
-        settings.hostState = "Stopping"
+        settings.hostState = .stopping
         monitoring?.cancel()
         poolMonitoring?.cancel()
         githubMonitoring?.cancel()

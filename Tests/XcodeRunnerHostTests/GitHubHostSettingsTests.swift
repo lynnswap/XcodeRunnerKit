@@ -411,7 +411,8 @@ struct GitHubHostSettingsTests {
         await model.synchronize()
         #expect(model.account == nil)
         #expect(model.errorMessage?.contains("Sign in") == true)
-        #expect(model.runnerStatuses.first?.requiresAuthentication == true)
+        // The statuses from the rejected run stay visible after the refresh fails.
+        #expect(model.runnerStatuses.first?.errorMessage?.contains("Bad credentials") == true)
     }
 
     @Test(arguments: [true, false])
