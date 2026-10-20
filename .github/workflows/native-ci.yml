@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request replaces its running checks; main keeps every run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 defaults:
   run:
     shell: bash
@@ -25,16 +30,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Start the consumer Simulator
-        run: |
-          xcrun simctl create "XcodeRunnerKit-consumer-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
-            com.apple.CoreSimulator.SimDeviceType.iPhone-17 \
-            com.apple.CoreSimulator.SimRuntime.iOS-27-0 \
-            > "$RUNNER_TEMP/XcodeRunnerKit-consumer-udid"
-          udid=$(cat "$RUNNER_TEMP/XcodeRunnerKit-consumer-udid")
-          echo "CONSUMER_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
-          date -u '+Simulator boot started: %Y-%m-%dT%H:%M:%SZ'
-          xcrun simctl boot "$udid"
       - name: Build the checkout CLI
         run: |
           exec xcodebuild build \
@@ -54,9 +49,18 @@ jobs:
             --compilation-cache "$RUNNER_TEMP/CompilationCache" \
             --output-directory "$RUNNER_TEMP/XcodeRunnerKit-macos" \
             -- -parallel-testing-enabled NO -jobs 3
+      # Booting while the CLI builds slowed the build from about 1 to 9 minutes on this runner.
+      - name: Start the consumer Simulator
+        run: |
+          xcrun simctl create "XcodeRunnerKit-consumer-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            com.apple.CoreSimulator.SimDeviceType.iPhone-17 \
+            com.apple.CoreSimulator.SimRuntime.iOS-27-0 \
+            > "$RUNNER_TEMP/XcodeRunnerKit-consumer-udid"
+          udid=$(cat "$RUNNER_TEMP/XcodeRunnerKit-consumer-udid")
+          echo "CONSUMER_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
+          xcrun simctl bootstatus "$udid" -b
       - name: Test the iOS consumer fixture
         run: |
-          xcrun simctl bootstatus "$CONSUMER_SIMULATOR_UDID" -b
           exec "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner" test \
             --package "$GITHUB_WORKSPACE/Tests/Fixtures/BuildProbe" --scheme BuildProbe \
             --destination "platform=iOS Simulator,id=$CONSUMER_SIMULATOR_UDID" \
