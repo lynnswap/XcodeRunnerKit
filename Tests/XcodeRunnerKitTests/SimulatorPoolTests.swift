@@ -162,17 +162,24 @@ struct SimulatorPoolTests {
         #expect(firstResult.simulatorIdentifier == identifier)
     }
 
-    @Test func cleanupFailureRetiresTheDeviceAndPreservesTheTestFailure() async throws {
+    @Test(arguments: [Int32(0), Int32(7)])
+    func cleanupFailureRetiresTheDeviceAndPreservesTheOperationResult(exitCode: Int32) async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         try Data().write(to: fixture.root.appending(path: "fail-cleanup"))
         let runner = fixture.runner
         do {
-            _ = try await runner.run(.test, request: fixture.request("first", exitCode: 7))
+            _ = try await runner.run(.test, request: fixture.request("first", exitCode: exitCode))
             Issue.record("A Simulator cleanup failure returned successfully.")
-        } catch let failure as SimulatorCleanupFailure {
-            #expect((failure.operationError as? XcodeBuildFailure)?.result.status == .exited(7))
-            #expect(failure.cleanupError.localizedDescription.contains("cleanup-failed"))
+        } catch let failure as XcodeBuildFailure {
+            let result = try #require(failure.result)
+            #expect(result.status == .exited(exitCode))
+            #expect(FileManager.default.fileExists(atPath: result.logURL.path))
+            #expect(failure.cleanupErrors.count == 1)
+            let cleanup = try #require(failure.cleanupErrors.first as? SimulatorCleanupFailure)
+            #expect(cleanup.simulatorIdentifier == result.simulatorIdentifier)
+            #expect(cleanup.simulatorName.hasPrefix("XcodeRunnerKit-Pool-"))
+            #expect(cleanup.underlyingError.localizedDescription.contains("cleanup-failed"))
         }
         let second = try await runner.run(.test, request: fixture.request("second"))
         let calls = try fixture.calls()
@@ -203,7 +210,7 @@ struct SimulatorPoolTests {
             _ = try await first.value
             Issue.record("A cancelled operation returned successfully.")
         } catch let failure as XcodeBuildFailure {
-            #expect(failure.result.status == .cancelled)
+            #expect(failure.result?.status == .cancelled)
         }
         let remainingEntries = try FileManager.default.subpathsOfDirectory(atPath: fixture.poolDirectory.path)
             .filter { URL(filePath: $0).lastPathComponent.hasPrefix("device-") }
@@ -256,7 +263,7 @@ struct SimulatorPoolTests {
 
     private func completedResult(_ runner: XcodeRunner, request: XcodeBuildRequest) async throws -> XcodeBuildResult {
         do { return try await runner.run(.test, request: request) }
-        catch let failure as XcodeBuildFailure { return failure.result }
+        catch let failure as XcodeBuildFailure { return try #require(failure.result) }
     }
 
     private func waitForFile(_ url: URL) async throws {

@@ -156,9 +156,10 @@ Devices in use continue running. Add `--developer-directory` to clean only
 devices registered with a particular Xcode. Swift callers can use
 `try await pool.removeIdleSimulators()` on their `SimulatorPool`.
 The runner disables parallel test workers by default to avoid Xcode creating
-additional device clones. `SimulatorCleanupFailure` preserves the UDID,
-operation outcome, and cleanup errors. Use `pool clean-simulators` to retry
-removing any remaining pooled devices, or `xcrun simctl delete` for a fresh device.
+additional device clones. A failed device cleanup appears in
+`XcodeBuildFailure.cleanupErrors` as a `SimulatorCleanupFailure` with the device's
+UDID and name. Use `pool clean-simulators` to retry removing any remaining pooled
+devices, or `xcrun simctl delete` for a fresh device.
 
 ### Shared execution limit
 
@@ -228,12 +229,21 @@ cache only after its users have stopped.
 
 ## Results and cancellation
 
-Each run creates a directory under `outputDirectory` containing `xcodebuild.log`,
-`Results.xcresult`, and its default `DerivedData`. Early failures may produce no
-result bundle.
+Each run creates a job directory under `outputDirectory` containing
+`xcodebuild.log`, `Results.xcresult`, and its default `DerivedData`.
+`XcodeBuildResult.jobDirectory` names it. Early failures may produce no result
+bundle.
 
-`XcodeBuildFailure.result` contains the exit status and artifact paths.
-`underlyingError` and `cleanupError` preserve execution and cleanup failures.
+`runner.run` throws `XcodeBuildFailure` for every unsuccessful operation.
+Its `result` contains the exit status and artifact paths, and is `nil` only when
+the operation failed before creating its job directory. `underlyingError` keeps
+the error that stopped the operation, and `cleanupErrors` keeps every failure
+from closing the log, cleaning up a Simulator, or releasing host locks. A
+successful status with cleanup errors means only cleanup failed.
+
+The CLI exits with xcodebuild's status, `128 + signal` for a terminated
+process, and 130 after cancellation. It prints the log path for every operation
+that created a job directory, and prints cleanup failures before exiting.
 
 Cancel the calling Swift task, or send the CLI SIGINT/SIGTERM, to terminate the
 process group and clean up an owned Simulator. A forced kill can prevent cleanup,

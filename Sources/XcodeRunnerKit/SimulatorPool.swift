@@ -59,8 +59,8 @@ public struct SimulatorPool: Sendable {
                             }.value
                         } catch {
                             throw SimulatorCleanupFailure(
-                                simulatorIdentifier: record.identifier ?? Self.deviceName(for: recordURL),
-                                operationError: nil, result: nil, cleanupError: error
+                                simulatorIdentifier: record.identifier, simulatorName: Self.deviceName(for: recordURL),
+                                underlyingError: error
                             )
                         }
                     }
@@ -74,65 +74,69 @@ public struct SimulatorPool: Sendable {
         configuration: SimulatorConfiguration,
         developerDirectory: URL,
         tool: SimulatorTool,
-        operation: @Sendable (String, Int32) async throws -> XcodeBuildResult
-    ) async throws -> XcodeBuildResult {
+        operation: @Sendable (String, Int32) async -> XcodeBuildOutcome
+    ) async -> XcodeBuildOutcome {
         let key = Key(
             developerDirectory: developerDirectory.resolvingSymlinksInPath().path(percentEncoded: false),
             runtimeIdentifier: configuration.runtimeIdentifier,
             deviceTypeIdentifier: configuration.deviceTypeIdentifier
         )
-        let lease = try await acquire(key: key)
+        let lease: Lease
+        do { lease = try await acquire(key: key) }
+        catch { return .failure(wrapping: error) }
         let runsTests = action == .test || action == .testWithoutBuilding
-        return try await Self.withHandle(lease.handle) {
-            let execution = try await Self.withHandle(lease.processHandle) {
-                var executionTool = tool
-                executionTool.inheritedLeaseDescriptor = lease.processHandle.fileDescriptor
-                let protectedTool = executionTool
-                // Creation finishes even after cancellation so its identifier can be recorded.
-                let identifier: String
-                do {
-                    identifier = try await Task.detached {
-                        try await Self.prepare(lease, configuration: configuration, tool: protectedTool)
-                    }.value
-                } catch {
-                    return Execution(identifier: nil, outcome: .failure(error))
-                }
-                let outcome: Result<XcodeBuildResult, any Error>
-                do {
-                    try Task.checkCancellation()
-                    if runsTests { try await protectedTool.boot(identifier) }
-                    outcome = .success(try await operation(identifier, lease.processHandle.fileDescriptor))
-                } catch { outcome = .failure(error) }
-                return Execution(identifier: identifier, outcome: outcome)
-            }
+        var cleanupErrors: [any Error] = []
 
-            // A separate open description waits for inherited holders after ours closes.
-            // The parent-only guard prevents another owner from taking this entry meanwhile.
-            let cleanupHandle: FileHandle
-            do { cleanupHandle = try Self.open(Self.processLockURL(for: lease.recordURL)) }
-            catch {
-                throw Self.cleanupFailure(lease, execution: execution, error: error)
+        var executionTool = tool
+        executionTool.inheritedLeaseDescriptor = lease.processHandle.fileDescriptor
+        let protectedTool = executionTool
+        let execution: Execution
+        // Creation finishes even after cancellation so its identifier can be recorded.
+        do {
+            let identifier = try await Task.detached {
+                try await Self.prepare(lease, configuration: configuration, tool: protectedTool)
+            }.value
+            do {
+                try Task.checkCancellation()
+                if runsTests { try await protectedTool.boot(identifier) }
+                execution = Execution(identifier: identifier, outcome: await operation(identifier, lease.processHandle.fileDescriptor))
+            } catch {
+                execution = Execution(identifier: identifier, outcome: .failure(wrapping: error))
             }
-            return try await Self.withHandle(cleanupHandle) {
-                do { try await Task.detached { try await Self.lock(cleanupHandle) }.value }
-                catch { throw Self.cleanupFailure(lease, execution: execution, error: error) }
+        } catch {
+            execution = Execution(identifier: nil, outcome: .failure(wrapping: error))
+        }
+        do { try lease.processHandle.close() } catch { cleanupErrors.append(error) }
+
+        // A separate open description waits for inherited holders after ours closes.
+        // The parent-only guard prevents another owner from taking this entry meanwhile.
+        do {
+            let cleanupHandle = try Self.open(Self.processLockURL(for: lease.recordURL))
+            do {
+                try await Task.detached { try await Self.lock(cleanupHandle) }.value
                 var cleanupTool = tool
                 cleanupTool.inheritedLeaseDescriptor = cleanupHandle.fileDescriptor
-                return try await Self.finish(
-                    lease, execution: execution, runsTests: runsTests, tool: cleanupTool
-                )
+                cleanupErrors += await Self.finish(lease, execution: execution, runsTests: runsTests, tool: cleanupTool)
+            } catch {
+                cleanupErrors.append(Self.cleanupFailure(lease, execution: execution, error: error))
             }
+            do { try cleanupHandle.close() } catch { cleanupErrors.append(error) }
+        } catch {
+            cleanupErrors.append(Self.cleanupFailure(lease, execution: execution, error: error))
         }
+        do { try lease.handle.close() } catch { cleanupErrors.append(error) }
+        return execution.outcome.cancelledIfNeeded().addingCleanupErrors(cleanupErrors)
     }
 
     private struct Execution: Sendable {
         let identifier: String?
-        let outcome: Result<XcodeBuildResult, any Error>
+        let outcome: XcodeBuildOutcome
     }
 
+    /// Returns the device to the pool or retires it, reporting each cleanup failure.
     private static func finish(
         _ lease: Lease, execution: Execution, runsTests: Bool, tool: SimulatorTool
-    ) async throws -> XcodeBuildResult {
+    ) async -> [any Error] {
         let reuse = execution.identifier != nil && !Task.isCancelled && canReuse(after: execution.outcome)
         do {
             if reuse, let identifier = execution.identifier {
@@ -147,42 +151,21 @@ public struct SimulatorPool: Sendable {
                 try saveRecord(Record(identifier: execution.identifier, isReady: false), at: lease.recordURL)
                 try await retire(lease, identifier: execution.identifier, tool: tool)
             }
+            return []
         } catch {
-            var cleanupError = error
+            var errors = [cleanupFailure(lease, execution: execution, error: error)]
             if reuse {
                 do { try await retire(lease, identifier: execution.identifier, tool: tool) }
-                catch {
-                    cleanupError = SimulatorCleanupFailure(
-                        simulatorIdentifier: execution.identifier ?? deviceName(for: lease.recordURL),
-                        operationError: cleanupError, result: nil, cleanupError: error
-                    )
-                }
+                catch { errors.append(cleanupFailure(lease, execution: execution, error: error)) }
             }
-            throw cleanupFailure(lease, execution: execution, error: cleanupError)
+            return errors
         }
-        let result = try execution.outcome.get()
-        if Task.isCancelled {
-            throw XcodeBuildFailure(
-                result: XcodeBuildResult(
-                    status: .cancelled, outputDirectory: result.outputDirectory,
-                    derivedDataDirectory: result.derivedDataDirectory, logURL: result.logURL,
-                    resultBundleURL: result.resultBundleURL, simulatorIdentifier: result.simulatorIdentifier
-                ), underlyingError: CancellationError(), cleanupError: nil
-            )
-        }
-        return result
     }
 
     private static func cleanupFailure(_ lease: Lease, execution: Execution, error: any Error) -> SimulatorCleanupFailure {
-        let operationError: (any Error)?
-        let result: XcodeBuildResult?
-        switch execution.outcome {
-        case .success(let completed): operationError = nil; result = completed
-        case .failure(let failure): operationError = failure; result = nil
-        }
-        return SimulatorCleanupFailure(
-            simulatorIdentifier: execution.identifier ?? lease.record.identifier ?? deviceName(for: lease.recordURL),
-            operationError: operationError, result: result, cleanupError: error
+        SimulatorCleanupFailure(
+            simulatorIdentifier: execution.identifier ?? lease.record.identifier,
+            simulatorName: deviceName(for: lease.recordURL), underlyingError: error
         )
     }
 
@@ -271,15 +254,14 @@ public struct SimulatorPool: Sendable {
         }
     }
 
-    private static func canReuse(after outcome: Result<XcodeBuildResult, any Error>) -> Bool {
+    private static func canReuse(after outcome: XcodeBuildOutcome) -> Bool {
+        let status: XcodeBuildResult.Status?
         switch outcome {
-        case .success(let result):
-            if case .exited = result.status { return true }
-            return false
-        case .failure(let error):
-            if let failure = error as? XcodeBuildFailure, case .exited = failure.result.status { return true }
-            return false
+        case .success(let result): status = result.status
+        case .failure(let failure): status = failure.result?.status
         }
+        if case .exited? = status { return true }
+        return false
     }
 
     private static func recordURLs(in directory: URL) throws -> [URL] {

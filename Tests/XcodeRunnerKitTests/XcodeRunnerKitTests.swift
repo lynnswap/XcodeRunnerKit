@@ -103,8 +103,11 @@ struct XcodeRunnerKitTests {
             _ = try await XcodeRunner(executableURL: executable).run(.test, request: request)
             Issue.record("A failing tool returned successfully.")
         } catch let error as XcodeBuildFailure {
-            #expect(error.result.status == .exited(7))
-            #expect(try String(contentsOf: error.result.logURL, encoding: .utf8).contains("build failure"))
+            let result = try #require(error.result)
+            #expect(result.status == .exited(7))
+            #expect(error.underlyingError == nil)
+            #expect(error.cleanupErrors.isEmpty)
+            #expect(try String(contentsOf: result.logURL, encoding: .utf8).contains("build failure"))
         }
     }
 
@@ -116,9 +119,10 @@ struct XcodeRunnerKitTests {
             _ = try await XcodeRunner(executableURL: root.appending(path: "missing")).run(.build, request: request)
             Issue.record("A missing executable returned successfully.")
         } catch let error as XcodeBuildFailure {
-            #expect(error.result.status == .executionFailed)
+            let result = try #require(error.result)
+            #expect(result.status == .executionFailed)
             #expect(error.underlyingError != nil)
-            #expect(FileManager.default.fileExists(atPath: error.result.logURL.path(percentEncoded: false)))
+            #expect(FileManager.default.fileExists(atPath: result.logURL.path(percentEncoded: false)))
         }
     }
 
@@ -152,7 +156,7 @@ struct XcodeRunnerKitTests {
             _ = try await task.value
             Issue.record("Cancellation returned successfully.")
         } catch let error as XcodeBuildFailure {
-            #expect(error.result.status == .cancelled)
+            #expect(error.result?.status == .cancelled)
         }
         let pool = try #require(configuredRunner.executionPool)
         try await pool.withSlot {}
@@ -212,7 +216,7 @@ struct XcodeRunnerKitTests {
         request.environment["DEVELOPER_DIR"] = root.appending(path: "SelectedXcode").path
         let result: XcodeBuildResult
         do { result = try await runner.run(.test, request: request) }
-        catch let failure as XcodeBuildFailure { result = failure.result }
+        catch let failure as XcodeBuildFailure { result = try #require(failure.result) }
         #expect(result.status == .exited(exitCode))
         #expect(result.simulatorIdentifier == identifier)
         #expect(try String(contentsOf: deleted, encoding: .utf8) == identifier)
@@ -247,9 +251,12 @@ struct XcodeRunnerKitTests {
         do {
             _ = try await runner.run(.testWithoutBuilding, request: request)
             Issue.record("Simulator boot failure returned successfully.")
-        } catch {
+        } catch let failure as XcodeBuildFailure {
+            #expect(failure.result == nil)
+            let error = try #require(failure.underlyingError)
             #expect((error as NSError).domain == "XcodeRunnerKit.simctl")
             #expect(error.localizedDescription.contains("boot-failed"))
+            #expect(failure.cleanupErrors.isEmpty)
         }
         #expect(!FileManager.default.fileExists(atPath: started.path))
         #expect(try String(contentsOf: deleted, encoding: .utf8) == identifier)
@@ -272,10 +279,13 @@ struct XcodeRunnerKitTests {
         do {
             _ = try await runner.run(.test, request: request)
             Issue.record("Cleanup failure returned successfully.")
-        } catch let failure as SimulatorCleanupFailure {
-            #expect(failure.simulatorIdentifier == identifier)
-            #expect((failure.operationError as? XcodeBuildFailure)?.result.status == .exited(7))
-            #expect(failure.cleanupError.localizedDescription.contains("deletion-failed"))
+        } catch let failure as XcodeBuildFailure {
+            #expect(failure.result?.status == .exited(7))
+            #expect(failure.result?.simulatorIdentifier == identifier)
+            #expect(failure.cleanupErrors.count == 1)
+            let cleanup = try #require(failure.cleanupErrors.first as? SimulatorCleanupFailure)
+            #expect(cleanup.simulatorIdentifier == identifier)
+            #expect(cleanup.underlyingError.localizedDescription.contains("deletion-failed"))
         }
     }
 
@@ -306,7 +316,10 @@ struct XcodeRunnerKitTests {
         do {
             _ = try await task.value
             Issue.record("Cancelled Simulator creation returned successfully.")
-        } catch is CancellationError {}
+        } catch let failure as XcodeBuildFailure {
+            #expect(failure.result == nil)
+            #expect(failure.underlyingError is CancellationError)
+        }
         #expect(FileManager.default.fileExists(atPath: deleted.path))
         #expect(!FileManager.default.fileExists(atPath: request.outputDirectory.path))
     }
@@ -359,9 +372,10 @@ struct XcodeRunnerKitTests {
             _ = try await task.value
             Issue.record("Cancellation during Simulator deletion returned successfully.")
         } catch let failure as XcodeBuildFailure {
-            #expect(failure.result.status == (exitCode == 0 ? .cancelled : .exited(exitCode)))
-            #expect(failure.result.simulatorIdentifier == identifier)
-            #expect(try String(contentsOf: failure.result.logURL, encoding: .utf8).contains("completed payload"))
+            let result = try #require(failure.result)
+            #expect(result.status == (exitCode == 0 ? .cancelled : .exited(exitCode)))
+            #expect(result.simulatorIdentifier == identifier)
+            #expect(try String(contentsOf: result.logURL, encoding: .utf8).contains("completed payload"))
         }
         #expect(FileManager.default.fileExists(atPath: deleted.path))
         let pool = try #require(configuredRunner.executionPool)

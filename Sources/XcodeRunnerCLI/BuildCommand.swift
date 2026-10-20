@@ -158,18 +158,29 @@ struct BuildOptions: ParsableArguments {
             let result = try await task.value
             print("Log: \(result.logURL.path(percentEncoded: false))")
             print("Result bundle: \(result.resultBundleURL.path(percentEncoded: false))")
-        } catch is CancellationError {
-            throw ExitCode(130)
         } catch let failure as XcodeBuildFailure {
-            try? FileHandle.standardError.write(contentsOf: Data(("Log: " + failure.result.logURL.path(percentEncoded: false) + "\n").utf8))
-            switch failure.result.status {
-            case .exited(let code) where code != 0: throw ExitCode(code)
-            case .exited: throw failure
-            case .terminated(let number): throw ExitCode(128 + number)
-            case .cancelled: throw ExitCode(130)
-            case .executionFailed: throw failure
+            if let result = failure.result {
+                Self.writeError("Log: " + result.logURL.path(percentEncoded: false))
             }
+            let exitCode: Int32
+            switch failure.result?.status {
+            case .exited(let code)? where code != 0: exitCode = code
+            case .terminated(let number)?: exitCode = 128 + number
+            case .cancelled?: exitCode = 130
+            case .exited?, .executionFailed?, nil:
+                guard failure.underlyingError is CancellationError else { throw failure }
+                exitCode = 130
+            }
+            // An exit code alone would hide cleanup failures that need attention.
+            if !failure.cleanupErrors.isEmpty {
+                Self.writeError("Error: " + failure.localizedDescription)
+            }
+            throw ExitCode(exitCode)
         }
+    }
+
+    private static func writeError(_ line: String) {
+        try? FileHandle.standardError.write(contentsOf: Data((line + "\n").utf8))
     }
 
     private static func url(_ path: String) -> URL {

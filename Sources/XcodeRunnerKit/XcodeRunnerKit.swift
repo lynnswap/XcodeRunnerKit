@@ -79,7 +79,8 @@ public struct XcodeBuildResult: Sendable {
     }
 
     public let status: Status
-    public let outputDirectory: URL
+    /// The operation's uniquely named directory inside the request's outputDirectory.
+    public let jobDirectory: URL
     public let derivedDataDirectory: URL
     public let logURL: URL
     /// The requested result-bundle location. Early failures may leave no bundle.
@@ -88,24 +89,82 @@ public struct XcodeBuildResult: Sendable {
     public let simulatorIdentifier: String?
 
     public var succeeded: Bool { status == .exited(0) }
+
+    func with(status: Status) -> Self {
+        Self(
+            status: status, jobDirectory: jobDirectory, derivedDataDirectory: derivedDataDirectory,
+            logURL: logURL, resultBundleURL: resultBundleURL, simulatorIdentifier: simulatorIdentifier
+        )
+    }
 }
 
-/// An unsuccessful operation, including any execution and log-cleanup failures.
+/// An unsuccessful Xcode operation.
+///
+/// XcodeRunner.run reports every failure with this type, including cancellation,
+/// failures before xcodebuild starts, and cleanup failures after it exits.
 public struct XcodeBuildFailure: Error, LocalizedError {
-    public let result: XcodeBuildResult
+    /// The job's termination state and artifact locations.
+    ///
+    /// Nil when the operation failed before creating its job directory. A
+    /// successful status means only cleanup failed.
+    public let result: XcodeBuildResult?
+    /// The error that stopped the operation. A nonzero exit has no underlying error.
     public let underlyingError: (any Error)?
-    public let cleanupError: (any Error)?
+    /// Failures closing the log, cleaning up or deleting a Simulator, or
+    /// releasing host locks after the operation, in the order they occurred.
+    public let cleanupErrors: [any Error]
+
+    init(result: XcodeBuildResult? = nil, underlyingError: (any Error)? = nil, cleanupErrors: [any Error] = []) {
+        self.result = result
+        self.underlyingError = underlyingError
+        self.cleanupErrors = cleanupErrors
+    }
 
     public var errorDescription: String? {
-        let message: String
-        switch result.status {
-        case .exited(0): message = "Closing the Xcode log failed."
-        case .exited(let code): message = "xcodebuild exited with status \(code)."
-        case .terminated(let signal): message = "xcodebuild terminated with signal \(signal)."
-        case .cancelled: message = "The Xcode operation was cancelled."
-        case .executionFailed: message = "The Xcode operation failed before completion."
+        var messages: [String] = []
+        switch result?.status {
+        case .exited(0)?: messages.append("The Xcode operation completed, but its cleanup failed.")
+        case .exited(let code)?: messages.append("xcodebuild exited with status \(code).")
+        case .terminated(let signal)?: messages.append("xcodebuild terminated with signal \(signal).")
+        case .cancelled?: messages.append("The Xcode operation was cancelled.")
+        case .executionFailed?, nil:
+            messages.append(underlyingError is CancellationError
+                ? "The Xcode operation was cancelled."
+                : "The Xcode operation failed before completion.")
         }
-        return [message, underlyingError?.localizedDescription, cleanupError?.localizedDescription]
-            .compactMap { $0 }.joined(separator: " ")
+        if let underlyingError, !(underlyingError is CancellationError) {
+            messages.append(underlyingError.localizedDescription)
+        }
+        messages += cleanupErrors.map { "Cleanup failed: " + $0.localizedDescription }
+        return messages.joined(separator: " ")
+    }
+}
+
+/// An operation's result, or a failure carrying everything known about it.
+typealias XcodeBuildOutcome = Result<XcodeBuildResult, XcodeBuildFailure>
+
+extension Result where Success == XcodeBuildResult, Failure == XcodeBuildFailure {
+    static func failure(wrapping error: any Error) -> Self {
+        .failure(error as? XcodeBuildFailure ?? XcodeBuildFailure(underlyingError: error))
+    }
+
+    /// Keeps the operation's result and status while recording later cleanup failures.
+    func addingCleanupErrors(_ errors: [any Error]) -> Self {
+        guard !errors.isEmpty else { return self }
+        switch self {
+        case .success(let result):
+            return .failure(XcodeBuildFailure(result: result, cleanupErrors: errors))
+        case .failure(let failure):
+            return .failure(XcodeBuildFailure(
+                result: failure.result, underlyingError: failure.underlyingError,
+                cleanupErrors: failure.cleanupErrors + errors
+            ))
+        }
+    }
+
+    /// Reports a completed operation as cancelled when its caller was cancelled during cleanup.
+    func cancelledIfNeeded() -> Self {
+        guard Task.isCancelled, case .success(let result) = self else { return self }
+        return .failure(XcodeBuildFailure(result: result.with(status: .cancelled), underlyingError: CancellationError()))
     }
 }

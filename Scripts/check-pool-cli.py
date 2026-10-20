@@ -236,7 +236,25 @@ exec "$(xcrun --find clang)" "$@"
             assert "Log: " in result.stdout and "Result bundle: " in result.stdout
             if action in ("test", "test-without-building"):
                 assert "BuildProbe payload ready" in result.stdout
-        print("PASS: CLI status/configure, live shrink, priority admission and counts, invalid input, existing Xcode actions")
+
+        # xcrun and xcodebuild follow DEVELOPER_DIR, so a fake Xcode can fail Simulator deletion.
+        fake_tools = root / "FakeXcode.app/Contents/Developer/usr/bin"
+        fake_tools.mkdir(parents=True)
+        for name, body in {
+            "xcrun": 'tool="$1"; shift; exec "$(dirname "$0")/$tool" "$@"',
+            "xcodebuild": "echo fake-test-failure; exit 65",
+            "simctl": 'case "$1" in create) echo 11111111-2222-3333-4444-555555555555;;'
+                      ' delete) echo fake-deletion-failed >&2; exit 9;; esac',
+        }.items():
+            (fake_tools / name).write_text("#!/bin/sh\n" + body + "\n")
+            (fake_tools / name).chmod(0o755)
+        result = command("test", "--package", package, "--scheme", "BuildProbe",
+                         "--simulator-runtime", "runtime", "--simulator-device-type", "device",
+                         "--fresh-simulator", "--developer-directory", fake_tools.parents[1],
+                         "--output-directory", root / "CleanupFailureOutput", success=False)
+        assert result.returncode == 65, (result.returncode, result.stdout, result.stderr)
+        assert "Log: " in result.stderr and "fake-deletion-failed" in result.stderr, result.stderr
+        print("PASS: CLI status/configure, live shrink, priority admission and counts, invalid input, existing Xcode actions, cleanup failure exit status")
 
 
 if __name__ == "__main__":
