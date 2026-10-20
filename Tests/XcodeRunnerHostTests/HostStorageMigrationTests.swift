@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import XcodeRunnerKit
+@testable import XcodeRunnerHostSupport
 
 struct HostStorageMigrationTests {
     private func fixture() throws -> (root: URL, installation: HostInstallation, storage: HostInstallation.Storage) {

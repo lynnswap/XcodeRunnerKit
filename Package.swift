@@ -19,15 +19,23 @@ let package = Package(
             dependencies: [.product(name: "Subprocess", package: "swift-subprocess")],
             swiftSettings: [.swiftLanguageMode(.v6), .defaultIsolation(nil)]
         ),
+        // Host installation layout and storage, shared by the CLI and the host app but not the library product.
+        .target(
+            name: "XcodeRunnerHostSupport",
+            swiftSettings: [.swiftLanguageMode(.v6), .defaultIsolation(nil)]
+        ),
         .executableTarget(
             name: "XcodeRunnerCLI",
-            dependencies: ["XcodeRunnerKit", .product(name: "ArgumentParser", package: "swift-argument-parser")],
+            dependencies: [
+                "XcodeRunnerKit", "XcodeRunnerHostSupport",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
             swiftSettings: [.swiftLanguageMode(.v6), .defaultIsolation(nil)]
         ),
         .executableTarget(
             name: "XcodeRunnerHost",
             dependencies: [
-                "XcodeRunnerKit",
+                "XcodeRunnerKit", "XcodeRunnerHostSupport",
                 .product(name: "Subprocess", package: "swift-subprocess"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
@@ -40,7 +48,7 @@ let package = Package(
         ),
         .testTarget(
             name: "XcodeRunnerHostTests",
-            dependencies: ["XcodeRunnerHost"],
+            dependencies: ["XcodeRunnerHost", "XcodeRunnerHostSupport"],
             swiftSettings: [.swiftLanguageMode(.v6), .defaultIsolation(nil)]
         ),
     ]

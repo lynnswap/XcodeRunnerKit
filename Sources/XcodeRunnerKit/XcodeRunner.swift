@@ -14,7 +14,6 @@ public struct XcodeRunner: Sendable {
     /// A shared Simulator pool. When nil, runs use executionPool.simulatorPool,
     /// or SimulatorPool.defaultDirectory when no execution pool is configured.
     public var simulatorPool: SimulatorPool?
-    package var hostStorage: HostInstallation.Storage?
     private let executableURL: URL
     private var simulatorExecutableURL = URL(filePath: "/usr/bin/xcrun")
 
@@ -146,17 +145,10 @@ public struct XcodeRunner: Sendable {
         let derived = request.derivedDataDirectory ?? directory.appending(path: "DerivedData", directoryHint: .isDirectory)
         let logURL = directory.appending(path: "xcodebuild.log")
         let bundleURL = directory.appending(path: "Results.xcresult")
-        let managedOutput = hostStorage.flatMap { request.outputDirectory.path == $0.buildDirectory.path ? $0 : nil }
-        let managedCache = hostStorage.flatMap { request.compilationCache?.directory.path == $0.compilationCacheDirectory.path ? $0 : nil }
         do {
             try Task.checkCancellation()
-            if let storage = managedOutput ?? managedCache { try storage.requireAvailableParent() }
-            if let managedOutput {
-                try managedOutput.createBuildDirectory()
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-            } else {
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            }
+            try Self.createDirectory(request.outputDirectory, ifMissing: true)
+            try Self.createDirectory(directory, ifMissing: false)
         } catch {
             return .failure(wrapping: error)
         }
@@ -181,14 +173,8 @@ public struct XcodeRunner: Sendable {
             var commandSource = request.source
             var commandDerivedData = derived
             if let cache = request.compilationCache {
-                if let managedCache {
-                    try managedCache.createCompilationCacheDirectory()
-                } else {
-                    try FileManager.default.createDirectory(at: cache.directory, withIntermediateDirectories: true)
-                }
-                try FileManager.default.createDirectory(
-                    at: derived, withIntermediateDirectories: managedOutput == nil || request.derivedDataDirectory != nil
-                )
+                try Self.createDirectory(cache.directory, ifMissing: true)
+                try FileManager.default.createDirectory(at: derived, withIntermediateDirectories: request.derivedDataDirectory != nil)
                 commandSource = try request.source.canonicalized()
                 commandDerivedData = try derived.compilerCanonicalURL()
                 buildSettings = cache.buildSettings(sourceDirectory: commandSource.workingDirectory, derivedDataDirectory: commandDerivedData)
@@ -253,5 +239,17 @@ public struct XcodeRunner: Sendable {
             return .failure(XcodeBuildFailure(result: result, underlyingError: executionError, cleanupErrors: cleanupErrors))
         }
         return XcodeBuildOutcome.success(result).addingCleanupErrors(cleanupErrors)
+    }
+
+    /// Creates a user-only directory without creating missing ancestors.
+    ///
+    /// Running at execution time, after any wait for a pool slot, this fails the
+    /// operation when a removable volume holding the parent has gone, instead of
+    /// recreating its folders on the startup volume.
+    private static func createDirectory(_ url: URL, ifMissing: Bool) throws {
+        guard mkdir(url.path(percentEncoded: false), 0o700) != 0 else { return }
+        let code = errno
+        if ifMissing && code == EEXIST { return }
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [NSURLErrorKey: url])
     }
 }

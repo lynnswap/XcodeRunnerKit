@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import XcodeRunnerHostSupport
 import XcodeRunnerKit
 
 struct Host: AsyncParsableCommand {

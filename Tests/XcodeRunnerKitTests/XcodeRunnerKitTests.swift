@@ -127,6 +127,30 @@ struct XcodeRunnerKitTests {
         }
     }
 
+    @Test(arguments: [false, true])
+    func missingParentFailsWithoutCreatingFolders(cacheOnly: Bool) async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        // A storage folder on an unmounted volume looks like a missing parent.
+        let unavailable = root.appending(path: "Unmounted volume")
+        let marker = root.appending(path: "unexpected-payload")
+        let executable = try script("touch \(marker.path)", at: root)
+        var request = XcodeBuildRequest(
+            source: .package(root), scheme: "Probe",
+            outputDirectory: cacheOnly ? root.appending(path: "output") : unavailable.appending(path: "Build")
+        )
+        if cacheOnly { request.compilationCache = CompilationCache(directory: unavailable.appending(path: "CompilationCache")) }
+        do {
+            _ = try await XcodeRunner(executableURL: executable).run(.build, request: request)
+            Issue.record("A missing storage folder returned successfully.")
+        } catch let failure as XcodeBuildFailure {
+            #expect(failure.underlyingError != nil)
+        }
+        #expect(!FileManager.default.fileExists(atPath: unavailable.path))
+        #expect(!FileManager.default.fileExists(atPath: marker.path))
+    }
+
     @Test func cancellationTerminatesTheProcessGroup() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

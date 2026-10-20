@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Subprocess
+import XcodeRunnerHostSupport
 import XcodeRunnerKit
 
 struct RepositoryRunnerStatus: Sendable, Identifiable {

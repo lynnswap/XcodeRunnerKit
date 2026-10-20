@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Testing
+import XcodeRunnerHostSupport
 import XcodeRunnerKit
 @testable import XcodeRunnerHost
 

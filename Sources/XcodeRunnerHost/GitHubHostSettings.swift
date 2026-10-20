@@ -2,6 +2,7 @@ import AppKit
 import CryptoKit
 import Foundation
 import Observation
+import XcodeRunnerHostSupport
 import XcodeRunnerKit
 
 struct GitHubHostConfiguration: Codable, Equatable {
