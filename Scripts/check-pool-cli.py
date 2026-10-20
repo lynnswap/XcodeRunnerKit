@@ -204,6 +204,11 @@ exec "$(xcrun --find clang)" "$@"
         result = command("build", "--package", root / "Missing", "--scheme", "Fixture",
                          "--pool-directory", root / "Unconfigured pool", success=False)
         assert "has no maximum concurrent job count" in result.stderr, result.stderr
+        # An invalid initial limit fails the same way whether or not the pool already has a saved limit.
+        for directory in (root / "Unconfigured pool", pool):
+            result = command("build", "--package", root / "Missing", "--scheme", "Fixture",
+                             "--pool-directory", directory, "--maximum-concurrent-jobs", "0", success=False)
+            assert "must be positive" in result.stderr, result.stderr
         assert not (root / "Unconfigured pool/capacity").exists()
         for action in ACTIONS:
             help_text = command(action, "--help").stdout

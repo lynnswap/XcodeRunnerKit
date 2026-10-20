@@ -10,8 +10,9 @@ public struct HostExecutionPool: Sendable {
     public let directory: URL
     /// The limit saved by the first slot acquisition in an unconfigured pool.
     ///
-    /// A configured pool keeps its saved limit. When this is nil, acquiring a
-    /// slot in an unconfigured pool throws ConfigurationError.notConfigured.
+    /// A configured pool keeps its saved limit. Acquiring a slot rejects a
+    /// nonpositive value whether or not the pool is configured. When this is
+    /// nil, acquiring a slot in an unconfigured pool throws ConfigurationError.notConfigured.
     public var initialMaximumConcurrentJobs: Int?
 
     /// Refers to a pool directory without reading or configuring it.
@@ -199,9 +200,13 @@ public struct HostExecutionPool: Sendable {
         let coordinator = try Self.open(directory.appending(path: "pool.lock"))
         return try await Self.withHandle(coordinator) {
             try await Self.lock(coordinator)
+            // Reject an invalid value even when the saved limit makes it unused, so callers do not
+            // depend on whether another process created the pool first.
+            if let initialMaximumConcurrentJobs, initialMaximumConcurrentJobs <= 0 {
+                throw ConfigurationError.invalidMaximumConcurrentJobs
+            }
             if try savedCapacity() == nil {
                 guard let initialMaximumConcurrentJobs else { throw ConfigurationError.notConfigured(directory: directory) }
-                guard initialMaximumConcurrentJobs > 0 else { throw ConfigurationError.invalidMaximumConcurrentJobs }
                 try saveCapacity(initialMaximumConcurrentJobs)
             }
             let previousSequence = try inspectWaiters().map(\.sequence).max() ?? -1
