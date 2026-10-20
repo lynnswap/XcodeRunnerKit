@@ -127,7 +127,7 @@ def main():
 
         def used_identifier(name):
             build_log, = (root / name / "output").glob("*/xcodebuild.log")
-            match = re.search(r"platform=iOS Simulator,id=([0-9A-Fa-f-]{36})", build_log.read_text())
+            match = re.search(r"-destination \"?id=([0-9A-Fa-f-]{36})", build_log.read_text())
             assert match, (name, "No Simulator destination in xcodebuild log")
             return match[1].upper()
 

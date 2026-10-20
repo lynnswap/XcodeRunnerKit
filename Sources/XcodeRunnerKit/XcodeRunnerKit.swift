@@ -38,19 +38,25 @@ public enum XcodeBuildAction: String, Sendable, CaseIterable {
     case testWithoutBuilding = "test-without-building"
 }
 
+/// Where xcodebuild runs an operation.
+public enum XcodeBuildDestination: Sendable {
+    /// An xcodebuild destination specifier, such as `platform=macOS,arch=arm64`.
+    case specifier(String)
+    /// A Simulator that the runner leases from its pool, or creates and deletes
+    /// for this operation when `reusesDevice` is false.
+    case managedSimulator(SimulatorConfiguration)
+}
+
 /// The inputs and output locations for an Xcode operation.
 public struct XcodeBuildRequest: Sendable {
     public var source: XcodeBuildSource
     public var scheme: String
-    public var destination: String
+    public var destination: XcodeBuildDestination
     /// The parent directory for a new, uniquely named job directory.
     public var outputDirectory: URL
     /// An existing or reusable DerivedData location. Defaults to the job directory.
     public var derivedDataDirectory: URL?
     public var compilationCache: CompilationCache?
-    /// Exclusively leases a Simulator and overrides destination with its UDID.
-    /// Set reusesDevice to false to create and delete a fresh device for this operation.
-    public var simulator: SimulatorConfiguration?
     public var environment: [String: String] = [:]
     public var buildSettings: [String: String] = [:]
     /// Additional xcodebuild arguments, including test filters and plugin options.
@@ -59,7 +65,7 @@ public struct XcodeBuildRequest: Sendable {
     public init(
         source: XcodeBuildSource,
         scheme: String,
-        destination: String = "platform=macOS",
+        destination: XcodeBuildDestination = .specifier("platform=macOS"),
         outputDirectory: URL
     ) {
         self.source = source

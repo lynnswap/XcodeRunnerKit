@@ -199,8 +199,7 @@ struct XcodeRunnerKitTests {
         var runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
         runner.executionPool = Self.pool(at: root, initialMaximumConcurrentJobs: 1)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
-        request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
-        request.simulator?.reusesDevice = false
+        request.destination = .managedSimulator(Self.freshSimulator)
         request.arguments = ["-parallel-testing-enabled", "NO"]
         request.environment["DEVELOPER_DIR"] = root.appending(path: "SelectedXcode").path
         let result: XcodeBuildResult
@@ -210,7 +209,7 @@ struct XcodeRunnerKitTests {
         #expect(result.simulatorIdentifier == identifier)
         #expect(try String(contentsOf: deleted, encoding: .utf8) == identifier)
         let log = try String(contentsOf: result.logURL, encoding: .utf8)
-        #expect(log.contains("platform=iOS Simulator,id=" + identifier))
+        #expect(log.contains("-destination\nid=\(identifier)\n"))
         #expect(log.components(separatedBy: "-parallel-testing-enabled").count == 2)
         #expect(try String(contentsOf: selectedXcode, encoding: .utf8) == request.environment["DEVELOPER_DIR"])
     }
@@ -235,8 +234,7 @@ struct XcodeRunnerKitTests {
         let executable = try script("touch \(started.path)", at: root)
         let runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
-        request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
-        request.simulator?.reusesDevice = false
+        request.destination = .managedSimulator(Self.freshSimulator)
         do {
             _ = try await runner.run(.testWithoutBuilding, request: request)
             Issue.record("Simulator boot failure returned successfully.")
@@ -263,8 +261,7 @@ struct XcodeRunnerKitTests {
         let executable = try script("exit 7", at: root)
         let runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root)
-        request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
-        request.simulator?.reusesDevice = false
+        request.destination = .managedSimulator(Self.freshSimulator)
         do {
             _ = try await runner.run(.test, request: request)
             Issue.record("Cleanup failure returned successfully.")
@@ -291,8 +288,7 @@ struct XcodeRunnerKitTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: simulator.path)
         let runner = XcodeRunner(executableURL: root.appending(path: "must-not-start"), simulatorExecutableURL: simulator)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
-        request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
-        request.simulator?.reusesDevice = false
+        request.destination = .managedSimulator(Self.freshSimulator)
         let configured = request
         let task = Task { try await runner.run(.test, request: configured) }
         defer { task.cancel() }
@@ -334,8 +330,7 @@ struct XcodeRunnerKitTests {
         var runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
         runner.executionPool = Self.pool(at: root, initialMaximumConcurrentJobs: 1)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
-        request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
-        request.simulator?.reusesDevice = false
+        request.destination = .managedSimulator(Self.freshSimulator)
         let configuredRunner = runner
         let configuredRequest = request
         let task = Task { try await configuredRunner.run(.test, request: configuredRequest) }
@@ -358,6 +353,12 @@ struct XcodeRunnerKitTests {
         #expect(FileManager.default.fileExists(atPath: deleted.path))
         let pool = try #require(configuredRunner.executionPool)
         try await pool.withSlot {}
+    }
+
+    private static var freshSimulator: SimulatorConfiguration {
+        var configuration = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
+        configuration.reusesDevice = false
+        return configuration
     }
 
     private static func pool(at root: URL, initialMaximumConcurrentJobs: Int) -> HostExecutionPool {

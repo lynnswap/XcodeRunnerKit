@@ -233,6 +233,11 @@ exec "$(xcrun --find clang)" "$@"
                              "--", "-parallel-testing-enabled", "NO", "-jobs", "2",
                              success=False)
             assert "Specify both --simulator-runtime and --simulator-device-type." in result.stderr
+            result = command(action, "--package", root / "Missing", "--scheme", "Fixture",
+                             "--destination", "platform=macOS,arch=arm64",
+                             "--simulator-runtime", "runtime", "--simulator-device-type", "device",
+                             success=False)
+            assert "Specify either --destination or the Simulator options, not both." in result.stderr
 
         for source_option in ("--workspace", "--project"):
             result = command("test", source_option, package, "--package", package,

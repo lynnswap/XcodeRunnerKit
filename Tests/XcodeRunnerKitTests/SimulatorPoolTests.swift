@@ -360,7 +360,7 @@ struct SimulatorPoolTests {
 
         func request(_ name: String, exitCode: Int32 = 0) -> XcodeBuildRequest {
             var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
-            request.simulator = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
+            request.destination = .managedSimulator(SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device"))
             request.environment = [
                 "FIXTURE_ROOT": root.path,
                 "STARTED_PATH": root.appending(path: "started-" + name).path,

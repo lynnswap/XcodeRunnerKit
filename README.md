@@ -33,7 +33,7 @@ import XcodeRunnerKit
 var request = XcodeBuildRequest(
     source: .workspace(URL(filePath: "/path/to/App.xcworkspace")),
     scheme: "App",
-    destination: "platform=macOS,arch=arm64",
+    destination: .specifier("platform=macOS,arch=arm64"),
     outputDirectory: URL(filePath: "/path/to/CIOutput")
 )
 request.arguments = ["-parallel-testing-enabled", "NO", "-jobs", "4"]
@@ -115,8 +115,10 @@ xcode-runner test --workspace /path/to/App.xcworkspace --scheme App \
 ```
 
 Find installed runtimes and their supported device types with
-`xcrun simctl list runtimes --json`. In Swift, set
-`request.simulator = SimulatorConfiguration(runtimeIdentifier:deviceTypeIdentifier:)`.
+`xcrun simctl list runtimes --json`. `--destination` cannot be combined with
+these options. In Swift, set
+`request.destination = .managedSimulator(SimulatorConfiguration(runtimeIdentifier:deviceTypeIdentifier:))`.
+The runner passes the managed device to xcodebuild as `id=<UDID>`.
 
 The runner leases a device exclusively for each operation. Devices are shared
 only when their runtime, device type, and selected Xcode match. Test operations
@@ -131,7 +133,8 @@ lease different devices while those subprocesses finish.
 Cleanup removes installed user apps and resets keychain, privacy permissions,
 location simulation, and status bar overrides. Tests that change system app
 data or other device settings should use a fresh device: add
-`--fresh-simulator`, or set `request.simulator?.reusesDevice = false` in Swift.
+`--fresh-simulator`, or set `reusesDevice = false` on the `SimulatorConfiguration`
+in Swift.
 A fresh device is deleted after the operation, including on failure or managed
 cancellation.
 
