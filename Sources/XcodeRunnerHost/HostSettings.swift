@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import SwiftUI
+import XcodeRunnerHostSupport
 import XcodeRunnerKit
 
 enum RunnerServiceState: String, Sendable {

@@ -1,6 +1,18 @@
 import Darwin
 import Foundation
 
+extension URL {
+    /// The physical path the compiler sees. Storage records keep this form so that
+    /// compilation cache prefix mappings match paths under the job-data folder.
+    func compilerCanonicalURL() throws -> URL {
+        // resolvingSymlinksInPath removes /private, unlike compiler filesystem paths.
+        guard let path = try resourceValues(forKeys: [.canonicalPathKey]).canonicalPath else {
+            throw CocoaError(.fileReadUnknown, userInfo: [NSURLErrorKey: self])
+        }
+        return URL(filePath: path)
+    }
+}
+
 package struct HostInstallation: Sendable {
     package let homeDirectory: URL
 
@@ -83,9 +95,6 @@ package struct HostInstallation: Sendable {
                 throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTDIR), userInfo: [NSURLErrorKey: directory])
             }
         }
-
-        package func createBuildDirectory() throws { try createManagedDirectory(buildDirectory) }
-        package func createCompilationCacheDirectory() throws { try createManagedDirectory(compilationCacheDirectory) }
 
         private func createManagedDirectory(_ location: URL) throws {
             if mkdir(location.path(percentEncoded: false), 0o700) != 0, errno != EEXIST {

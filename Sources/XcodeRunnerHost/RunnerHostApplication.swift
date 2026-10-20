@@ -4,6 +4,7 @@ import Darwin
 import Foundation
 import Subprocess
 import SwiftUI
+import XcodeRunnerHostSupport
 import XcodeRunnerKit
 
 struct HostOptions: ParsableCommand {

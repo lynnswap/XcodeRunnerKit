@@ -11,8 +11,14 @@ import Foundation
 public struct SimulatorPool: Sendable {
     public let directory: URL
 
+    /// The registry XcodeRunner uses when no execution pool is configured.
+    ///
+    /// It is the registry of the installed host's pool, so devices created by
+    /// earlier versions remain in use.
     public static var defaultDirectory: URL {
-        HostExecutionPool(directory: HostInstallation().poolDirectory).simulatorPoolDirectory
+        let home = ProcessInfo.processInfo.environment["HOME"].map { URL(filePath: $0) } ?? .homeDirectory
+        let pool = home.appending(path: "Library/Application Support/XcodeRunnerKit/Pool")
+        return HostExecutionPool(directory: pool).simulatorPoolDirectory
     }
 
     public init(directory: URL = Self.defaultDirectory) {

@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import XcodeRunnerKit
+@testable import XcodeRunnerHostSupport
 
 struct HostInstallationTests {
     @Test func buildServiceConfigurationPreservesAnExecutableAliasAndCanBeCleared() throws {

@@ -2,6 +2,7 @@ import ArgumentParser
 import Darwin
 import Dispatch
 import Foundation
+import XcodeRunnerHostSupport
 import XcodeRunnerKit
 
 protocol BuildActionCommand: AsyncParsableCommand {
@@ -118,7 +119,6 @@ struct BuildOptions: ParsableArguments {
         request.arguments = additionalArguments
         var runner = XcodeRunner(developerDirectory: developerDirectory.map(Self.url))
         runner.buildServiceExecutableURL = buildServicePath.map(Self.url) ?? host?.buildServiceExecutableURL
-        runner.hostStorage = host?.storage
         if let poolDirectory {
             var pool = HostExecutionPool(directory: Self.url(poolDirectory))
             pool.initialMaximumConcurrentJobs = maximumConcurrentJobs

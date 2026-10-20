@@ -237,7 +237,10 @@ cache only after its users have stopped.
 ## Results and cancellation
 
 Each run creates a job directory under `outputDirectory` containing
-`xcodebuild.log`, `Results.xcresult`, and its default `DerivedData`.
+`xcodebuild.log`, `Results.xcresult`, and its default `DerivedData`. The run
+creates `outputDirectory` and the compilation cache directory when they are
+missing, but not their parent folders, so a job fails instead of writing to the
+startup volume when removable storage is not mounted.
 `XcodeBuildResult.jobDirectory` names it. Early failures may produce no result
 bundle.
 

@@ -53,6 +53,8 @@ public struct XcodeBuildRequest: Sendable {
     public var scheme: String
     public var destination: XcodeBuildDestination
     /// The parent directory for a new, uniquely named job directory.
+    ///
+    /// The run creates this directory when it is missing, but not its ancestors.
     public var outputDirectory: URL
     /// An existing or reusable DerivedData location. Defaults to the job directory.
     public var derivedDataDirectory: URL?
