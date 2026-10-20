@@ -10,10 +10,11 @@ on:
 permissions:
   contents: read
 
-# A new push to a pull request replaces its running checks; main keeps every run.
+# A new push to a pull request replaces its running checks. Other runs get
+# their own group, so no main commit loses its run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
 
 defaults:
   run:
