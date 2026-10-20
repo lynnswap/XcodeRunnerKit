@@ -18,7 +18,11 @@ cli = Path(executable).with_name('xcode-runner')
 scripts = Path(__file__).resolve().parent
 
 
-def wait_for(predicate, description, seconds=15):
+# Steps wait for the state they need. This limit only reports a process that hangs.
+HANG_LIMIT = 120
+
+
+def wait_for(predicate, description, seconds=HANG_LIMIT):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if predicate():
@@ -35,12 +39,39 @@ def alive(pid):
         return False
 
 
+class HostOutput:
+    """Starts the host on a pseudo-terminal so its messages stay line-buffered and observable."""
+
+    def __init__(self, arguments, log, **options):
+        self.master, slave = pty.openpty()
+        os.set_blocking(self.master, False)
+        try:
+            self.process = subprocess.Popen(arguments, stdout=slave, stderr=slave, **options)
+        finally:
+            os.close(slave)
+        self.log = log
+        self.output = bytearray()
+
+    def contains(self, message):
+        try:
+            chunk = os.read(self.master, 65536)
+        except (BlockingIOError, OSError):
+            chunk = b''
+        self.output.extend(chunk)
+        self.log.write(chunk)
+        self.log.flush()
+        return message.encode() in self.output
+
+    def close(self):
+        os.close(self.master)
+
+
 def stop_host(host, runners):
     if host.poll() is not None:
         return
     host.send_signal(signal.SIGTERM)
     try:
-        host.wait(timeout=45)
+        host.wait(timeout=HANG_LIMIT)
     except subprocess.TimeoutExpired:
         host.kill()
         host.wait()
@@ -112,7 +143,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
             assert first_environment['storage'] == str((host_root/'Storage').resolve())
             assert Path(first_environment['hostRoot']).resolve() == host_root.resolve()
             assert not (excluded/'pid.json').exists()
-            duplicate = subprocess.run(arguments, capture_output=True, timeout=10)
+            duplicate = subprocess.run(arguments, capture_output=True, timeout=HANG_LIMIT)
             assert duplicate.returncode != 0 and b'Another runner host' in duplicate.stderr
             second = fixture(runners, 'second')
             wait_for(lambda:(second/'pid.json').exists(), 'New runner was not discovered')
@@ -141,7 +172,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
                                              env=environment, stdout=log,stderr=log)
                 wait_for(lambda:(legacy/'stopping').exists(), 'Individual service did not start shutdown')
                 assert alive(legacy_pid) and not (legacy/'.xcode-runner-host').exists()
-                assert migration.wait(timeout=20) == 0
+                assert migration.wait(timeout=HANG_LIMIT) == 0
                 assert not alive(legacy_pid)
                 wait_for(lambda:json.loads((legacy/'pid.json').read_text())['pid']!=legacy_pid, 'Migrated service did not start')
             finally:
@@ -161,7 +192,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
             (first/'.xcode-runner-host').unlink()
             wait_for(lambda:(first/'stopped').exists() and not alive(first_pid), 'Removed runner did not stop')
             host.send_signal(signal.SIGTERM)
-            assert host.wait(timeout=15) == 0
+            assert host.wait(timeout=HANG_LIMIT) == 0
             assert (second/'stopped').exists() and not alive(second_pid)
         finally:
             stop_host(host, runners)
@@ -187,7 +218,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
         wait_for(lambda:(launched/'stopping').exists(), 'Old service did not start shutdown')
         # The old helper still owns the lock during this delayed shutdown.
         assert alive(process['pid'])
-        failed_start = subprocess.run(arguments, capture_output=True, timeout=10)
+        failed_start = subprocess.run(arguments, capture_output=True, timeout=HANG_LIMIT)
         assert failed_start.returncode != 0 and b'Another runner host' in failed_start.stderr
         assert json.loads((launched/'pid.json').read_text())['pid'] == process['pid']
         subprocess.run(['launchctl','kickstart',target],check=True)
@@ -244,31 +275,19 @@ with open(sys.argv[1], 'a+b') as coordinator:
     Path(sys.argv[2]).touch()
     while True: time.sleep(1)
 ''', str(host_root/'storage.lock'), str(ready)])
-    master = slave = None
+    watched = None
     host = None
     try:
         wait_for(ready.exists, 'External process did not hold the storage coordinator')
-        master, slave = pty.openpty()
-        os.set_blocking(master, False)
-        host = subprocess.Popen([executable, '--home-directory', str(home)],
-                                env=environment, stdout=slave, stderr=slave)
-        os.close(slave)
-        slave = None
-        output = bytearray()
         with (root/'host.log').open('wb') as log:
-            def host_started():
-                try:
-                    chunk = os.read(master, 65536)
-                except BlockingIOError:
-                    return False
-                output.extend(chunk)
-                log.write(chunk)
-                log.flush()
-                return b'Runner host started for ' in output
-            wait_for(host_started, 'Host did not announce startup while storage was locked')
+            watched = HostOutput([executable, '--home-directory', str(home)], log, env=environment)
+            host = watched.process
+            wait_for(lambda: watched.contains('Runner host started for '),
+                     'Host did not announce startup while storage was locked')
             assert host.poll() is None and not (first/'pid.json').exists()
             host.send_signal(signal.SIGTERM)
-            assert host.wait(timeout=5) == 0, bytes(output)
+            # A host that waited for the held storage lock would not exit before the holder is released below.
+            assert host.wait(timeout=HANG_LIMIT) == 0, bytes(watched.output)
         assert holder.poll() is None, 'Stopping the waiting host stopped the lock holder'
         with (host_root/'storage.lock').open('r+') as lock:
             try:
@@ -288,11 +307,11 @@ with open(sys.argv[1], 'a+b') as coordinator:
     finally:
         if host is not None and host.poll() is None:
             host.kill()
-            host.wait(timeout=10)
-        for descriptor in (master, slave):
-            if descriptor is not None: os.close(descriptor)
+            host.wait(timeout=HANG_LIMIT)
+        if watched is not None:
+            watched.close()
         holder.terminate()
-        holder.wait(timeout=10)
+        holder.wait(timeout=HANG_LIMIT)
 
 with tempfile.TemporaryDirectory(prefix='RunnerHost blocked pool ') as temporary:
     root = Path(temporary)
@@ -329,14 +348,14 @@ with open(sys.argv[1], 'a+b') as coordinator:
                 wait_for(lambda:(first/'stopped').exists() and not alive(first_pid), 'Pool status wait prevented runner removal')
                 assert holder.poll() is None
                 host.send_signal(signal.SIGTERM)
-                assert host.wait(timeout=15) == 0
+                assert host.wait(timeout=HANG_LIMIT) == 0
                 assert (second/'stopped').exists() and not alive(second_pid)
                 assert holder.poll() is None, 'Pool coordinator must remain held throughout host shutdown'
             finally:
                 stop_host(host, runners)
     finally:
         holder.terminate()
-        holder.wait(timeout=10)
+        holder.wait(timeout=HANG_LIMIT)
     assert not (pool/'capacity').exists(), 'Host status reads configured an unused pool'
 
 with tempfile.TemporaryDirectory(prefix='RunnerHost storage change ') as temporary:
@@ -361,6 +380,8 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost storage change ') as tempora
             destination = root/'New job data'
             destination.mkdir()
             (host_root/'requested-storage-directory').write_text(str(destination.resolve()))
+            # The host reports no scan event to wait for. This window can only miss an unwanted stop;
+            # it cannot fail a host that leaves the runner alone.
             time.sleep(3)
             assert alive(original_process['pid']), 'Saving a storage selection stopped an active runner'
             assert (first/'.runner').read_bytes() == original_registration
@@ -384,10 +405,18 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost storage change ') as tempora
             (host_root/'requested-storage-directory').write_text(str(collision.resolve()))
             stop_host(host, runners)
             (first/'pid.json').unlink()
-            host = subprocess.Popen(arguments, stdout=log, stderr=log)
-            time.sleep(3)
-            assert host.poll() is None, 'Storage failure exited the host instead of keeping settings available'
-            assert not (first/'pid.json').exists(), 'A listener started after storage migration failed'
+            with (root/'failed-host.log').open('wb') as failed_log:
+                watched = HostOutput(arguments, failed_log)
+                host = watched.process
+                try:
+                    # Runner services start only after storage preparation succeeds.
+                    wait_for(lambda: watched.contains('Runner storage preparation failed'),
+                             'Host did not report the failed storage migration')
+                    assert host.poll() is None, 'Storage failure exited the host instead of keeping settings available'
+                    assert not (first/'pid.json').exists(), 'A listener started after storage migration failed'
+                    stop_host(host, runners)
+                finally:
+                    watched.close()
             assert (host_root/'storage-directory').read_text() == str(destination.resolve())
             assert (collision/'Work/foreign').read_text() == 'keep existing data'
             replacement = root/'Replacement storage'

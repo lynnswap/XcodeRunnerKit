@@ -12,6 +12,8 @@ import time
 
 REPO = Path(__file__).resolve().parents[1]
 ACTIONS = ("build", "build-for-testing", "test", "test-without-building")
+# Steps wait for the state they need. This limit only reports a process that hangs.
+HANG_LIMIT = 120
 
 
 def expected_status(capacity, active, high=0, medium=0, low=0):
@@ -19,7 +21,7 @@ def expected_status(capacity, active, high=0, medium=0, low=0):
             "waitingJobCounts": {"high": high, "medium": medium, "low": low}}
 
 
-def wait_for(predicate, timeout=10):
+def wait_for(predicate, timeout=HANG_LIMIT):
     deadline = time.monotonic() + timeout
     while not predicate():
         if time.monotonic() >= deadline:
@@ -38,7 +40,7 @@ def main():
 
     signal.signal(signal.SIGTERM, interrupt)
 
-    def command(*values, success=True, timeout=10, env=None):
+    def command(*values, success=True, timeout=HANG_LIMIT, env=None):
         job = subprocess.Popen([executable, *map(str, values)], stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True, env=env)
         try:
@@ -47,7 +49,7 @@ def main():
             if job.poll() is None:
                 job.send_signal(signal.SIGTERM)
                 try:
-                    job.communicate(timeout=10)
+                    job.communicate(timeout=HANG_LIMIT)
                 except subprocess.TimeoutExpired:
                     job.kill()
                     job.communicate()
@@ -99,7 +101,7 @@ def main():
 
         def release(name):
             (root / (name + ".release")).touch()
-            assert jobs[name].wait(timeout=10) == 0, (root / (name + ".log")).read_text()
+            assert jobs[name].wait(timeout=HANG_LIMIT) == 0, (root / (name + ".log")).read_text()
 
         try:
             for index in range(6):
@@ -167,7 +169,7 @@ exec "$(xcrun --find clang)" "$@"
             assert all(not (root / (value + "-output")).exists() for value in ("high", "medium", "low"))
             release("priority-blocker")
             for priority, later in (("high", ("medium", "low")), ("medium", ("low",)), ("low", ())):
-                wait_for(lambda: (root / (priority + ".started")).exists(), timeout=60)
+                wait_for(lambda: (root / (priority + ".started")).exists(), timeout=300)
                 assert all(not (root / (value + "-output")).exists() for value in later), "Wrong CLI admission order"
                 (root / (priority + ".release")).touch()
                 assert jobs[priority].wait(timeout=300) == 0, (root / (priority + ".log")).read_text()
@@ -177,7 +179,7 @@ exec "$(xcrun --find clang)" "$@"
                 if job.poll() is None:
                     job.send_signal(signal.SIGTERM)
                     try:
-                        job.wait(timeout=10)
+                        job.wait(timeout=HANG_LIMIT)
                     except subprocess.TimeoutExpired:
                         job.kill()
                 job.wait()

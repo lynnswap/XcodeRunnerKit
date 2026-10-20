@@ -8,13 +8,15 @@ import tempfile
 import time
 
 REPO = Path(__file__).resolve().parents[1]
+# Steps wait for the state they need. This limit only reports a process that hangs.
+HANG_LIMIT = 120
 
 
-def wait_for(predicate, timeout=10):
-    end = time.monotonic() + timeout
+def wait_for(predicate, description="a process transition"):
+    end = time.monotonic() + HANG_LIMIT
     while not predicate():
         if time.monotonic() >= end:
-            raise AssertionError("Timed out waiting for a process transition")
+            raise AssertionError(f"Hung waiting for {description}")
         time.sleep(0.02)
 
 
@@ -47,11 +49,11 @@ def main():
 
         def release(name):
             (roots[name] / (name + ".release")).touch()
-            assert jobs[name].wait(timeout=10) == 0, (name, (root / (name + ".log")).read_text())
+            assert jobs[name].wait(timeout=HANG_LIMIT) == 0, (name, (root / (name + ".log")).read_text())
 
         def cancel(name):
             jobs[name].send_signal(signal.SIGTERM)
-            code = jobs[name].wait(timeout=10)
+            code = jobs[name].wait(timeout=HANG_LIMIT)
             assert code == 130, (name, code, (root / (name + ".log")).read_text())
 
         def status(job_root=root):
@@ -70,13 +72,11 @@ def main():
                 "waitingJobCounts": {"high": high, "medium": medium, "low": low},
             }
 
-        def assert_waiting(name):
-            # A bounded observation window checks that no payload starts without a slot release.
-            end = time.monotonic() + 0.3
-            while time.monotonic() < end:
-                assert not started(name), f"Waiting process {name} executed its payload"
-                assert jobs[name].poll() is None, f"Waiting process {name} exited"
-                time.sleep(0.02)
+        def assert_waiting(name, job_root, expected):
+            # The pool reports the job as waiting, so it has no slot; no fixed delay is needed.
+            wait_for(lambda: status(job_root) == expected, f"{name} to wait in the pool")
+            assert not started(name), f"Waiting process {name} executed its payload"
+            assert jobs[name].poll() is None, f"Waiting process {name} exited"
 
         try:
             assert status() is None
@@ -85,22 +85,19 @@ def main():
             start("b")
             wait_for(lambda: started("a") and started("b"))
             start("c")
-            time.sleep(0.3)
-            assert not started("c"), "Third process bypassed the two-slot limit"
+            assert_waiting("c", root, expected_status(2, 2, medium=1))
             cancel("c")
             assert not started("c"), "Cancelled waiter executed its payload"
 
             start("d")
-            time.sleep(0.3)
-            assert not started("d")
+            assert_waiting("d", root, expected_status(2, 2, medium=1))
             cancel("a")
             wait_for(lambda: started("d"))
             assert jobs["b"].poll() is None
 
             start("overflow", 4)
-            time.sleep(0.3)
-            assert jobs["overflow"].poll() is None, "Larger caller capacity was rejected"
-            assert not started("overflow"), "Larger caller capacity bypassed the two-slot pool"
+            # A larger initial limit from this caller does not change the saved two-slot limit.
+            assert_waiting("overflow", root, expected_status(2, 2, medium=1))
             release("b")
             wait_for(lambda: started("overflow"))
             assert status() == expected_status(2, 2)
@@ -119,9 +116,7 @@ def main():
                 start(name, 2, larger)
             wait_for(lambda: all(started(name) for name in ("large-b", "large-c", "large-d")))
             start("large-waiter", 2, larger)
-            time.sleep(0.3)
-            assert jobs["large-waiter"].poll() is None
-            assert not started("large-waiter"), "Fifth process bypassed the four-slot pool"
+            assert_waiting("large-waiter", larger, expected_status(4, 4, medium=1))
             release("large-a")
             wait_for(lambda: started("large-waiter"))
             assert status(larger) == expected_status(4, 4)
@@ -135,17 +130,15 @@ def main():
                 start(name, 6, shrink)
                 wait_for(lambda name=name: started(name))
             start("shrink-waiter", 6, shrink)
-            assert_waiting("shrink-waiter")
+            assert_waiting("shrink-waiter", shrink, expected_status(6, 6, medium=1))
             coordinator_inode = (shrink / "pool/pool.lock").stat().st_ino
             assert update(4, shrink) == expected_status(4, 6, medium=1)
             assert (shrink / "pool/pool.lock").stat().st_ino == coordinator_inode
             assert all(jobs[f"shrink-{index}"].poll() is None for index in range(6))
             release("shrink-0")
-            assert status(shrink) == expected_status(4, 5, medium=1)
-            assert_waiting("shrink-waiter")
+            assert_waiting("shrink-waiter", shrink, expected_status(4, 5, medium=1))
             release("shrink-1")
-            assert status(shrink) == expected_status(4, 4, medium=1)
-            assert_waiting("shrink-waiter")
+            assert_waiting("shrink-waiter", shrink, expected_status(4, 4, medium=1))
             release("shrink-2")
             wait_for(lambda: started("shrink-waiter"))
             assert status(shrink) == expected_status(4, 4)
@@ -159,20 +152,20 @@ def main():
                 start(name, 2, grow)
                 wait_for(lambda name=name: started(name))
             start("grow-c", 2, grow)
-            assert_waiting("grow-c")
+            assert_waiting("grow-c", grow, expected_status(2, 2, medium=1))
             assert update(4, grow)["maximumConcurrentJobs"] == 4
             wait_for(lambda: started("grow-c"))
             start("grow-d", 2, grow)
             wait_for(lambda: started("grow-d"))
             assert status(grow) == expected_status(4, 4)
             start("grow-cancelled", 2, grow)
-            assert_waiting("grow-cancelled")
+            assert_waiting("grow-cancelled", grow, expected_status(4, 4, medium=1))
             cancel("grow-cancelled")
             assert not started("grow-cancelled")
             start("grow-after-exit", 2, grow)
-            assert_waiting("grow-after-exit")
+            assert_waiting("grow-after-exit", grow, expected_status(4, 4, medium=1))
             jobs["grow-a"].kill()
-            assert jobs["grow-a"].wait(timeout=10) == -signal.SIGKILL
+            assert jobs["grow-a"].wait(timeout=HANG_LIMIT) == -signal.SIGKILL
             wait_for(lambda: started("grow-after-exit"))
             assert status(grow) == expected_status(4, 4)
             for name in ("grow-b", "grow-c", "grow-d", "grow-after-exit"):
@@ -218,7 +211,7 @@ def main():
             start("killed-high", 1, abandoned, priority="high")
             wait_for(lambda: status(abandoned)["waitingJobCounts"]["high"] == 1)
             jobs["killed-high"].kill()
-            assert jobs["killed-high"].wait(timeout=10) == -signal.SIGKILL
+            assert jobs["killed-high"].wait(timeout=HANG_LIMIT) == -signal.SIGKILL
             assert status(abandoned) == expected_status(1, 1, low=1)
             assert not started("cancelled-high") and not started("killed-high")
             release("abandoned-running")
@@ -237,10 +230,10 @@ def main():
             wait_for(lambda: status(resized_priority)["waitingJobCounts"]["high"] == 1)
             assert update(1, resized_priority) == expected_status(1, 2, high=1, low=1)
             release("resize-running-a")
-            assert_waiting("resize-high")
+            assert_waiting("resize-high", resized_priority, expected_status(1, 1, high=1, low=1))
             release("resize-running-b")
             wait_for(lambda: started("resize-high"))
-            assert_waiting("resize-low")
+            assert_waiting("resize-low", resized_priority, expected_status(1, 1, low=1))
             update(2, resized_priority)
             wait_for(lambda: started("resize-low"))
             assert status(resized_priority) == expected_status(2, 2)
@@ -261,10 +254,10 @@ def main():
             start("physical-b", 4, physical)
             wait_for(lambda: started("physical-b"))
             start("alias-waiter", 4, alias)
-            assert_waiting("alias-waiter")
+            assert_waiting("alias-waiter", alias, expected_status(2, 2, medium=1))
             assert update(1, alias) == expected_status(1, 2, medium=1)
             release("alias-a")
-            assert_waiting("alias-waiter")
+            assert_waiting("alias-waiter", alias, expected_status(1, 1, medium=1))
             release("physical-b")
             wait_for(lambda: started("alias-waiter"))
             assert status(alias) == status(physical) == expected_status(1, 1)
@@ -291,7 +284,7 @@ def main():
                 result = subprocess.run([str(executable), str(unconfigured), "status"], capture_output=True)
                 assert result.returncode != 0, "A saved-capacity read failure returned an empty status"
                 job = start("unreadable-capacity", 4, unconfigured)
-                assert job.wait(timeout=10) != 0
+                assert job.wait(timeout=HANG_LIMIT) != 0
                 assert not started("unreadable-capacity"), "A capacity read failure executed a payload"
             finally:
                 unreadable.chmod(0o600)
@@ -301,7 +294,7 @@ def main():
                 result = subprocess.run([str(executable), str(unconfigured), "update", "5"], capture_output=True)
                 assert result.returncode != 0, "A saved-capacity write failure returned success"
                 job = start("unwritable-queue", 3, unconfigured, priority="high")
-                assert job.wait(timeout=10) != 0
+                assert job.wait(timeout=HANG_LIMIT) != 0
                 assert not started("unwritable-queue"), "A waiting-record write failure executed a payload"
             finally:
                 pool_directory.chmod(0o700)
@@ -326,7 +319,7 @@ def main():
                 (invalid / "pool/capacity").write_text(value)
                 name = f"invalid-{index}"
                 job = start(name, 2, invalid)
-                assert job.wait(timeout=10) != 0
+                assert job.wait(timeout=HANG_LIMIT) != 0
                 assert not started(name), "Invalid saved capacity executed a payload"
                 assert "invalidStoredMaximumConcurrentJobs" in (root / (name + ".log")).read_text()
 

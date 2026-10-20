@@ -28,7 +28,11 @@ def storage_status(home):
     return json.loads(result.stdout)
 
 
-def wait_for(predicate, description, timeout=30):
+# Steps wait for the state they need. This limit only reports a process that hangs.
+HANG_LIMIT = 120
+
+
+def wait_for(predicate, description, timeout=HANG_LIMIT):
     deadline = time.monotonic() + timeout
     while not predicate():
         if time.monotonic() >= deadline:
@@ -65,7 +69,7 @@ with tempfile.TemporaryDirectory(prefix="Host storage permissions ") as temporar
         assert stat.S_IMODE((storage / name).stat().st_mode) == 0o700
     shutil.rmtree(storage)
     failure = subprocess.run([str(executable), "host", "storage", "configure", "--json"],
-                             env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=30)
+                             env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=HANG_LIMIT)
     assert failure.returncode != 0, "Reinitialization must fail when the saved parent is unavailable"
     assert not storage.exists(), "Reinitialization recreated an unavailable parent"
     assert storage_status(home) == layout, "Failed reinitialization changed the active storage record"
@@ -86,7 +90,7 @@ with tempfile.TemporaryDirectory(prefix="Host storage concurrent initialization 
         for process in processes:
             process.stdin.write("start\n")
             process.stdin.flush()
-        outputs = [process.communicate(timeout=30) for process in processes]
+        outputs = [process.communicate(timeout=HANG_LIMIT) for process in processes]
         winners = [index for index, process in enumerate(processes) if process.returncode == 0]
         assert len(winners) == 1, [(process.returncode, outputs[index]) for index, process in enumerate(processes)]
         winner = winners[0]
@@ -98,7 +102,7 @@ with tempfile.TemporaryDirectory(prefix="Host storage concurrent initialization 
         for process in processes:
             if process.poll() is None:
                 process.kill()
-                process.wait(timeout=10)
+                process.wait(timeout=HANG_LIMIT)
 
 
 with tempfile.TemporaryDirectory(prefix="Hosted CLI unavailable storage ") as temporary:
@@ -116,7 +120,7 @@ with tempfile.TemporaryDirectory(prefix="Hosted CLI unavailable storage ") as te
     build = [str(executable), "build", "--package", str(package), "--scheme", "BuildProbe",
              "--destination", "platform=macOS,arch=arm64", "--", "-jobs", "2"]
     storage.rename(offline)
-    failure = subprocess.run(build, env=environment, capture_output=True, timeout=30)
+    failure = subprocess.run(build, env=environment, capture_output=True, timeout=HANG_LIMIT)
     assert failure.returncode != 0, "A hosted operation accepted its unavailable storage parent"
     assert not storage.exists(), "A hosted operation recreated its unavailable storage parent"
     assert not list((offline / "Build").iterdir())
@@ -151,9 +155,9 @@ with tempfile.TemporaryDirectory(prefix="Hosted CLI unavailable storage ") as te
         assert not list((storage / "Build").iterdir())
         storage.rename(offline)
         (admission / "blocker.release").touch()
-        stdout, stderr = blocker.communicate(timeout=30)
+        stdout, stderr = blocker.communicate(timeout=HANG_LIMIT)
         assert blocker.returncode == 0, (stdout, stderr)
-        stdout, stderr = queued.communicate(timeout=30)
+        stdout, stderr = queued.communicate(timeout=HANG_LIMIT)
         assert queued.returncode != 0, (stdout, stderr)
         assert not storage.exists(), "A queued operation recreated its unavailable storage parent"
         assert not list((offline / "Build").iterdir())
@@ -164,7 +168,7 @@ with tempfile.TemporaryDirectory(prefix="Hosted CLI unavailable storage ") as te
             if process is not None and process.poll() is None:
                 process.terminate()
                 try:
-                    process.communicate(timeout=10)
+                    process.communicate(timeout=HANG_LIMIT)
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.communicate()
@@ -268,11 +272,11 @@ int main(int argc, char **argv) {
     service_command = [str(executable), "host", "build-service"]
     initial_service_status = json.loads(subprocess.run(
         service_command + ["status", "--json"], env=environment,
-        check=True, capture_output=True, text=True, timeout=30).stdout)
+        check=True, capture_output=True, text=True, timeout=HANG_LIMIT).stdout)
     assert initial_service_status == {"hostRoot": layout["hostRoot"]}
     configured_service_status = json.loads(subprocess.run(
         service_command + ["configure", "--path", str(service_wrappers[0]), "--json"],
-        env=environment, check=True, capture_output=True, text=True, timeout=30).stdout)
+        env=environment, check=True, capture_output=True, text=True, timeout=HANG_LIMIT).stdout)
     assert configured_service_status == {**initial_service_status,
                                          "buildServiceExecutablePath": str(service_wrappers[0])}
     hosted_environment = {**environment, "HOME": str(root / "different-home"),
@@ -311,11 +315,11 @@ int main(int argc, char **argv) {
     assert service_markers[1].read_text()
     assert service_markers[0].read_text() == saved_service_launches
     assert json.loads(subprocess.run(service_command + ["status", "--json"], env=environment,
-                                    check=True, capture_output=True, text=True, timeout=30).stdout) == configured_service_status
+                                    check=True, capture_output=True, text=True, timeout=HANG_LIMIT).stdout) == configured_service_status
     assert json.loads(subprocess.run(service_command + ["configure", "--json"], env=environment,
-                                    check=True, capture_output=True, text=True, timeout=30).stdout) == initial_service_status
+                                    check=True, capture_output=True, text=True, timeout=HANG_LIMIT).stdout) == initial_service_status
     assert json.loads(subprocess.run(service_command + ["status", "--json"], env=environment,
-                                    check=True, capture_output=True, text=True, timeout=30).stdout) == initial_service_status
+                                    check=True, capture_output=True, text=True, timeout=HANG_LIMIT).stdout) == initial_service_status
 
     runner_temp = root / "work" / "_temp"
     runner_temp.mkdir(parents=True)
@@ -575,7 +579,7 @@ exec /bin/bash "$XRK_FIXTURE_ENABLE_SCRIPT" "$@"
 
     def request_storage(home, target):
         subprocess.run([str(storage_probe), "request", str(home), str(target)],
-                       check=True, capture_output=True, text=True, timeout=30)
+                       check=True, capture_output=True, text=True, timeout=HANG_LIMIT)
 
     # Registration owns storage from layout selection through publishing its host marker.
     first_home = root / "registration-first-home"
@@ -615,9 +619,9 @@ exec /bin/bash "$XRK_FIXTURE_ENABLE_SCRIPT" "$@"
         assert migration.poll() is None and storage_status(first_home)["storageDirectory"] == str(source.resolve())
         assert not (target / "Work").exists()
         (gate / "release").touch()
-        stdout, stderr = registration.communicate(timeout=30)
+        stdout, stderr = registration.communicate(timeout=HANG_LIMIT)
         assert registration.returncode == 0, (stdout, stderr)
-        stdout, stderr = migration.communicate(timeout=30)
+        stdout, stderr = migration.communicate(timeout=HANG_LIMIT)
         assert migration.returncode == 0, (stdout, stderr)
         runner = first_home / "Library/XcodeRunnerKit/runners" / runner_name
         record = json.loads((runner / ".runner").read_text(encoding="utf-8-sig"))
@@ -630,7 +634,7 @@ exec /bin/bash "$XRK_FIXTURE_ENABLE_SCRIPT" "$@"
         for process in (registration, migration):
             if process is not None and process.poll() is None:
                 os.killpg(process.pid, signal.SIGKILL)
-                process.communicate(timeout=10)
+                process.communicate(timeout=HANG_LIMIT)
 
     # A queued registration obtains the committed layout after the migration transaction.
     second_home = root / "migration-first-home"
@@ -665,20 +669,20 @@ exec /bin/bash "$XRK_FIXTURE_ENABLE_SCRIPT" "$@"
                                           env=second_environment, start_new_session=True)
             subprocess.run([str(storage_probe), "prepare", str(second_home)],
                            env={**second_environment, "XCODE_RUNNER_STORAGE_LOCK_DESCRIPTOR": str(lock.fileno())},
-                           pass_fds=(lock.fileno(),), check=True, capture_output=True, text=True, timeout=30)
+                           pass_fds=(lock.fileno(),), check=True, capture_output=True, text=True, timeout=HANG_LIMIT)
             assert registration.poll() is None
             assert activation.poll() is None
             assert not (source / "Work" / runner_name).exists()
             assert not (target / "Work" / runner_name).exists()
             fcntl.flock(lock, fcntl.LOCK_UN)
-            stdout, stderr = registration.communicate(timeout=30)
+            stdout, stderr = registration.communicate(timeout=HANG_LIMIT)
             assert registration.returncode == 0, (stdout, stderr)
             runner = second_home / "Library/XcodeRunnerKit/runners" / runner_name
             record = json.loads((runner / ".runner").read_text(encoding="utf-8-sig"))
             assert record["workFolder"] == str((target / "Work" / runner_name).resolve())
             assert (runner / ".xcode-runner-host").exists()
             assert not (source / "Work" / runner_name).exists()
-            stdout, stderr = activation.communicate(timeout=30)
+            stdout, stderr = activation.communicate(timeout=HANG_LIMIT)
             assert activation.returncode != 0 and "Reconfigure this runner with --work" in stderr, (stdout, stderr)
             assert str((target / "Work" / unhosted.name).resolve()) in stderr
             assert not (unhosted / ".xcode-runner-host").exists()
@@ -690,13 +694,13 @@ exec /bin/bash "$XRK_FIXTURE_ENABLE_SCRIPT" "$@"
             for process in (registration, activation):
                 if process is not None and process.poll() is None:
                     os.killpg(process.pid, signal.SIGKILL)
-                    process.communicate(timeout=10)
+                    process.communicate(timeout=HANG_LIMIT)
 
     unrelated = root / "unrelated-lock"
     with unrelated.open("w+") as wrong_lock:
         failure = subprocess.run(["bash", str(scripts / "enable-hosted-runner.sh"), str(installation)],
                                  env={**environment, "XCODE_RUNNER_STORAGE_LOCK_DESCRIPTOR": str(wrong_lock.fileno())},
-                                 pass_fds=(wrong_lock.fileno(),), capture_output=True, text=True, timeout=30)
+                                 pass_fds=(wrong_lock.fileno(),), capture_output=True, text=True, timeout=HANG_LIMIT)
     assert failure.returncode != 0 and "does not match" in failure.stderr
     assert json.loads((installation / ".runner").read_text(encoding="utf-8-sig")) == received
 
