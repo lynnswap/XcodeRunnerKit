@@ -107,59 +107,88 @@ public struct HostExecutionPool: Sendable {
     /// the limit. Processes use kernel locks, so no stale PID files are needed.
     /// Higher priorities start first; equal priorities start in their local
     /// registration order. Continuous higher-priority work can postpone lower priorities.
+    /// Failing to release the slot or its waiting record throws HostExecutionCleanupFailure.
     public func withSlot<Result: Sendable>(
         priority: Priority = .medium,
         operation: @Sendable () async throws -> Result
     ) async throws -> Result {
-        try Task.checkCancellation()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let (waiter, ownership) = try await registerWaiter(priority: priority)
-        return try await Self.withHandle(ownership) {
-            let outcome: Swift.Result<Result, any Error>
-            do { outcome = .success(try await runWaiting(waiter, operation: operation)) }
-            catch { outcome = .failure(error) }
-            do { try Self.removeWaiter(waiter.url) }
-            catch {
-                throw HostExecutionCleanupFailure(operationError: outcome.failure, cleanupError: error)
-            }
-            return try outcome.get()
+        let outcome = await slotOutcome(priority: priority) { () async -> Swift.Result<Result, any Error> in
+            do { return .success(try await operation()) }
+            catch { return .failure(error) }
         }
+        let operationResult = outcome.value.flatMap { $0 }
+        guard outcome.cleanupErrors.isEmpty else {
+            throw HostExecutionCleanupFailure(operationError: operationResult.failure, cleanupErrors: outcome.cleanupErrors)
+        }
+        return try operationResult.get()
     }
 
-    private func runWaiting<Result: Sendable>(
-        _ waiter: Waiter, operation: @Sendable () async throws -> Result
-    ) async throws -> Result {
-        while true {
+    /// Runs the operation in a slot and reports releasing failures without discarding its value.
+    ///
+    /// The value is a failure only when the operation did not start.
+    func slotOutcome<Value: Sendable>(
+        priority: Priority,
+        operation: @Sendable () async -> Value
+    ) async -> CleanupOutcome<Value> {
+        let waiter: Waiter
+        let ownership: FileHandle
+        do {
             try Task.checkCancellation()
-            let coordinator = try Self.open(directory.appending(path: "pool.lock"))
-            let slot: FileHandle? = try await Self.withHandle(coordinator) {
-                try await Self.lock(coordinator)
-                guard let capacity = try savedCapacity() else {
-                    throw ConfigurationError.invalidStoredCapacity(directory: directory)
-                }
-                let slots = try inspectSlots()
-                guard slots.activeJobCount < capacity else { return nil }
-                let waiters = try inspectWaiters()
-                guard waiters.first?.url.lastPathComponent == waiter.url.lastPathComponent else { return nil }
-                let handle = try Self.open(directory.appending(path: "slot-\(slots.availableIndex).lock"))
-                do {
-                    if try Self.tryLock(handle) {
-                        try Self.removeWaiter(waiter.url)
-                        return handle
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let registration = try await registerWaiter(priority: priority)
+            waiter = registration.waiter
+            ownership = registration.ownership
+        } catch {
+            return CleanupOutcome(value: .failure(error))
+        }
+        var outcome = await runWaiting(waiter, operation: operation)
+        do { try Self.removeWaiter(waiter.url) } catch { outcome.cleanupErrors.append(error) }
+        do { try ownership.close() } catch { outcome.cleanupErrors.append(error) }
+        return outcome
+    }
+
+    private func runWaiting<Value: Sendable>(
+        _ waiter: Waiter, operation: @Sendable () async -> Value
+    ) async -> CleanupOutcome<Value> {
+        while true {
+            let slot: FileHandle?
+            do {
+                try Task.checkCancellation()
+                let coordinator = try Self.open(directory.appending(path: "pool.lock"))
+                slot = try await Self.withHandle(coordinator) {
+                    try await Self.lock(coordinator)
+                    guard let capacity = try savedCapacity() else {
+                        throw ConfigurationError.invalidStoredCapacity(directory: directory)
                     }
-                } catch {
-                    return try Self.withHandle(handle) { throw error }
+                    let slots = try inspectSlots()
+                    guard slots.activeJobCount < capacity else { return nil }
+                    let waiters = try inspectWaiters()
+                    guard waiters.first?.url.lastPathComponent == waiter.url.lastPathComponent else { return nil }
+                    let handle = try Self.open(directory.appending(path: "slot-\(slots.availableIndex).lock"))
+                    do {
+                        if try Self.tryLock(handle) {
+                            try Self.removeWaiter(waiter.url)
+                            return handle
+                        }
+                    } catch {
+                        return try Self.withHandle(handle) { throw error }
+                    }
+                    try handle.close()
+                    return nil
                 }
-                try handle.close()
-                return nil
+                if slot == nil { try await Task.sleep(for: .milliseconds(100)) }
+            } catch {
+                return CleanupOutcome(value: .failure(error))
             }
-            if let slot {
-                return try await Self.withHandle(slot) {
-                    try Task.checkCancellation()
-                    return try await operation()
-                }
+            guard let slot else { continue }
+            var outcome: CleanupOutcome<Value>
+            if Task.isCancelled {
+                outcome = CleanupOutcome(value: .failure(CancellationError()))
+            } else {
+                outcome = CleanupOutcome(value: .success(await operation()))
             }
-            try await Task.sleep(for: .milliseconds(100))
+            do { try slot.close() } catch { outcome.cleanupErrors.append(error) }
+            return outcome
         }
     }
 
@@ -169,7 +198,7 @@ public struct HostExecutionPool: Sendable {
         let url: URL
     }
 
-    private func registerWaiter(priority: Priority) async throws -> (Waiter, FileHandle) {
+    private func registerWaiter(priority: Priority) async throws -> (waiter: Waiter, ownership: FileHandle) {
         let coordinator = try Self.open(directory.appending(path: "pool.lock"))
         return try await Self.withHandle(coordinator) {
             try await Self.lock(coordinator)
@@ -348,13 +377,29 @@ private extension Swift.Result {
     }
 }
 
-/// A host-lock close failure, with any preceding operation failure preserved.
+/// An operation's result and the failures from releasing what it held.
+struct CleanupOutcome<Value: Sendable>: Sendable {
+    var value: Result<Value, any Error>
+    var cleanupErrors: [any Error] = []
+}
+
+/// Failures releasing a host slot, with any preceding operation failure preserved.
 public struct HostExecutionCleanupFailure: Error, LocalizedError {
     public let operationError: (any Error)?
-    public let cleanupError: any Error
+    public let cleanupErrors: [any Error]
+
+    init(operationError: (any Error)?, cleanupErrors: [any Error]) {
+        self.operationError = operationError
+        self.cleanupErrors = cleanupErrors
+    }
+
+    init(operationError: (any Error)?, cleanupError: any Error) {
+        self.init(operationError: operationError, cleanupErrors: [cleanupError])
+    }
 
     public var errorDescription: String? {
-        let original = operationError.map { "Operation failed: \($0). " } ?? ""
-        return original + "Closing the host execution lock failed: \(cleanupError)."
+        let original = operationError.map { "Operation failed: \($0.localizedDescription) " } ?? ""
+        let cleanup = cleanupErrors.map(\.localizedDescription).joined(separator: " ")
+        return original + "Releasing the host execution lock failed: \(cleanup)"
     }
 }

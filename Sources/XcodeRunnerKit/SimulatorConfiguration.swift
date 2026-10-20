@@ -15,17 +15,20 @@ public struct SimulatorConfiguration: Sendable {
     }
 }
 
-/// Failed Simulator resource cleanup or deletion, preserving the operation's outcome.
+/// A Simulator that could not be prepared for reuse or deleted.
+///
+/// Remove a remaining pooled device with SimulatorPool.removeIdleSimulators,
+/// or a fresh device with `xcrun simctl delete`.
 public struct SimulatorCleanupFailure: Error, LocalizedError {
-    public let simulatorIdentifier: String
-    public let operationError: (any Error)?
-    /// The completed build, if execution succeeded before cleanup failed.
-    public let result: XcodeBuildResult?
-    public let cleanupError: any Error
+    /// The device's UDID, or nil when it failed before simctl reported one.
+    public let simulatorIdentifier: String?
+    /// The name the runner gave the device when creating it.
+    public let simulatorName: String
+    public let underlyingError: any Error
 
     public var errorDescription: String? {
-        let original = operationError.map { "Operation failed: \($0). " } ?? ""
-        return original + "Simulator \(simulatorIdentifier) could not be cleaned up: \(cleanupError)."
+        let device = simulatorIdentifier.map { "Simulator \(simulatorName) (\($0))" } ?? "Simulator \(simulatorName)"
+        return "\(device) could not be cleaned up: \(underlyingError.localizedDescription)"
     }
 }
 
@@ -34,7 +37,9 @@ struct SimulatorTool: Sendable {
     var developerDirectory: URL?
     var inheritedLeaseDescriptor: Int32?
 
-    func create(_ configuration: SimulatorConfiguration, name: String = "XcodeRunnerKit-" + UUID().uuidString) async throws -> String {
+    static func freshDeviceName() -> String { "XcodeRunnerKit-" + UUID().uuidString }
+
+    func create(_ configuration: SimulatorConfiguration, name: String) async throws -> String {
         let output = try await call([
             "create", name,
             configuration.deviceTypeIdentifier, configuration.runtimeIdentifier,
