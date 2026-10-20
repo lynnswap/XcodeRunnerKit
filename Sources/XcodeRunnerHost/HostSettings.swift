@@ -4,6 +4,14 @@ import SwiftUI
 import XcodeRunnerHostSupport
 import XcodeRunnerKit
 
+enum HostState: String, Sendable {
+    case starting = "Starting"
+    case preparingStorage = "Preparing storage"
+    case running = "Running"
+    case needsAttention = "Needs attention"
+    case stopping = "Stopping"
+}
+
 enum RunnerServiceState: String, Sendable {
     case starting = "Starting"
     case running = "Running"
@@ -46,7 +54,7 @@ final class HostSettingsModel {
     let installation: HostInstallation
     let pool: HostExecutionPool
     let github: GitHubHostSettings
-    var hostState = "Starting"
+    var hostState = HostState.starting
     var runners: [RunnerSettingsRow] = []
     var runnerScanError: String?
     private(set) var poolStatus: HostExecutionPool.Status?
@@ -97,11 +105,14 @@ final class HostSettingsModel {
     func storagePreparationFailed(_ error: any Error) {
         github.storageIsReady = false
         storageError = "Could not prepare storage: \(error.localizedDescription)"
-        hostState = "Needs attention"
+        hostState = .needsAttention
     }
 
+    /// Whether the storage folder can be edited and saved. It stays available while the host needs attention.
+    var canEditStorage: Bool { !isSavingStorage && hostState != .stopping }
+
     func saveStorageSelection() async {
-        guard !isSavingStorage else { return }
+        guard canEditStorage else { return }
         guard storageDirectoryInput.hasPrefix("/") else {
             storageSaveError = "Enter an absolute folder path or choose a folder."
             return
@@ -119,6 +130,7 @@ final class HostSettingsModel {
     }
 
     func chooseStorageDirectory() async {
+        guard canEditStorage else { return }
         let panel = NSOpenPanel()
         panel.title = "Choose Storage Folder"
         panel.canChooseDirectories = true
@@ -168,8 +180,10 @@ final class HostSettingsModel {
         }
     }
 
+    var canApplyLimit: Bool { hasLoadedPoolStatus && !isSaving && !github.isBusy && hostState != .stopping }
+
     func applyCapacity() async {
-        guard hasLoadedPoolStatus, !isSaving, !github.isSynchronizing, !github.isConnecting else { return }
+        guard canApplyLimit else { return }
         guard let capacity = Int(capacityInput), capacity > 0 else {
             saveError = "Enter a positive whole number."
             return
@@ -207,14 +221,14 @@ struct HostSettingsView: View {
                     TextField("Storage folder", text: $model.storageDirectoryInput)
                         .textFieldStyle(.roundedBorder)
                         .accessibilityIdentifier("storage-folder")
-                        .disabled(model.isSavingStorage || model.hostState == "Stopping")
+                        .disabled(!model.canEditStorage)
                     HStack {
                         Button("Choose…") { Task { await model.chooseStorageDirectory() } }
                             .accessibilityIdentifier("choose-storage-folder")
                         Button(model.isSavingStorage ? "Saving…" : "Save") { Task { await model.saveStorageSelection() } }
                             .accessibilityIdentifier("save-storage-folder")
                     }
-                    .disabled(model.isSavingStorage || model.hostState == "Stopping")
+                    .disabled(!model.canEditStorage)
                     Text(model.storageMessage).font(.callout).foregroundStyle(.secondary)
                     Text("A changed folder is applied before runners start on the next launch. Existing data is copied and its original files are kept. Stop other tools that use these files before restarting the host.")
                         .font(.callout).foregroundStyle(.secondary)
@@ -249,7 +263,7 @@ struct HostSettingsView: View {
                         Button(model.isSaving ? "Applying…" : "Apply") {
                             Task { await model.applyCapacity() }
                         }
-                        .disabled(!model.hasLoadedPoolStatus || model.isSaving || model.github.isConnecting || model.github.isSynchronizing || model.hostState == "Stopping")
+                        .disabled(!model.canApplyLimit)
                         .accessibilityIdentifier("apply-execution-limit")
                     }
                     Text(model.admissionMessage)
@@ -261,7 +275,7 @@ struct HostSettingsView: View {
                     if let error = model.saveError { errorMessage(error) }
                 }
                 Section("Runner Services") {
-                    LabeledContent("Host", value: model.hostState)
+                    LabeledContent("Host", value: model.hostState.rawValue)
                     if model.runners.isEmpty {
                         Text(model.storageError == nil ? "No runners have opted in to this host." : "Runner services have not started because storage needs attention.")
                             .foregroundStyle(.secondary)

@@ -52,6 +52,10 @@ final class GitHubHostSettings {
     var storageIsReady = false
 
     var hasPendingApp: Bool { pendingApp != nil }
+    /// Connecting or synchronizing; actions that change the connection wait for either to finish.
+    var isBusy: Bool { isConnecting || isSynchronizing }
+    var canReloadRepositories: Bool { !isBusy && !isLoadingRepositories }
+    var canDisconnect: Bool { !isBusy && !isLoadingRepositories }
 
     init(
         installation: HostInstallation, pool: HostExecutionPool, client: GitHubClient = .init(),
@@ -101,7 +105,7 @@ final class GitHubHostSettings {
     }
 
     func createApp() {
-        guard !isConnecting, !isSynchronizing else { return }
+        guard !isBusy else { return }
         isConnecting = true
         errorMessage = nil
         connectionTask = Task {
@@ -124,7 +128,7 @@ final class GitHubHostSettings {
     }
 
     func retrySavingApp() {
-        guard pendingApp != nil, !isConnecting, !isSynchronizing else { return }
+        guard pendingApp != nil, !isBusy else { return }
         isConnecting = true
         errorMessage = nil
         connectionTask = Task {
@@ -177,7 +181,7 @@ final class GitHubHostSettings {
     }
 
     func signIn() {
-        guard !isConnecting, !isSynchronizing else { return }
+        guard !isBusy else { return }
         let clientID = clientIDInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clientID.isEmpty else {
             errorMessage = "Create a GitHub App first, or enter an existing app's Client ID."
@@ -260,7 +264,7 @@ final class GitHubHostSettings {
     }
 
     func signOut() async {
-        guard !isConnecting, !isSynchronizing else { return }
+        guard canDisconnect else { return }
         do {
             try await authentication.signOut()
             account = nil
@@ -268,6 +272,11 @@ final class GitHubHostSettings {
             runnerStatuses = []
             errorMessage = nil
         } catch { errorMessage = "Could not disconnect GitHub: \(error.localizedDescription)" }
+    }
+
+    func reloadRepositories() async {
+        guard canReloadRepositories else { return }
+        await loadRepositories()
     }
 
     func loadRepositories() async {
@@ -322,21 +331,21 @@ final class GitHubHostSettings {
                 let available = try await client.listRepositories(accessToken: token)
                 repositories = available
                 let current = Dictionary(uniqueKeysWithValues: available.map { ($0.id, $0) })
-                let statuses = await provisioner.reconcile(
-                    repositories: selected.compactMap { current[$0.id] }, capacity: status.maximumConcurrentJobs, token: token
-                ) + selected.filter { current[$0.id] == nil }.map { repository in
+                let inaccessible = selected.filter { current[$0.id] == nil }.map { repository in
                     RepositoryRunnerStatus(
                         repository: repository, desiredCount: status.maximumConcurrentJobs,
-                        registeredCount: 0, onlineCount: 0, busyCount: 0, excessCount: 0,
-                        errorMessage: "This repository is no longer accessible to the GitHub App. Check its installation and permissions, then reload repositories.",
-                        requiresAuthentication: false
+                        registeredCount: 0, onlineCount: 0, busyCount: 0, excessCount: 0, problems: [.repositoryInaccessible]
                     )
                 }
-                runnerStatuses = statuses
-                if statuses.contains(where: \.requiresAuthentication) {
-                    throw GitHubError.response(status: 401, message: "The runner management token was rejected.")
+                do {
+                    return try await provisioner.reconcile(
+                        repositories: selected.compactMap { current[$0.id] }, capacity: status.maximumConcurrentJobs, token: token
+                    ) + inaccessible
+                } catch let failure as RunnerProvisioningAuthenticationFailure {
+                    // Keep the latest counts visible while the token is refreshed or the user signs in again.
+                    runnerStatuses = failure.statuses + inaccessible
+                    throw failure.underlyingError
                 }
-                return statuses
             }
             errorMessage = nil
         } catch is CancellationError {

@@ -8,18 +8,18 @@ struct GitHubSettingsView: View {
         Section("GitHub") {
             if model.hasPendingApp {
                 Button("Retry Saving App") { model.retrySavingApp() }
-                    .disabled(model.isConnecting || model.isSynchronizing)
+                    .disabled(model.isBusy)
                     .accessibilityIdentifier("create-github-app")
             }
             if let account = model.account {
                 LabeledContent("Connected account", value: account.login)
                 HStack {
-                    Button("Reload Repositories") { Task { await model.loadRepositories() } }
-                        .disabled(model.isLoadingRepositories || model.isConnecting || model.isSynchronizing)
+                    Button("Reload Repositories") { Task { await model.reloadRepositories() } }
+                        .disabled(!model.canReloadRepositories)
                     Button("Install App…") { model.installApp() }
-                        .disabled(model.isConnecting || model.isSynchronizing)
+                        .disabled(model.isBusy)
                     Button("Disconnect") { Task { await model.signOut() } }
-                        .disabled(model.isConnecting || model.isSynchronizing || model.isLoadingRepositories)
+                        .disabled(!model.canDisconnect)
                 }
                 Text("Choose the repositories this Mac should accept jobs from. Apply the execution limit below to register their runners.")
                     .font(.callout).foregroundStyle(.secondary)
@@ -31,7 +31,7 @@ struct GitHubSettingsView: View {
                             else { model.selectedRepositoryIDs.remove(repository.id) }
                         }
                     ))
-                    .disabled(model.isSynchronizing || model.isConnecting)
+                    .disabled(model.isBusy)
                 }
                 if model.isLoadingRepositories {
                     ProgressView("Loading repositories…")
@@ -44,12 +44,12 @@ struct GitHubSettingsView: View {
             } else {
                 TextField("Organization (optional)", text: $model.organizationInput)
                     .textFieldStyle(.roundedBorder)
-                    .disabled(model.isConnecting || model.isSynchronizing)
+                    .disabled(model.isBusy)
                 Text("Leave blank to create the app on your personal account. For organization repositories, enter the organization that will own the app.")
                     .font(.callout).foregroundStyle(.secondary)
                 if !model.hasPendingApp {
                     Button(model.isConnecting ? "Waiting for GitHub…" : "Create GitHub App…") { model.createApp() }
-                        .disabled(model.isConnecting || model.isSynchronizing)
+                        .disabled(model.isBusy)
                         .accessibilityIdentifier("create-github-app")
                 }
                 Text("Create the GitHub App from your browser. Permissions are filled in automatically, and its credentials are saved in Keychain. Install it on your account, then sign in.")
@@ -60,7 +60,7 @@ struct GitHubSettingsView: View {
                         Button("Sign In…") { model.signIn() }
                             .accessibilityIdentifier("github-sign-in")
                     }
-                    .disabled(model.isConnecting || model.isSynchronizing)
+                    .disabled(model.isBusy)
                 }
             }
             if model.isConnecting {
@@ -79,7 +79,7 @@ struct GitHubSettingsView: View {
                 Text("For an app created elsewhere, enable Device Flow in its GitHub settings. Apps created here need no manual configuration.")
                     .font(.callout).foregroundStyle(.secondary)
             }
-            .disabled(model.isConnecting || model.isSynchronizing || model.account != nil)
+            .disabled(model.isBusy || model.account != nil)
             if model.isSynchronizing { ProgressView("Synchronizing runner registrations…") }
             ForEach(model.runnerStatuses) { status in
                 VStack(alignment: .leading, spacing: 4) {

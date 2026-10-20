@@ -260,7 +260,7 @@ struct HostSettingsTests {
         let active = try installation.initializeStorage(at: root.appending(path: "Active"))
         let settings = HostSettingsModel(installation: installation)
         settings.storageDidBecomeAvailable(active)
-        settings.hostState = "Running"
+        settings.hostState = .running
         let next = root.appending(path: "Next")
         try FileManager.default.createDirectory(at: next, withIntermediateDirectories: true)
         let alias = root.appending(path: "Chosen folder")
@@ -275,7 +275,7 @@ struct HostSettingsTests {
         #expect(settings.savedStorageDirectory == physicalNext)
         #expect(settings.storageDirectoryInput == physicalNext.path(percentEncoded: false))
         #expect(settings.storageMessage == "Saved for the next host launch. Running jobs continue using their current storage.")
-        #expect(settings.hostState == "Running")
+        #expect(settings.hostState == .running)
     }
 
     @Test func storageSavePreservesSelectionsUntilCurrentConfigurationIsRepaired() async throws {
@@ -285,7 +285,7 @@ struct HostSettingsTests {
         let active = try installation.initializeStorage(at: root.appending(path: "Active"))
         let settings = HostSettingsModel(installation: installation)
         settings.storageDidBecomeAvailable(active)
-        settings.hostState = "Running"
+        settings.hostState = .running
         let previous = root.appending(path: "Previous selection")
         let next = root.appending(path: "Next selection")
         for folder in [previous, next] {
@@ -308,7 +308,7 @@ struct HostSettingsTests {
         #expect(settings.savedStorageDirectory == saved)
         #expect(settings.storageDirectoryInput == next.path(percentEncoded: false))
         #expect(settings.activeStorage?.directory == active.directory)
-        #expect(settings.hostState == "Running")
+        #expect(settings.hostState == .running)
         #expect(try Data(contentsOf: activeRecord) == malformed)
         #expect(try Data(contentsOf: pendingRecord) == originalPending)
 
@@ -328,7 +328,7 @@ struct HostSettingsTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let settings = model(at: root)
         settings.storagePreparationFailed(CocoaError(.fileWriteNoPermission))
-        #expect(settings.hostState == "Needs attention")
+        #expect(settings.hostState == .needsAttention)
         #expect(settings.storageError != nil)
         settings.storageDirectoryInput = "relative/folder"
         await settings.saveStorageSelection()
@@ -340,6 +340,6 @@ struct HostSettingsTests {
         #expect(settings.storageSaveError == nil)
         #expect(settings.storageError != nil)
         #expect(settings.activeStorage == nil)
-        #expect(settings.hostState == "Needs attention")
+        #expect(settings.hostState == .needsAttention)
     }
 }

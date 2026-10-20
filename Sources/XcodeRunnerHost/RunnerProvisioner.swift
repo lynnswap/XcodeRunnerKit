@@ -4,6 +4,29 @@ import Subprocess
 import XcodeRunnerHostSupport
 import XcodeRunnerKit
 
+/// A problem found while reconciling one repository's runners.
+enum RunnerProvisioningProblem: Sendable, Equatable {
+    case reconciliationInProgress
+    case unreadableRegistration(path: String, reason: String)
+    case individualServices(count: Int)
+    case unhostedRegistrations(count: Int)
+    case repositoryInaccessible
+    /// A failure whose description has had any registration token removed.
+    case failed(String)
+
+    var message: String {
+        switch self {
+        case .reconciliationInProgress: "Runner configuration is already being applied."
+        case let .unreadableRegistration(path, reason): "Could not read the registration at \(path): \(reason)"
+        case .individualServices(let count): "\(count) runner(s) use an individual service and were left unchanged."
+        case .unhostedRegistrations(let count): "\(count) registration(s) have not opted in to this host and were left unchanged."
+        case .repositoryInaccessible:
+            "This repository is no longer accessible to the GitHub App. Check its installation and permissions, then reload repositories."
+        case .failed(let description): description
+        }
+    }
+}
+
 struct RepositoryRunnerStatus: Sendable, Identifiable {
     let repository: GitHubRepository
     let desiredCount: Int
@@ -11,10 +34,21 @@ struct RepositoryRunnerStatus: Sendable, Identifiable {
     let onlineCount: Int
     let busyCount: Int
     let excessCount: Int
-    let errorMessage: String?
-    let requiresAuthentication: Bool
+    let problems: [RunnerProvisioningProblem]
 
     var id: Int { repository.id }
+
+    /// The problems as one line of display text, or nil when there are none.
+    var errorMessage: String? { problems.isEmpty ? nil : problems.map(\.message).joined(separator: " ") }
+}
+
+/// GitHub rejected the access token while runners were reconciled.
+///
+/// `statuses` describes every repository at that point, so callers can keep
+/// showing them while they refresh the token or ask the user to sign in.
+struct RunnerProvisioningAuthenticationFailure: Error {
+    let statuses: [RepositoryRunnerStatus]
+    let underlyingError: GitHubError
 }
 
 protocol RunnerProvisioningClient: Sendable {
@@ -104,23 +138,27 @@ actor RunnerProvisioner {
         }
     }
 
+    /// Registers enough runners for each repository and reports their state.
+    ///
+    /// Other failures are reported per repository. Throws
+    /// RunnerProvisioningAuthenticationFailure when GitHub rejects the token.
     func reconcile(
         repositories: [GitHubRepository], capacity: Int, token: String
-    ) async -> [RepositoryRunnerStatus] {
+    ) async throws -> [RepositoryRunnerStatus] {
         guard !isReconciling else {
             return repositories.map {
-                Self.status(repository: $0, capacity: capacity, runners: [], error: "Runner configuration is already being applied.")
+                Self.status(repository: $0, capacity: capacity, runners: [], problems: [.reconciliationInProgress])
             }
         }
         isReconciling = true
         defer { isReconciling = false }
         var archive: Result<PreparedArchive, any Error>?
         var statuses: [RepositoryRunnerStatus] = []
-        let initialScan: (runners: [LocalRunner], errors: [String])
+        let initialScan: (runners: [LocalRunner], problems: [RunnerProvisioningProblem])
         do { initialScan = try localRunners() }
         catch {
             return repositories.map {
-                Self.status(repository: $0, capacity: capacity, runners: [], error: error.localizedDescription)
+                Self.status(repository: $0, capacity: capacity, runners: [], problems: [.failed(error.localizedDescription)])
             }
         }
         let initialLocal = initialScan.runners
@@ -169,11 +207,11 @@ actor RunnerProvisioner {
             } catch { localOwnership[repository.id] = .failure(error) }
         }
         let sharedLabels = Self.commonCustomLabels(of: sharedRunners)
+        var authenticationError: GitHubError?
 
         for repository in repositories {
             var knownRunners: [GitHubRunner] = []
-            var messages = initialScan.errors
-            var requiresAuthentication = false
+            var problems = initialScan.problems
             do {
                 try Task.checkCancellation()
                 guard let snapshot = snapshots[repository.id] else { throw CancellationError() }
@@ -185,14 +223,14 @@ actor RunnerProvisioner {
                 let labels = Array(Set(inheritedLabels + ["xcode-runnerkit"])).sorted()
                 let individualCount = local.count(where: { $0.hasIndividualService })
                 if individualCount > 0 {
-                    messages.append("\(individualCount) runner(s) use an individual service and were left unchanged.")
+                    problems.append(.individualServices(count: individualCount))
                 }
                 let unhosted = try local.filter { runner in
                     guard !runner.isHosted && !runner.hasIndividualService else { return false }
                     return try !canResumeInstallation(at: runner.directory, repository: repository, remote: remote)
                 }
                 if !unhosted.isEmpty {
-                    messages.append("\(unhosted.count) registration(s) have not opted in to this host and were left unchanged.")
+                    problems.append(.unhostedRegistrations(count: unhosted.count))
                 }
 
                 let missing = max(0, capacity - knownRunners.count)
@@ -241,28 +279,27 @@ actor RunnerProvisioner {
                             ))
                         }
                     } catch {
-                        messages.append(error.localizedDescription.replacingOccurrences(of: registrationToken, with: "[redacted]"))
+                        problems.append(.failed(error.localizedDescription.replacingOccurrences(of: registrationToken, with: "[redacted]")))
                     }
                     // A failed installer can still have registered a runner. Preserve and report that partial result.
                     remote = try await client.listRunners(repository: repository, accessToken: token)
                     let scan = try localRunners()
-                    for error in scan.errors where !messages.contains(error) { messages.append(error) }
+                    for problem in scan.problems where !problems.contains(problem) { problems.append(problem) }
                     local = try scan.runners.filter {
                         try $0.belongs(to: repository, remote: remote, resolvedRepositories: resolvedRepositories)
                     }
                     knownRunners = Self.managedRunners(local: local, remote: remote)
                 }
             } catch {
-                messages.append(error.localizedDescription)
+                problems.append(.failed(error.localizedDescription))
                 if let error = error as? GitHubError, case .response(status: 401, message: _) = error {
-                    requiresAuthentication = true
+                    authenticationError = error
                 }
             }
-            statuses.append(Self.status(
-                repository: repository, capacity: capacity, runners: knownRunners,
-                error: messages.isEmpty ? nil : messages.joined(separator: " "),
-                requiresAuthentication: requiresAuthentication
-            ))
+            statuses.append(Self.status(repository: repository, capacity: capacity, runners: knownRunners, problems: problems))
+        }
+        if let authenticationError {
+            throw RunnerProvisioningAuthenticationFailure(statuses: statuses, underlyingError: authenticationError)
         }
         return statuses
     }
@@ -295,14 +332,14 @@ actor RunnerProvisioner {
         return true
     }
 
-    private func localRunners() throws -> (runners: [LocalRunner], errors: [String]) {
+    private func localRunners() throws -> (runners: [LocalRunner], problems: [RunnerProvisioningProblem]) {
         let manager = FileManager.default
         let directories: [URL]
         do {
             directories = try manager.contentsOfDirectory(at: installation.runnersRoot, includingPropertiesForKeys: [.isDirectoryKey])
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return ([], []) }
         var runners: [LocalRunner] = []
-        var errors: [String] = []
+        var problems: [RunnerProvisioningProblem] = []
         for directory in directories {
             let metadata = directory.appending(path: ".runner")
             do {
@@ -315,10 +352,10 @@ actor RunnerProvisioner {
                     isHosted: manager.fileExists(atPath: directory.appending(path: ".xcode-runner-host").path(percentEncoded: false))
                 ))
             } catch {
-                errors.append("Could not read the registration at \(metadata.path(percentEncoded: false)): \(error.localizedDescription)")
+                problems.append(.unreadableRegistration(path: metadata.path(percentEncoded: false), reason: error.localizedDescription))
             }
         }
-        return (runners, errors)
+        return (runners, problems)
     }
 
     private static func managedRunners(local: [LocalRunner], remote: [GitHubRunner]) -> [GitHubRunner] {
@@ -336,14 +373,12 @@ actor RunnerProvisioner {
     }
 
     private static func status(
-        repository: GitHubRepository, capacity: Int, runners: [GitHubRunner], error: String?,
-        requiresAuthentication: Bool = false
+        repository: GitHubRepository, capacity: Int, runners: [GitHubRunner], problems: [RunnerProvisioningProblem]
     ) -> RepositoryRunnerStatus {
         RepositoryRunnerStatus(
             repository: repository, desiredCount: capacity, registeredCount: runners.count,
             onlineCount: runners.count(where: { $0.status == "online" }), busyCount: runners.count(where: \.busy),
-            excessCount: max(0, runners.count - capacity), errorMessage: error,
-            requiresAuthentication: requiresAuthentication
+            excessCount: max(0, runners.count - capacity), problems: problems
         )
     }
 
