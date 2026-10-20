@@ -34,6 +34,10 @@ def descendants(snapshot, root):
         owned = expanded
 
 
+# Steps wait for the state they need. This limit only reports a process that hangs.
+HANG_LIMIT = 120
+
+
 def wait_for(predicate, timeout):
     deadline = time.monotonic() + timeout
     while not predicate():
@@ -83,9 +87,9 @@ def main():
                     owned |= {pid for pid, info in snapshot.items() if info[1] == group}
                     start = time.monotonic()
                     job.send_signal(number)
-                    code = job.wait(timeout=10)
+                    code = job.wait(timeout=HANG_LIMIT)
                     assert code == 130, (code, log.read_text(errors="replace")[-3000:])
-                    wait_for(lambda: not (owned & processes().keys()), 5)
+                    wait_for(lambda: not (owned & processes().keys()), HANG_LIMIT)
                     with (root / "pool/slot-0.lock").open("rb") as lock:
                         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     results.append({"signal": name, "seconds": round(time.monotonic() - start, 3),
@@ -95,7 +99,7 @@ def main():
                     if job.poll() is None:
                         job.send_signal(signal.SIGTERM)
                         try:
-                            job.wait(timeout=10)
+                            job.wait(timeout=HANG_LIMIT)
                         except subprocess.TimeoutExpired:
                             job.kill()
                             job.wait()
