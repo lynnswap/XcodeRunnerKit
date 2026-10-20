@@ -67,7 +67,7 @@ private struct PoolOptions: ParsableArguments {
         if let poolDirectory {
             return HostExecutionPool(directory: URL(filePath: poolDirectory, relativeTo: URL.currentDirectory()).standardizedFileURL)
         }
-        return HostExecutionPool(directory: try HostInstallation.hostedConfiguration()?.poolDirectory ?? HostInstallation().poolDirectory)
+        return HostExecutionPool(directory: try HostInstallation.hostedPoolDirectory() ?? HostInstallation().poolDirectory)
     }
 }
 

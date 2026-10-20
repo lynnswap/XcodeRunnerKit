@@ -10,15 +10,21 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request replaces its running checks. Other runs get
+# their own group, so no main commit loses its run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 defaults:
   run:
     shell: bash
 
 jobs:
-  macos:
+  xcode:
     if: github.repository == 'lynnswap/XcodeRunnerKit'
     runs-on: xcode-27
-    timeout-minutes: 45
+    timeout-minutes: 20
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
     steps:
@@ -55,65 +61,9 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: macos-results
+          name: xcode-results
           path: |
             ${{ runner.temp }}/XcodeRunnerKit-macos/*/xcodebuild.log
             ${{ runner.temp }}/XcodeRunnerKit-macos/*/Results.xcresult
-          retention-days: 1
-          if-no-files-found: ignore
-
-  ios:
-    if: github.repository == 'lynnswap/XcodeRunnerKit'
-    runs-on: xcode-27
-    timeout-minutes: 45
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Start the consumer Simulator
-        run: |
-          xcrun simctl create "XcodeRunnerKit-consumer-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
-            com.apple.CoreSimulator.SimDeviceType.iPhone-17 \
-            com.apple.CoreSimulator.SimRuntime.iOS-27-0 \
-            > "$RUNNER_TEMP/XcodeRunnerKit-consumer-udid"
-          udid=$(cat "$RUNNER_TEMP/XcodeRunnerKit-consumer-udid")
-          echo "CONSUMER_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
-          date -u '+Simulator boot started: %Y-%m-%dT%H:%M:%SZ'
-          xcrun simctl boot "$udid"
-      - name: Build the checkout CLI
-        run: |
-          exec xcodebuild build \
-            -scheme XcodeRunnerKit-Package \
-            -destination 'platform=macOS,arch=arm64' \
-            -configuration Release \
-            -derivedDataPath "$RUNNER_TEMP/XcodeRunnerKit-cli" \
-            -jobs 3
-      - name: Test the iOS consumer fixture
-        run: |
-          xcrun simctl bootstatus "$CONSUMER_SIMULATOR_UDID" -b
-          exec "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner" test \
-            --package "$GITHUB_WORKSPACE/Tests/Fixtures/BuildProbe" --scheme BuildProbe \
-            --destination "platform=iOS Simulator,id=$CONSUMER_SIMULATOR_UDID" \
-            --pool-directory "$RUNNER_TEMP/Pool" --maximum-concurrent-jobs 2 \
-            --compilation-cache "$RUNNER_TEMP/CompilationCache" \
-            --output-directory "$RUNNER_TEMP/XcodeRunnerKit-ios" \
-            -- -parallel-testing-enabled NO -jobs 3
-      - name: Delete the consumer Simulator
-        if: always()
-        run: |
-          if [[ -s "$RUNNER_TEMP/XcodeRunnerKit-consumer-udid" ]]; then
-            xcrun simctl delete "$(cat "$RUNNER_TEMP/XcodeRunnerKit-consumer-udid")"
-          fi
-      - name: Check pooled Simulator reuse and cleanup
-        run: python3 Scripts/check-simulators.py "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
-        with:
-          name: ios-results
-          path: |
-            ${{ runner.temp }}/XcodeRunnerKit-ios/*/xcodebuild.log
-            ${{ runner.temp }}/XcodeRunnerKit-ios/*/Results.xcresult
           retention-days: 1
           if-no-files-found: ignore

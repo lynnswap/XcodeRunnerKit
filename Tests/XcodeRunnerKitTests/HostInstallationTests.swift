@@ -52,6 +52,8 @@ struct HostInstallationTests {
         #expect(throws: HostInstallation.ConfigurationError.self) {
             try HostInstallation.hostedConfiguration(environment: environment)
         }
+        // Pool commands do not depend on the build service record.
+        #expect(try HostInstallation.hostedPoolDirectory(environment: environment) == installation.poolDirectory)
         try FileManager.default.removeItem(at: record)
         try FileManager.default.createDirectory(at: record, withIntermediateDirectories: false)
         #expect(throws: (any Error).self) {
