@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import XcodeRunnerKit
 
+@Suite(.timeLimit(.minutes(1)))
 struct SimulatorPoolTests {
     @Test(arguments: [Int32(0), Int32(7)])
     func completedOperationsCleanAndReuseTheSameDevice(exitCode: Int32) async throws {
@@ -111,32 +112,30 @@ struct SimulatorPoolTests {
         defer { fixture.remove() }
         let gate = fixture.root.appending(path: "lease-child-gate")
         let started = fixture.root.appending(path: "lease-child-started")
-        let finished = fixture.root.appending(path: "lease-child-finished")
         try Data().write(to: gate)
         defer { try? FileManager.default.removeItem(at: gate) }
         let runner = fixture.runner
         var request = fixture.request("first")
         request.environment["LEASE_CHILD_GATE"] = gate.path
         request.environment["LEASE_CHILD_STARTED"] = started.path
-        request.environment["LEASE_CHILD_FINISHED"] = finished.path
         let firstRequest = request
         let first = Task { try await runner.run(.test, request: firstRequest) }
         defer { first.cancel() }
 
         try await waitForFile(started)
         let identifier = try String(contentsOf: fixture.root.appending(path: "started-first"), encoding: .utf8)
-        let cleanup = fixture.root.appending(path: "cleanup-started-" + identifier)
-        try await Task.sleep(for: .milliseconds(300))
-        #expect(!FileManager.default.fileExists(atPath: cleanup.path))
+        // The child still holds the first lease, so the next operation needs another device.
         let second = try await runner.run(.test, request: fixture.request("second"))
         #expect(second.simulatorIdentifier != identifier)
-        #expect(!FileManager.default.fileExists(atPath: cleanup.path))
 
         try FileManager.default.removeItem(at: gate)
-        try await waitForFile(finished)
         let firstResult = try await first.value
         #expect(firstResult.simulatorIdentifier == identifier)
-        #expect(FileManager.default.fileExists(atPath: cleanup.path))
+        // The fake tools record both events, so this order does not depend on when the test looked.
+        let events = try fixture.events()
+        let finished = try #require(events.firstIndex(of: "lease-child-finished"))
+        let cleanup = try #require(events.firstIndex(of: "cleanup-started " + identifier))
+        #expect(finished < cleanup)
     }
 
     @Test func deviceRemainsLeasedUntilCleanupFinishes() async throws {
@@ -267,12 +266,7 @@ struct SimulatorPoolTests {
     }
 
     private func waitForFile(_ url: URL) async throws {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(10))
-        while !FileManager.default.fileExists(atPath: url.path), clock.now < deadline {
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        try #require(FileManager.default.fileExists(atPath: url.path), "The operation did not reach its gate.")
+        try await waitUntil { FileManager.default.fileExists(atPath: url.path) }
     }
 
     private struct Fixture: Sendable {
@@ -313,6 +307,7 @@ struct SimulatorPoolTests {
                         exit 405
                     fi
                     touch "$root/cleanup-started-$3"
+                    printf 'cleanup-started %s\\n' "$3" >> "$root/events"
                     while [ -e "$root/cleanup-gate-$3" ]; do sleep 0.02; done
                     printf '<?xml version="1.0"?><plist version="1.0"><dict><key>com.example.TestHost</key><dict><key>ApplicationType</key><string>User</string></dict><key>com.apple.mobilesafari</key><dict><key>ApplicationType</key><string>System</string></dict></dict></plist>\\n';;
                 bootstatus)
@@ -341,7 +336,7 @@ struct SimulatorPoolTests {
                     (
                         touch "$LEASE_CHILD_STARTED"
                         while [ -e "$LEASE_CHILD_GATE" ]; do sleep 0.02; done
-                        touch "$LEASE_CHILD_FINISHED"
+                        printf 'lease-child-finished\\n' >> "$FIXTURE_ROOT/events"
                     ) </dev/null >/dev/null 2>&1 &
                 fi
                 if [ "$SHUTDOWN_AFTER_TEST" = '1' ] && [ "$EXIT_CODE" = '0' ]; then
@@ -372,6 +367,10 @@ struct SimulatorPoolTests {
                 "EXIT_CODE": String(exitCode),
             ]
             return request
+        }
+
+        func events() throws -> [String] {
+            try String(contentsOf: root.appending(path: "events"), encoding: .utf8).split(separator: "\n").map(String.init)
         }
 
         func calls() throws -> [String] {

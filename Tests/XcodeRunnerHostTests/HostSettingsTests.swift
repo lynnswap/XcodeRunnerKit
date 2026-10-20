@@ -3,7 +3,7 @@ import Testing
 import XcodeRunnerKit
 @testable import XcodeRunnerHost
 
-@MainActor
+@MainActor @Suite(.timeLimit(.minutes(1)))
 struct HostSettingsTests {
     private func model(at root: URL) throws -> HostSettingsModel {
         try HostSettingsModel(installation: HostInstallation(homeDirectory: root.appending(path: "Home")))
@@ -187,10 +187,9 @@ struct HostSettingsTests {
             finish.continuation.finish()
             for job in [active, high, medium, low] { job.cancel() }
         }
-        for _ in 0..<100 {
+        try await waitUntil {
             await settings.refreshPoolStatus()
-            if settings.poolStatus?.waitingJobCounts.total == 3 { break }
-            try await Task.sleep(for: .milliseconds(50))
+            return settings.poolStatus?.waitingJobCounts.total == 3
         }
         #expect(settings.poolStatus?.activeJobCount == 1)
         #expect(settings.poolStatus?.waitingJobCounts.high == 1)
