@@ -380,9 +380,10 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost storage change ') as tempora
             destination = root/'New job data'
             destination.mkdir()
             (host_root/'requested-storage-directory').write_text(str(destination.resolve()))
-            # The host reports no scan event to wait for. This window can only miss an unwanted stop;
-            # it cannot fail a host that leaves the runner alone.
-            time.sleep(3)
+            # Discovering a runner added after the save shows that the host scanned with the selection pending.
+            discovered = fixture(runners, 'after-selection')
+            wait_for(lambda:(discovered/'pid.json').exists(), 'Host did not discover a runner after the storage selection was saved')
+            assert json.loads((discovered/'pid.json').read_text())['storage'] == str(source)
             assert alive(original_process['pid']), 'Saving a storage selection stopped an active runner'
             assert (first/'.runner').read_bytes() == original_registration
             assert (host_root/'storage-directory').read_text() == str(source)

@@ -64,7 +64,7 @@ struct HostStorageMigrationTests {
         #expect(try installation.storage()?.directory == source.directory)
     }
 
-    @Test func removedManagedWorkFolderCanBeRecreatedByRunnerAfterLaunchOrRelocation() async throws {
+    @Test func removedManagedWorkFolderIsNotRecreatedAtLaunchAndCanBeCreatedAfterRelocation() async throws {
         let (root, installation, source) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
         let directory = try runner("runner-one", installation: installation, storage: source)
@@ -82,7 +82,6 @@ struct HostStorageMigrationTests {
         let newWork = migrated.workDirectory.appending(path: "runner-one")
         #expect(registration["workFolder"] as? String == newWork.path(percentEncoded: false))
         try FileManager.default.createDirectory(at: newWork, withIntermediateDirectories: true)
-        #expect(try newWork.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true)
     }
 
     @Test func unavailableStorageParentPreservesPendingChangeUntilSourceReturns() async throws {
@@ -348,7 +347,7 @@ struct HostStorageMigrationTests {
         #expect(try Data(contentsOf: file) == original)
     }
 
-    @Test func registrationWriteFailureRestoresPriorChangesAndPreservesSource() async throws {
+    @Test func registrationReadOrWriteFailurePreservesSourceAndCleansDestinationForRetry() async throws {
         let (root, installation, source) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
         let first = try runner("runner-one", installation: installation, storage: source)
@@ -386,6 +385,7 @@ struct HostStorageMigrationTests {
         for (directory, data) in zip([first, second], originals) {
             #expect(try Data(contentsOf: directory.appending(path: ".runner")) == data)
         }
+        // Scan order decides whether runner-one is rewritten before this failure. The interrupted-migration test covers restoring a rewritten registration.
         try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: second.appending(path: ".runner").path(percentEncoded: false))
         try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: second.path(percentEncoded: false))
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: second.path(percentEncoded: false)) }
