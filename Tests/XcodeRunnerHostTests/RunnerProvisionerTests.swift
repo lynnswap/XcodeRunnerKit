@@ -16,6 +16,7 @@ struct RunnerProvisionerTests {
         var installations: [RunnerProvisioner.InstallationRequest] = []
         var tokenRequests = 0
         var archiveRequests = 0
+        var archivePreparations = 0
         var runnerListRequests: [Int] = []
         var failedRepository: Int?
         var failingInstallation: Int?
@@ -73,6 +74,11 @@ struct RunnerProvisionerTests {
                 downloadURL: URL(string: "https://example.invalid/runner.tar.gz")!,
                 sha256Checksum: "test-checksum"
             )
+        }
+
+        func prepareArchive(_ download: GitHubRunnerDownload) -> URL {
+            archivePreparations += 1
+            return installation.homeDirectory.appending(path: "verified-runner.tar.gz")
         }
 
         func addRunner(
@@ -163,7 +169,7 @@ struct RunnerProvisionerTests {
         let client = Client(installation: installation)
         return (root, client, RunnerProvisioner(
             installation: installation, installerURL: root.appending(path: "unused-installer.sh"), client: client,
-            hostName: "CI Mac", prepareArchive: { _ in root.appending(path: "verified-runner.tar.gz") },
+            hostName: "CI Mac", prepareArchive: { await client.prepareArchive($0) },
             installRunner: { try await client.install($0) }
         ))
     }
@@ -209,6 +215,7 @@ struct RunnerProvisionerTests {
         #expect(statuses.map(\.registeredCount) == [2, 2])
         #expect(await client.installations.count == 4)
         #expect(await client.archiveRequests == 1)
+        #expect(await client.archivePreparations == 1)
         #expect(await client.tokenRequests == 2)
     }
 
@@ -282,7 +289,9 @@ struct RunnerProvisionerTests {
         #expect(status.busyCount == 1)
         #expect(await client.installations.isEmpty)
         #expect(await client.archiveRequests == 0)
-        #expect(FileManager.default.fileExists(atPath: root.appending(path: "Library/XcodeRunnerKit/runners/busy/.runner").path(percentEncoded: false)))
+        for name in ["busy", "idle"] {
+            #expect(FileManager.default.fileExists(atPath: root.appending(path: "Library/XcodeRunnerKit/runners/\(name)/.runner").path(percentEncoded: false)))
+        }
     }
 
     @Test func remoteRunnersOnOtherHostsAndUnmatchedLocalIdentifiersDoNotReduceTheTarget() async throws {
@@ -508,7 +517,8 @@ struct RunnerProvisionerTests {
         #expect(try Data(contentsOf: directory.appending(path: ".runner")) == metadata)
     }
 
-    @Test func realInstallerReceivesTokenOnStandardInputAndReportsRedactedFailures() async throws {
+    @Test(arguments: [false, true])
+    func realInstallerReceivesTokenOnStandardInputAndReportsRedactedFailures(resumesOfflineRegistration: Bool) async throws {
         let root = URL.temporaryDirectory.appending(path: "Runner installer \(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -525,19 +535,31 @@ struct RunnerProvisionerTests {
         """.write(to: installer, atomically: true, encoding: .utf8)
         let installation = HostInstallation(homeDirectory: root)
         let client = Client(installation: installation)
+        let name = RunnerProvisioner.runnerName(hostName: "CI Mac", repository: firstRepository, slot: 1)
+        if resumesOfflineRegistration {
+            // GitHub lists the owned installation's runner, but the installer never saved its local settings.
+            let directory = installation.runnersRoot.appending(path: name)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try String(firstRepository.id).write(
+                to: directory.appending(path: ".xcode-runner-installation"), atomically: true, encoding: .utf8
+            )
+            await client.addRemoteRunner(repository: firstRepository, identifier: 1, name: name, online: false, busy: false)
+        }
         let archive = root.appending(path: "verified runner.tar.gz")
         let provisioner = RunnerProvisioner(
-            installation: installation, installerURL: installer, client: client,
+            installation: installation, installerURL: installer, client: client, hostName: "CI Mac",
             prepareArchive: { _ in archive }
         )
         let statuses = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
         #expect(try String(contentsOf: root.appending(path: "token-input"), encoding: .utf8) == "short-lived-registration-token")
         #expect(try String(contentsOf: root.appending(path: "repository-id"), encoding: .utf8) == String(firstRepository.id))
-        #expect(try String(contentsOf: root.appending(path: "replace-registration"), encoding: .utf8) == "0")
+        let replacement = resumesOfflineRegistration ? "1" : "0"
+        #expect(try String(contentsOf: root.appending(path: "replace-registration"), encoding: .utf8) == replacement)
         let arguments = try String(contentsOf: root.appending(path: "installer-arguments"), encoding: .utf8)
             .split(separator: "\n").map(String.init)
         #expect(arguments.count == 5)
         #expect(arguments[0] == firstRepository.fullName)
+        #expect(arguments[1] == name)
         #expect(arguments[2] == archive.path(percentEncoded: false))
         #expect(arguments[3] == "xcode-runnerkit")
         #expect(arguments[4] == "test-checksum")
@@ -612,9 +634,23 @@ struct RunnerProvisionerTests {
         #expect(throws: (any Error).self) { try RunnerProvisioner.verifyArchive(at: file, checksum: String(repeating: "0", count: 64)) }
     }
 
-    @Test func runnerNamesAreStableAndDistinguishRepositoryOwners() {
+    @Test func pendingInstallationUnderItsSavedNameIsResumed() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        // The name an existing installation saved for CI Mac, example/First, slot 1. A different
+        // generated name would leave this installation behind and register another runner.
+        let savedName = "xcrk-ci-mac-first-f05d62d6cc3f-1"
+        let directory = root.appending(path: "Library/XcodeRunnerKit/runners/\(savedName)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try String(firstRepository.id).write(
+            to: directory.appending(path: ".xcode-runner-installation"), atomically: true, encoding: .utf8
+        )
+        _ = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
+        #expect(await client.installations.map(\.runnerName) == [savedName])
+    }
+
+    @Test func runnerNamesDistinguishRepositoryOwnersAndFormOnePathComponent() {
         let first = RunnerProvisioner.runnerName(hostName: "CI Mac", repository: firstRepository, slot: 1)
-        #expect(first == RunnerProvisioner.runnerName(hostName: "CI Mac", repository: firstRepository, slot: 1))
         #expect(first != RunnerProvisioner.runnerName(
             hostName: "CI Mac", repository: GitHubRepository(id: 3, fullName: "another/First"), slot: 1
         ))
