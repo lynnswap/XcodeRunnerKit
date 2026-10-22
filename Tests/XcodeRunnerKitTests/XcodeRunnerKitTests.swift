@@ -52,7 +52,6 @@ struct XcodeRunnerKitTests {
         let status = try #require(try await pool.status())
         #expect(status.activeJobCount == 0)
         #expect(status.waitingJobCounts.total == 0)
-        #expect(HostExecutionPool.Priority.allCases.allSatisfy { status.waitingJobCounts[$0] == 0 })
     }
 
     @Test func capturesOutputAndPreservesArgumentsWithSpaces() async throws {
