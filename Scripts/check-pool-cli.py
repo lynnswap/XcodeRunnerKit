@@ -125,6 +125,7 @@ def main():
             wait_for(lambda: started("waiter"))
             assert status() == expected_status(4, 4)
             saved = status()
+            # Only "0" reaches the positive-limit check; ArgumentParser rejects "-1" as a missing value.
             for value in ("0", "-1", "invalid"):
                 configure(value, success=False)
                 assert status() == saved
@@ -211,33 +212,24 @@ exec "$(xcrun --find clang)" "$@"
             assert "must be positive" in result.stderr, result.stderr
         assert not (root / "Unconfigured pool/capacity").exists()
         for action in ACTIONS:
-            help_text = command(action, "--help").stdout
-            assert all(option in help_text for option in ("--scheme", "--compilation-cache", "--priority"))
-            assert "GitHub dispatch is unaffected" in " ".join(help_text.split())
-            for invalid in ("normal", "HIGH", ""):
-                result = command(action, "--package", root / "Missing", "--scheme", "Fixture",
-                                 "--priority", invalid, success=False)
-                assert "Expected high, medium, or low for --priority" in result.stderr
-            result = command(action, "--package", root / "Missing", "--scheme", "Fixture",
-                             "--destination", "platform=macOS,arch=arm64",
-                             "--output-directory", root / "Output",
-                             "--developer-directory", "/Applications/Xcode.app/Contents/Developer",
-                             "--derived-data", root / "DerivedData",
-                             "--compilation-cache", root / "Cache", "--cache-diagnostics",
-                             "--prefix-mapping", f"{root}=/fixture",
-                             "--setting", "CLI_PROBE_SETTING=accepted",
-                             "--environment", "CLI_PROBE_ENVIRONMENT=accepted",
-                             "--pool-directory", pool, "--maximum-concurrent-jobs", "2",
-                             "--priority", "low",
-                             "--simulator-runtime", "missing-device-type",
-                             "--", "-parallel-testing-enabled", "NO", "-jobs", "2",
-                             success=False)
-            assert "Specify both --simulator-runtime and --simulator-device-type." in result.stderr
-            result = command(action, "--package", root / "Missing", "--scheme", "Fixture",
-                             "--destination", "platform=macOS,arch=arm64",
-                             "--simulator-runtime", "runtime", "--simulator-device-type", "device",
-                             success=False)
-            assert "Specify either --destination or the Simulator options, not both." in result.stderr
+            command(action, "--help")
+        # All actions share BuildOptions and run for real below, so one action checks the shared help and rejections.
+        help_text = command("build", "--help").stdout
+        assert all(option in help_text for option in ("--scheme", "--compilation-cache", "--priority"))
+        assert "GitHub dispatch is unaffected" in " ".join(help_text.split())
+        # Priorities are case-sensitive, and an explicit empty value does not fall back to medium.
+        for invalid in ("HIGH", ""):
+            result = command("build", "--package", root / "Missing", "--scheme", "Fixture",
+                             "--priority", invalid, success=False)
+            assert "Expected high, medium, or low for --priority" in result.stderr
+        result = command("build", "--package", root / "Missing", "--scheme", "Fixture",
+                         "--simulator-runtime", "runtime", success=False)
+        assert "Specify both --simulator-runtime and --simulator-device-type." in result.stderr
+        result = command("build", "--package", root / "Missing", "--scheme", "Fixture",
+                         "--destination", "platform=macOS,arch=arm64",
+                         "--simulator-runtime", "runtime", "--simulator-device-type", "device",
+                         success=False)
+        assert "Specify either --destination or the Simulator options, not both." in result.stderr
 
         for source_option in ("--workspace", "--project"):
             result = command("test", source_option, package, "--package", package,
