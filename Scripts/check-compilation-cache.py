@@ -15,6 +15,12 @@ parser.add_argument("executable", type=Path)
 args = parser.parse_args()
 
 
+def replace(path, old, new):
+    text = path.read_text()
+    assert old in text, (path, old)
+    path.write_text(text.replace(old, new))
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="XcodeRunner Cache ") as temporary:
         root = Path(temporary)
@@ -24,10 +30,10 @@ def main():
             shutil.copytree(REPO / "Tests/Fixtures/BuildProbe", package,
                             ignore=shutil.ignore_patterns(".build", ".swiftpm"))
             if changed:
-                source = package / "Sources/CProbe/CProbe.c"
-                source.write_text(source.read_text().replace("value * 2", "value * 3"))
-                test = package / "Tests/BuildProbeTests/BuildProbeTests.swift"
-                test.write_text(test.read_text().replace("doubled(4) == 8", "doubled(4) == 12"))
+                # The expected 12 detects a replayed C object only when both edits apply.
+                replace(package / "Sources/CProbe/CProbe.c", "value * 2", "value * 3")
+                replace(package / "Tests/BuildProbeTests/BuildProbeTests.swift",
+                        "doubled(4) == 8", "doubled(4) == 12")
             output = root / name / "output"
             log = root / (name + ".log")
             start = time.monotonic()
@@ -45,6 +51,9 @@ def main():
             text = log.read_text().lower()
             errors = [line for line in log.read_text().splitlines() if "error:" in line.lower()]
             assert result.returncode == 0, (name, errors, log.read_text()[-2000:])
+            if changed:
+                # A zero exit status does not show that the test checking the new C result ran.
+                assert "Test countsAndCallsClangTarget() passed" in log.read_text(), log.read_text()[-2000:]
             # Xcode may print a remark more than once: these are note counts, not task counts.
             return {"name": name, "seconds": round(time.monotonic() - start, 2),
                     "hitNotes": text.count("replay cache hit"),
@@ -58,6 +67,7 @@ def main():
             parallel = list(pool.map(run, ["parallel-a", "parallel-b"]))
         assert all(r["hitNotes"] > 0 and r["missNotes"] == 0 for r in parallel), parallel
         changed = run("changed", changed=True)
+        # The passing C test is the evidence; misses also come from the edited Swift test.
         assert changed["missNotes"] > 0, "Changed compiler input incorrectly produced only cache hits"
         print(json.dumps({"passed": True, "runs": [cold, relocated, *parallel, changed],
                           "fixture": "Swift, Clang, SDK Observation macro; stable BuildProbe package identity"}))
