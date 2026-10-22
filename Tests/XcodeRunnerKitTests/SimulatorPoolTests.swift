@@ -14,12 +14,17 @@ struct SimulatorPoolTests {
         let second = try await runner.run(.test, request: fixture.request("second"))
 
         #expect(first.status == .exited(exitCode))
-        #expect(second.simulatorIdentifier == first.simulatorIdentifier)
+        let identifier = try #require(first.simulatorIdentifier)
+        #expect(second.simulatorIdentifier == identifier)
         let calls = try fixture.calls()
         #expect(calls.filter { $0.hasPrefix("create ") }.count == 1)
         #expect(!calls.contains { $0.hasPrefix("delete ") })
-        #expect(calls.filter { $0.hasPrefix("keychain ") && $0.hasSuffix(" reset") }.count == 2)
-        #expect(calls.filter { $0.hasPrefix("uninstall ") && $0.hasSuffix(" com.example.TestHost") }.count == 2)
+        for request in [
+            "uninstall \(identifier) com.example.TestHost", "keychain \(identifier) reset",
+            "privacy \(identifier) reset all", "status_bar \(identifier) clear", "location \(identifier) clear",
+        ] {
+            #expect(calls.filter { $0 == request }.count == 2, "\(request)")
+        }
         #expect(!calls.contains { $0.hasPrefix("uninstall ") && $0.hasSuffix(" com.apple.mobilesafari") })
     }
 
@@ -277,7 +282,7 @@ struct SimulatorPoolTests {
             try FileManager.default.createDirectory(at: root.appending(path: "devices"), withIntermediateDirectories: true)
             try writeScript("""
                 root='\(root.path)'
-                printf '%s %s %s\\n' "$2" "$3" "$4" >> "$root/calls"
+                (shift; printf '%s\\n' "$*") >> "$root/calls"
                 case "$2" in
                 create)
                     identifier=$(/usr/bin/uuidgen)
@@ -374,8 +379,7 @@ struct SimulatorPoolTests {
         }
 
         func calls() throws -> [String] {
-            try String(contentsOf: root.appending(path: "calls"), encoding: .utf8)
-                .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+            try String(contentsOf: root.appending(path: "calls"), encoding: .utf8).split(separator: "\n").map(String.init)
         }
 
         func remove() { try? FileManager.default.removeItem(at: root) }

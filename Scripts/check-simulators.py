@@ -131,6 +131,16 @@ def main():
             assert match, (name, "No Simulator destination in xcodebuild log")
             return match[1].upper()
 
+        def payload_started(name):
+            # A compiler diagnostic can quote the marker's source line, which has no process identifier.
+            return re.search(r"BuildProbe payload ready pid=\d+", (root / (name + ".log")).read_text(errors="replace"))
+
+        def failed_tests(name):
+            bundle, = (root / name / "output").glob("*/Results.xcresult")
+            summary = json.loads(subprocess.check_output(
+                ["xcrun", "xcresulttool", "get", "test-results", "summary", "--path", str(bundle)]))
+            return [failure["testName"] for failure in summary["testFailures"]]
+
         try:
             start("a")
             start("b")
@@ -143,20 +153,8 @@ def main():
             assert devices() == baseline | owned, "Successful jobs did not retain their devices"
             assert owned <= booted_devices(), "Idle pooled devices did not remain booted"
 
-            start("reuse")
-            finish("reuse")
-            assert used_identifier("reuse") in owned
-            assert devices() == baseline | owned, "Sequential job created another device"
-            assert owned <= booted_devices(), "Sequential job shut down a pooled device"
-
-            start("failure", "failure")
-            finish("failure", succeeds=False)
-            assert used_identifier("failure") in owned
-            assert devices() == baseline | owned, "Failed test did not release its device for reuse"
-            assert owned <= booted_devices(), "Failed test shut down a pooled device"
-
             cancelled = start("cancel", "wait")
-            wait_for(lambda: "BuildProbe payload ready" in (root / "cancel.log").read_text())
+            wait_for(lambda: payload_started("cancel"))
             cancelled.send_signal(signal.SIGTERM)
             assert cancelled.wait(timeout=60) == 130
             cancelled_identifier = used_identifier("cancel")
@@ -164,10 +162,22 @@ def main():
             retained = owned - {cancelled_identifier}
             assert devices() == baseline | retained, "Cancelled test did not retire its device"
 
-            start("after-cancel")
-            finish("after-cancel")
-            assert used_identifier("after-cancel") in retained
-            assert devices() == baseline | retained, "Cancellation left the pool unavailable"
+            # Only one pooled device remains, so the next pooled jobs must reuse it instead of creating another.
+            start("failure", "failure")
+            finish("failure", succeeds=False)
+            # A build failure also exits nonzero, so require the payload to start and fail its intended expectation.
+            assert payload_started("failure"), (root / "failure.log").read_text(errors="replace")[-3000:]
+            failures = failed_tests("failure")
+            assert failures == ["controlledPayload()"], failures
+            assert used_identifier("failure") in retained, "Cancellation left the pool unavailable"
+            assert devices() == baseline | retained, "Failed test did not release its device for reuse"
+            assert retained <= booted_devices(), "Failed test shut down a pooled device"
+
+            start("reuse")
+            finish("reuse")
+            assert used_identifier("reuse") == used_identifier("failure"), "Next job did not reuse the failed test's device"
+            assert devices() == baseline | retained, "Sequential job created another device"
+            assert retained <= booted_devices(), "Sequential job shut down a pooled device"
 
             start("fresh", fresh=True)
             finish("fresh")
