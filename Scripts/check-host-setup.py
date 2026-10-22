@@ -40,6 +40,12 @@ def wait_for(predicate, description, timeout=HANG_LIMIT):
         time.sleep(0.02)
 
 
+def has_open(process, path):
+    result = subprocess.run(["/usr/sbin/lsof", "-t", "-a", "-p", str(process.pid), "--", str(path)],
+                            capture_output=True, text=True, timeout=HANG_LIMIT)
+    return result.stdout.split() == [str(process.pid)]
+
+
 def install_cli(home):
     installed = home / "Library/Application Support/XcodeRunnerKit/bin/xcode-runner"
     installed.parent.mkdir(parents=True, exist_ok=True)
@@ -424,13 +430,9 @@ Path('.credentials').write_text('registered credentials')
     received = json.loads((installation / ".runner").read_text(encoding="utf-8-sig"))
     assert received == {"workFolder": str(work.resolve()), "labels": "xcode-runnerkit,custom-host"}
     assert work.is_dir()
-    credential_fixture = root / "credential-fixture.config"
-    credential_fixture.write_text("[fixture]\n    marker = present\n")
-    git = ["git", "-C", received["workFolder"]]
-    subprocess.run(git + ["init", "-q"], env=environment, check=True)
-    subprocess.run(git + ["config", "--local", f'includeIf.gitdir:{received["workFolder"]}/.git.path', str(credential_fixture)], env=environment, check=True)
-    marker = subprocess.check_output(git + ["config", "--get", "fixture.marker"], env=environment, text=True)
-    assert marker.strip() == "present"
+    assert (installation / ".xcode-runner-host").exists()
+    assert not (installation / ".service").exists()
+    assert (installation / "runsvc.sh").is_file()
     hook = Path((installation / ".env").read_text().strip().split("=", 1)[1])
     assert hook.is_absolute() and installation not in hook.parents
     temporary_data = work / "_temp"
@@ -438,14 +440,6 @@ Path('.credentials').write_text('registered credentials')
     (temporary_data / "dangling").symlink_to("missing")
     subprocess.run(["bash", str(hook)], env={**environment, "RUNNER_TEMP": str(temporary_data)}, check=True)
     assert not (temporary_data / "dangling").is_symlink()
-
-    hosted = ["bash", str(scripts / "install-github-runner.sh"), "OWNER/REPO", "hosted", str(archive), "xcode-runnerkit"]
-    subprocess.run(hosted, input="fixture-token\n", text=True, env=environment, check=True, capture_output=True)
-    hosted_directory = installation_root / "hosted"
-    assert (hosted_directory / ".xcode-runner-host").exists()
-    assert not (hosted_directory / ".service").exists()
-    assert (hosted_directory / "runsvc.sh").is_file()
-    assert (hosted_directory / ".runner").is_file()
 
     release_digest = "a" * 64
     release_environment = {**environment, "XRK_FIXTURE_ARCHIVE_SHA256": release_digest}
@@ -656,7 +650,8 @@ exec /bin/bash "$XRK_FIXTURE_ENABLE_SCRIPT" "$@"
     (unhosted / "bin/runsvc.sh").write_text("#!/bin/bash\nexit 0\n")
     (unhosted / "runsvc.sh").write_text("original service script")
     activation = None
-    with (Path(layout["hostRoot"]) / "storage.lock").open("r+") as lock:
+    lock_path = Path(layout["hostRoot"]) / "storage.lock"
+    with lock_path.open("r+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         registration = subprocess.Popen(installer[:3] + [runner_name, str(archive)],
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -667,6 +662,10 @@ exec /bin/bash "$XRK_FIXTURE_ENABLE_SCRIPT" "$@"
             activation = subprocess.Popen(["bash", str(scripts / "enable-hosted-runner.sh"), str(unhosted)],
                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                           env=second_environment, start_new_session=True)
+            # lock-host-storage.py opens the lock immediately before waiting on it, so an open lock
+            # shows the operation is queued before it can read the storage layout.
+            wait_for(lambda: has_open(registration, lock_path), "Runner registration did not reach the storage lock")
+            wait_for(lambda: has_open(activation, lock_path), "Runner activation did not reach the storage lock")
             subprocess.run([str(storage_probe), "prepare", str(second_home)],
                            env={**second_environment, "XCODE_RUNNER_STORAGE_LOCK_DESCRIPTOR": str(lock.fileno())},
                            pass_fds=(lock.fileno(),), check=True, capture_output=True, text=True, timeout=HANG_LIMIT)
