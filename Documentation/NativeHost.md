@@ -82,6 +82,9 @@ it stops the app from managing their count.
 
 The same limit caps the total managed Simulators across Xcode versions,
 runtimes, and device types. The host removes idle devices above the limit.
+It also deletes devices that have been idle for 20 minutes, even below the limit.
+Matching devices are reused in order of most recent return. If space is needed,
+the oldest returned idle devices are removed first.
 Devices in use finish before they are removed, so lowering the limit can
 temporarily leave more devices than the new limit. Runner registrations and
 GitHub's in-progress job count can still be higher.

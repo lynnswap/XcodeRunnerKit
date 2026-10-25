@@ -111,14 +111,17 @@ public struct HostExecutionPool: Sendable {
         catch { throw ConfigurationCleanupFailure(savedMaximumConcurrentJobs: capacity, underlyingError: error) }
     }
 
-    /// Deletes idle managed Simulators above the saved limit across the default and
-    /// associated custom registries. Active devices finish normally.
+    /// Deletes managed Simulators idle for 20 minutes, then the oldest idle devices
+    /// above the saved limit across the default and associated custom registries.
+    /// Active devices finish normally.
     public func removeExcessSimulators() async throws {
         try await removeExcessSimulators(executableURL: URL(filePath: "/usr/bin/xcrun"))
     }
 
-    func removeExcessSimulators(executableURL: URL) async throws {
-        try await simulatorPool.removeExcessSimulators(executableURL: executableURL)
+    func removeExcessSimulators(executableURL: URL, now: Date = Date()) async throws {
+        var pool = simulatorPool
+        pool.now = { now }
+        try await pool.removeExcessSimulators(executableURL: executableURL)
     }
 
     /// The execution limit was saved, but subsequent cleanup failed.

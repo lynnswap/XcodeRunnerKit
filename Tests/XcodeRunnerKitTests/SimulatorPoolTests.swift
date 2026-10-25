@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Synchronization
 import Testing
 @testable import XcodeRunnerKit
 
@@ -119,16 +120,23 @@ struct SimulatorPoolTests {
         let started = fixture.root.appending(path: "lease-child-started")
         try Data().write(to: gate)
         defer { try? FileManager.default.removeItem(at: gate) }
-        let runner = fixture.runner
+        let clock = Clock()
+        let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
+        var runner = fixture.runner(clock: clock)
+        runner.simulatorPool?.executionPool = pool
+        let selectedRunner = runner
         var request = fixture.request("first")
         request.environment["LEASE_CHILD_GATE"] = gate.path
         request.environment["LEASE_CHILD_STARTED"] = started.path
         let firstRequest = request
-        let first = Task { try await runner.run(.test, request: firstRequest) }
+        let first = Task { try await selectedRunner.run(.test, request: firstRequest) }
         defer { first.cancel() }
 
         try await waitForFile(started)
         let identifier = try String(contentsOf: fixture.root.appending(path: "started-first"), encoding: .utf8)
+        clock.advance(by: 40 * 60)
+        try await pool.removeExcessSimulators(executableURL: fixture.root.appending(path: "simctl"), now: clock.now)
+        #expect(try !fixture.calls().contains { $0.hasPrefix("delete " + identifier) })
         // The child still holds the first lease, so the next operation needs another device.
         let second = try await runner.run(.test, request: fixture.request("second"))
         #expect(second.simulatorIdentifier != identifier)
@@ -146,11 +154,15 @@ struct SimulatorPoolTests {
     @Test func deviceRemainsLeasedUntilCleanupFinishes() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
-        let runner = fixture.runner
+        let clock = Clock()
+        let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
+        var runner = fixture.runner(clock: clock)
+        runner.simulatorPool?.executionPool = pool
+        let selectedRunner = runner
         var request = fixture.request("first")
         request.environment["BLOCK_CLEANUP"] = "1"
         let firstRequest = request
-        let first = Task { try await runner.run(.test, request: firstRequest) }
+        let first = Task { try await selectedRunner.run(.test, request: firstRequest) }
         defer { first.cancel() }
         let started = fixture.root.appending(path: "started-first")
         try await waitForFile(started)
@@ -158,12 +170,21 @@ struct SimulatorPoolTests {
         let gate = fixture.root.appending(path: "cleanup-gate-" + identifier)
         defer { try? FileManager.default.removeItem(at: gate) }
         try await waitForFile(fixture.root.appending(path: "cleanup-started-" + identifier))
+        clock.advance(by: 40 * 60)
+        try await pool.removeExcessSimulators(executableURL: fixture.root.appending(path: "simctl"), now: clock.now)
+        #expect(try !fixture.calls().contains { $0.hasPrefix("delete " + identifier) })
 
         let second = try await runner.run(.test, request: fixture.request("second"))
         #expect(second.simulatorIdentifier != identifier)
         try FileManager.default.removeItem(at: gate)
         let firstResult = try await first.value
         #expect(firstResult.simulatorIdentifier == identifier)
+        clock.advance(by: 19 * 60)
+        try await pool.removeExcessSimulators(executableURL: fixture.root.appending(path: "simctl"), now: clock.now)
+        #expect(try fixture.devices().count == 2)
+        clock.advance(by: 60)
+        try await pool.removeExcessSimulators(executableURL: fixture.root.appending(path: "simctl"), now: clock.now)
+        #expect(try fixture.devices().isEmpty)
     }
 
     @Test(arguments: [Int32(0), Int32(7)])
@@ -481,6 +502,108 @@ struct SimulatorPoolTests {
         #expect(!FileManager.default.fileExists(atPath: fixture.root.appending(path: "exceeded-device-limit").path))
     }
 
+    @Test func eachReturnRenewsTheTwentyMinuteIdlePeriod() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let clock = Clock()
+        let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
+        var runner = fixture.runner(clock: clock)
+        runner.simulatorPool?.executionPool = pool
+        let first = try await runner.run(.test, request: fixture.request("first"))
+
+        clock.advance(by: 19 * 60)
+        let second = try await runner.run(.test, request: fixture.request("second"))
+        clock.advance(by: 19 * 60)
+        let third = try await runner.run(.test, request: fixture.request("third"))
+
+        #expect(second.simulatorIdentifier == first.simulatorIdentifier)
+        #expect(third.simulatorIdentifier == first.simulatorIdentifier)
+        clock.advance(by: 20 * 60)
+        try await pool.removeExcessSimulators(executableURL: fixture.root.appending(path: "simctl"), now: clock.now)
+        #expect(try fixture.devices().isEmpty)
+    }
+
+    @Test func expiredDevicesAreReplacedBeforeReuse() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let clock = Clock()
+        let runner = fixture.runner(clock: clock)
+        let first = try await runner.run(.test, request: fixture.request("first"))
+
+        clock.advance(by: 20 * 60)
+        let second = try await runner.run(.test, request: fixture.request("second"))
+
+        #expect(second.simulatorIdentifier != first.simulatorIdentifier)
+        let identifier = try #require(second.simulatorIdentifier)
+        #expect(try fixture.devices() == [identifier])
+    }
+
+    @Test func newestReturnedDeviceIsReusedAndOldestIdleDeviceIsEvictedAcrossRegistries() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let clock = Clock()
+        let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
+        try await pool.updateMaximumConcurrentJobs(to: 2, executableURL: fixture.root.appending(path: "simctl"))
+        var runner = fixture.runner(clock: clock)
+        runner.executionPool = pool
+        let selectedRunner = runner
+        let gate = fixture.root.appending(path: "payload-gate")
+        try Data().write(to: gate)
+        defer { try? FileManager.default.removeItem(at: gate) }
+        var request = fixture.request("first")
+        request.environment["PAYLOAD_GATE"] = gate.path
+        let firstRequest = request
+        let first = Task { try await selectedRunner.run(.test, request: firstRequest) }
+        defer { first.cancel() }
+        try await waitForFile(fixture.root.appending(path: "started-first"))
+        let older = try await runner.run(.test, request: fixture.request("second"))
+        clock.advance(by: 60)
+        try FileManager.default.removeItem(at: gate)
+        let newer = try await first.value
+
+        clock.advance(by: 60)
+        let reused = try await runner.run(.test, request: fixture.request("reused"))
+        #expect(reused.simulatorIdentifier == newer.simulatorIdentifier)
+        runner.simulatorPool = pool.simulatorPool
+        runner.simulatorPool?.now = { clock.now }
+        var otherRequest = fixture.request("other")
+        otherRequest.destination = .managedSimulator(SimulatorConfiguration(
+            runtimeIdentifier: "other-runtime", deviceTypeIdentifier: "device"
+        ))
+        let other = try await runner.run(.test, request: otherRequest)
+
+        #expect(try Set(fixture.devices()) == Set([
+            try #require(newer.simulatorIdentifier), try #require(other.simulatorIdentifier),
+        ]))
+        #expect(try fixture.calls().contains { $0.hasPrefix("delete " + (older.simulatorIdentifier ?? "")) })
+    }
+
+    @Test func legacyRecordsExpireUsingTheirModificationDate() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let clock = Clock()
+        let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
+        var runner = fixture.runner(clock: clock)
+        runner.simulatorPool?.executionPool = pool
+        _ = try await runner.run(.test, request: fixture.request("legacy"))
+        let files = try FileManager.default.subpathsOfDirectory(atPath: fixture.poolDirectory.path)
+        let record = try #require(files.first {
+            URL(filePath: $0).lastPathComponent.hasPrefix("device-") && $0.hasSuffix(".json")
+        })
+        let recordURL = fixture.poolDirectory.appending(path: record)
+        var contents = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: recordURL)) as? [String: Any])
+        contents.removeValue(forKey: "returnedAt")
+        try JSONSerialization.data(withJSONObject: contents).write(to: recordURL, options: .atomic)
+        try FileManager.default.setAttributes([.modificationDate: clock.now], ofItemAtPath: recordURL.path)
+
+        clock.advance(by: 19 * 60)
+        try await pool.removeExcessSimulators(executableURL: fixture.root.appending(path: "simctl"), now: clock.now)
+        #expect(try fixture.devices().count == 1)
+        clock.advance(by: 60)
+        try await pool.removeExcessSimulators(executableURL: fixture.root.appending(path: "simctl"), now: clock.now)
+        #expect(try fixture.devices().isEmpty)
+    }
+
     private func completedResult(_ runner: XcodeRunner, request: XcodeBuildRequest) async throws -> XcodeBuildResult {
         do { return try await runner.run(.test, request: request) }
         catch let failure as XcodeBuildFailure { return try #require(failure.result) }
@@ -488,6 +611,12 @@ struct SimulatorPoolTests {
 
     private func waitForFile(_ url: URL) async throws {
         try await waitUntil { FileManager.default.fileExists(atPath: url.path) }
+    }
+
+    private final class Clock: Sendable {
+        private let value = Mutex(Date(timeIntervalSince1970: 2_000_000_000))
+        var now: Date { value.withLock { $0 } }
+        func advance(by interval: TimeInterval) { value.withLock { $0 += interval } }
     }
 
     private struct Fixture: Sendable {
@@ -586,6 +715,12 @@ struct SimulatorPoolTests {
                 simulatorExecutableURL: root.appending(path: "simctl")
             )
             runner.simulatorPool = SimulatorPool(directory: poolDirectory)
+            return runner
+        }
+
+        func runner(clock: Clock) -> XcodeRunner {
+            var runner = self.runner
+            runner.simulatorPool?.now = { clock.now }
             return runner
         }
 

@@ -147,7 +147,9 @@ The runner leases a device exclusively for each operation. Devices are shared
 only when their runtime, device type, and selected Xcode match. Test operations
 wait for the Simulator to finish booting before launching xcodebuild. After a
 normal test exit, including a failed test run, cleanup prepares the device for
-its next operation and leaves it booted. Build operations reuse their destination
+its next operation and leaves it booted for up to 20 minutes while idle.
+The most recently returned matching device is reused first. Each successful
+return starts a new 20-minute retention period. Build operations reuse their destination
 without booting or changing runtime state. Cancellation or abnormal termination
 retires the device by deleting it.
 Cleanup waits for job subprocesses retaining the lease to exit. Other jobs can
@@ -156,10 +158,15 @@ lease different devices while those subprocesses finish.
 With an execution pool, its saved job limit also caps the total number of managed
 Simulators across Xcode versions, runtimes, and device types. Before creating a
 device, the runner removes idle devices if needed to stay within the limit.
+The oldest returned idle devices are removed first when space is needed.
 Lowering the limit removes idle excess devices; devices still in use finish
 first and are removed as they return. Fresh devices also count toward this limit.
 A custom `runner.simulatorPool` shares the same budget when
 `runner.executionPool` is set.
+
+The native host removes expired idle devices automatically. Standalone library
+and CLI runs remove expired devices when the pool is next used; callers can
+also run `executionPool.removeExcessSimulators()` to perform that maintenance.
 
 Cleanup removes installed user apps and resets keychain, privacy permissions,
 location simulation, and status bar overrides. Tests that change system app

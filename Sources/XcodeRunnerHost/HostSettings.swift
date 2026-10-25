@@ -166,7 +166,7 @@ final class HostSettingsModel {
         } catch is CancellationError {
             return
         } catch {
-            simulatorPoolError = "Could not reduce the Simulator pool to the execution limit: \(error.localizedDescription)"
+            simulatorPoolError = "Could not clean up idle Simulators: \(error.localizedDescription)"
         }
     }
 
@@ -284,7 +284,7 @@ struct HostSettingsView: View {
                     Text(model.admissionMessage)
                         .font(.callout)
                         .foregroundStyle(.secondary)
-                    Text("The Simulator pool uses the same limit across Xcode versions, runtimes, and device types. Idle devices above the limit are removed; devices in use finish first.")
+                    Text("The Simulator pool uses the same limit across Xcode versions, runtimes, and device types. Recently returned devices are reused first. Devices idle for 20 minutes are removed; devices in use finish first.")
                         .font(.callout).foregroundStyle(.secondary)
                     Text("This limit is shared across all repositories. Selected repositories receive enough runner registrations to use it. GitHub jobs may wait here after assignment; their in-progress count can be higher than the Xcode execution count.")
                         .font(.callout).foregroundStyle(.secondary)
