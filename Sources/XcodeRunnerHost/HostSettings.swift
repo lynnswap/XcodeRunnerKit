@@ -61,6 +61,11 @@ final class HostSettingsModel {
     private(set) var isSaving = false
     private(set) var hasLoadedPoolStatus = false
     var capacityInput = String(HostInstallation.defaultMaximumConcurrentJobs)
+    private(set) var simulatorIdleRetentionMinutes: Int?
+    private(set) var simulatorIdleRetentionError: String?
+    private(set) var simulatorIdleRetentionSaveError: String?
+    private(set) var isSavingSimulatorIdleRetention = false
+    var simulatorIdleRetentionInput = String(HostExecutionPool.defaultSimulatorIdleRetentionMinutes)
     private(set) var activeStorage: HostInstallation.Storage?
     private(set) var storageError: String?
     private(set) var storageSaveError: String?
@@ -166,11 +171,12 @@ final class HostSettingsModel {
         } catch is CancellationError {
             return
         } catch {
-            simulatorPoolError = "Could not reduce the Simulator pool to the execution limit: \(error.localizedDescription)"
+            simulatorPoolError = "Could not clean up idle Simulators: \(error.localizedDescription)"
         }
     }
 
     func refreshPoolStatus() async {
+        refreshSimulatorIdleRetention()
         do {
             let previousInput = String(poolStatus?.maximumConcurrentJobs ?? HostInstallation.defaultMaximumConcurrentJobs)
             let status = try await pool.status()
@@ -186,6 +192,43 @@ final class HostSettingsModel {
             poolStatus = nil
             poolError = "Could not read the execution pool: \(error.localizedDescription)"
             hasLoadedPoolStatus = true
+        }
+    }
+
+    private func refreshSimulatorIdleRetention() {
+        do {
+            let previousInput = String(simulatorIdleRetentionMinutes ?? HostExecutionPool.defaultSimulatorIdleRetentionMinutes)
+            let minutes = try pool.simulatorIdleRetentionMinutes()
+            simulatorIdleRetentionMinutes = minutes
+            simulatorIdleRetentionError = nil
+            if simulatorIdleRetentionInput == previousInput {
+                simulatorIdleRetentionInput = String(minutes)
+            }
+        } catch {
+            simulatorIdleRetentionMinutes = nil
+            simulatorIdleRetentionError = "Could not read the Simulator idle retention: \(error.localizedDescription)"
+        }
+    }
+
+    var canApplySimulatorIdleRetention: Bool {
+        hasLoadedPoolStatus && !isSavingSimulatorIdleRetention && hostState != .stopping
+    }
+
+    func applySimulatorIdleRetention() async {
+        guard canApplySimulatorIdleRetention else { return }
+        guard let minutes = Int(simulatorIdleRetentionInput), minutes > 0 else {
+            simulatorIdleRetentionSaveError = "Enter a positive whole number of minutes."
+            return
+        }
+        isSavingSimulatorIdleRetention = true
+        defer { isSavingSimulatorIdleRetention = false }
+        do {
+            try await pool.updateSimulatorIdleRetentionMinutes(to: minutes)
+            simulatorIdleRetentionSaveError = nil
+            refreshSimulatorIdleRetention()
+            await trimSimulatorPool()
+        } catch {
+            simulatorIdleRetentionSaveError = "Could not save the Simulator idle retention: \(error.localizedDescription)"
         }
     }
 
@@ -284,13 +327,35 @@ struct HostSettingsView: View {
                     Text(model.admissionMessage)
                         .font(.callout)
                         .foregroundStyle(.secondary)
-                    Text("The Simulator pool uses the same limit across Xcode versions, runtimes, and device types. Idle devices above the limit are removed; devices in use finish first.")
-                        .font(.callout).foregroundStyle(.secondary)
                     Text("This limit is shared across all repositories. Selected repositories receive enough runner registrations to use it. GitHub jobs may wait here after assignment; their in-progress count can be higher than the Xcode execution count.")
                         .font(.callout).foregroundStyle(.secondary)
                     if let error = model.poolError { errorMessage(error) }
-                    if let error = model.simulatorPoolError { errorMessage(error) }
                     if let error = model.saveError { errorMessage(error) }
+                }
+                Section("Simulator Pool") {
+                    LabeledContent("Current idle retention") {
+                        Text(model.simulatorIdleRetentionMinutes.map { "\($0) min" }
+                             ?? (model.simulatorIdleRetentionError == nil ? "Checking…" : "Unavailable"))
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        TextField("Idle retention (minutes)", text: $model.simulatorIdleRetentionInput)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(model.isSavingSimulatorIdleRetention)
+                            .accessibilityIdentifier("simulator-idle-retention")
+                        Button(model.isSavingSimulatorIdleRetention ? "Applying…" : "Apply") {
+                            Task { await model.applySimulatorIdleRetention() }
+                        }
+                        .disabled(!model.canApplySimulatorIdleRetention)
+                        .accessibilityIdentifier("apply-simulator-idle-retention")
+                    }
+                    Text("Idle devices are removed after this period. The default is \(HostExecutionPool.defaultSimulatorIdleRetentionMinutes) minutes. Changes apply immediately. Devices in use finish first; each return starts a new retention period.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Text("The pool shares the Xcode execution limit across Xcode versions, runtimes, and device types. Recently returned devices are reused first. The oldest idle devices are removed first when space is needed.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    if let error = model.simulatorIdleRetentionError { errorMessage(error) }
+                    if let error = model.simulatorIdleRetentionSaveError { errorMessage(error) }
+                    if let error = model.simulatorPoolError { errorMessage(error) }
                 }
                 Section("Runner Services") {
                     LabeledContent("Host", value: model.hostState.rawValue)

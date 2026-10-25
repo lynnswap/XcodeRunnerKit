@@ -8,10 +8,13 @@ import Foundation
 /// down. Builds reuse their destination without booting or changing runtime state.
 /// Cancelled, interrupted, or abandoned leases are retired before reuse.
 /// When attached to an execution pool, all configurations share its saved device limit.
+/// Matching devices are reused by most recent return and expire after the execution
+/// pool's saved idle retention period, or 20 minutes by default.
 /// Keep the directory and its lock files in place while clients are running.
 public struct SimulatorPool: Sendable {
     public let directory: URL
     var executionPool: HostExecutionPool?
+    var now: @Sendable () -> Date = { Date() }
 
     /// The registry XcodeRunner uses when no execution pool is configured.
     ///
@@ -56,8 +59,10 @@ public struct SimulatorPool: Sendable {
     private func removeExcessSimulators(tool: SimulatorTool) async throws {
         guard try hasRegistries() else { return }
         try await withRegistryLock {
-            guard let capacity = try executionPool?.savedCapacity() else { return }
-            _ = try await removeIdleSimulators(above: capacity, tool: tool)
+            try await removeExpiredSimulators(tool: tool)
+            if let capacity = try executionPool?.savedCapacity() {
+                _ = try await removeIdleSimulators(above: capacity, tool: tool)
+            }
         }
     }
 
@@ -139,7 +144,7 @@ public struct SimulatorPool: Sendable {
             if reuse, let identifier = execution.identifier {
                 try await Task.detached {
                     if runsTests { try await tool.prepareForReuse(identifier) }
-                    try Self.saveRecord(Record(identifier: identifier, isReady: true), at: lease.recordURL)
+                    try Self.saveRecord(Record(identifier: identifier, isReady: true, returnedAt: now()), at: lease.recordURL)
                 }.value
             } else {
                 try await retire(lease, identifier: execution.identifier, tool: tool)
@@ -175,6 +180,7 @@ public struct SimulatorPool: Sendable {
     private struct Record: Codable, Sendable {
         var identifier: String?
         var isReady: Bool
+        var returnedAt: Date?
     }
 
     private struct Lease: Sendable {
@@ -187,6 +193,7 @@ public struct SimulatorPool: Sendable {
     private struct Entry: Sendable {
         let key: Key
         let recordURL: URL
+        let returnedAt: Date
     }
 
     private func acquire(key: Key, reusesDevice: Bool, tool: SimulatorTool) async throws -> Lease {
@@ -201,16 +208,18 @@ public struct SimulatorPool: Sendable {
             try Task.checkCancellation()
             let lease: Lease? = try await withRegistryLock {
                 try registerRegistry()
+                try await removeExpiredSimulators(tool: tool)
                 let capacity = try executionPool?.savedCapacity()
                 try FileManager.default.createDirectory(at: keyDirectory, withIntermediateDirectories: true)
                 let existing: Lease? = try await Self.withKeyLock(keyDirectory) {
                     try JSONEncoder().encode(key).write(to: keyDirectory.appending(path: "configuration.json"), options: .atomic)
                     guard reusesDevice else { return nil }
-                    for recordURL in try Self.recordURLs(in: keyDirectory) {
+                    for recordURL in try Self.reuseOrder(in: keyDirectory) {
                         guard let handles = try await Self.tryAcquireHandles(for: recordURL) else { continue }
                         do {
-                            if let record = try Self.readRecordIfPresent(recordURL) {
-                                try Self.saveRecord(Record(identifier: record.identifier, isReady: false), at: recordURL)
+                            if var record = try Self.readRecordIfPresent(recordURL) {
+                                record.returnedAt = try Self.returnDate(of: record, at: recordURL)
+                                try Self.saveRecord(Record(identifier: record.identifier, isReady: false, returnedAt: record.returnedAt), at: recordURL)
                                 return Lease(recordURL: recordURL, record: record, handle: handles.handle, processHandle: handles.processHandle)
                             }
                         } catch { return try await Self.withHandles(handles) { throw error } }
@@ -271,12 +280,28 @@ public struct SimulatorPool: Sendable {
                     let key: Key
                     do { key = try JSONDecoder().decode(Key.self, from: Data(contentsOf: keyDirectory.appending(path: "configuration.json"))) }
                     catch let error as CocoaError where error.code == .fileReadNoSuchFile { return [] }
-                    return try Self.recordURLs(in: keyDirectory).map { Entry(key: key, recordURL: $0) }
+                    return try Self.recordURLs(in: keyDirectory).compactMap { recordURL in
+                        guard let record = try Self.readRecordIfPresent(recordURL) else { return nil }
+                        return try Entry(key: key, recordURL: recordURL, returnedAt: Self.returnDate(of: record, at: recordURL))
+                    }
                 }
                 result += found
             }
         }
-        return result
+        return result.sorted {
+            if $0.returnedAt != $1.returnedAt { return $0.returnedAt < $1.returnedAt }
+            return $0.recordURL.path(percentEncoded: false) < $1.recordURL.path(percentEncoded: false)
+        }
+    }
+
+    /// Called under the registry coordinator. Recheck the date after taking the
+    /// entry locks because an active owner can finish while entries are enumerated.
+    private func removeExpiredSimulators(tool: SimulatorTool) async throws {
+        let minutes = try executionPool?.simulatorIdleRetentionMinutes() ?? HostExecutionPool.defaultSimulatorIdleRetentionMinutes
+        let cutoff = now().addingTimeInterval(-TimeInterval(minutes) * 60)
+        for entry in try await entries() where entry.returnedAt <= cutoff {
+            _ = try await deleteIdle(entry, tool: tool, returnedBefore: cutoff)
+        }
     }
 
     /// Called under the registry coordinator; active entry locks are never waited on.
@@ -289,18 +314,20 @@ public struct SimulatorPool: Sendable {
         return count
     }
 
-    private func deleteIdle(_ entry: Entry, tool: SimulatorTool) async throws -> Bool {
+    private func deleteIdle(_ entry: Entry, tool: SimulatorTool, returnedBefore cutoff: Date? = nil) async throws -> Bool {
         try Task.checkCancellation()
         return try await Self.withKeyLock(entry.recordURL.deletingLastPathComponent()) {
             guard let handles = try await Self.tryAcquireHandles(for: entry.recordURL) else { return false }
             return try await Self.withHandles(handles) {
                 guard let record = try Self.readRecordIfPresent(entry.recordURL) else { return true }
+                let returnedAt = try Self.returnDate(of: record, at: entry.recordURL)
+                guard returnedAt <= (cutoff ?? entry.returnedAt) else { return false }
                 do {
                     var deletionTool = tool
                     deletionTool.developerDirectory = try await SimulatorTool.selectedDeveloperDirectory(tool.developerDirectory)
                     deletionTool.inheritedLeaseDescriptor = handles.processHandle.fileDescriptor
                     let protectedTool = deletionTool
-                    try Self.saveRecord(Record(identifier: record.identifier, isReady: false), at: entry.recordURL)
+                    try Self.saveRecord(Record(identifier: record.identifier, isReady: false, returnedAt: returnedAt), at: entry.recordURL)
                     try await Task.detached {
                         try await protectedTool.delete(identifier: record.identifier, name: Self.deviceName(for: entry.recordURL))
                         try Self.removeEntryFiles(for: entry.recordURL)
@@ -432,6 +459,24 @@ public struct SimulatorPool: Sendable {
         try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
             .filter { $0.lastPathComponent.hasPrefix("device-") && $0.pathExtension == "json" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    private static func returnDate(of record: Record, at url: URL) throws -> Date {
+        if let returnedAt = record.returnedAt { return returnedAt }
+        // Older registries recorded a successful return by rewriting this file.
+        return try url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate ?? .distantPast
+    }
+
+    private static func reuseOrder(in directory: URL) throws -> [URL] {
+        let records = try recordURLs(in: directory).compactMap { url -> (URL, Record, Date)? in
+            guard let record = try readRecordIfPresent(url) else { return nil }
+            return try (url, record, returnDate(of: record, at: url))
+        }
+        return records.sorted {
+            if $0.1.isReady != $1.1.isReady { return $0.1.isReady }
+            if $0.2 != $1.2 { return $0.2 > $1.2 }
+            return $0.0.lastPathComponent < $1.0.lastPathComponent
+        }.map(\.0)
     }
 
     private static func readRecordIfPresent(_ url: URL) throws -> Record? {
