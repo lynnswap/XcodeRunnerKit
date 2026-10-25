@@ -6,8 +6,8 @@ import signal
 import subprocess
 import tempfile
 import time
+from execution_pool_probe import build_execution_pool_probe
 
-REPO = Path(__file__).resolve().parents[1]
 # Steps wait for the state they need. This limit only reports a process that hangs.
 HANG_LIMIT = 120
 
@@ -24,12 +24,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="XcodeRunnerPool-") as temporary:
         root = Path(temporary)
         executable = root / "pool-probe"
-        subprocess.run([
-            "xcrun", "swiftc", "-parse-as-library", "-swift-version", "6",
-            str(REPO / "Sources/XcodeRunnerKit/HostExecutionPool.swift"),
-            str(REPO / "Tests/Fixtures/ExecutionPoolProbe.swift"),
-            "-o", str(executable),
-        ], check=True)
+        build_execution_pool_probe(executable)
         jobs = {}
         roots = {}
         logs = []

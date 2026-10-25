@@ -1,8 +1,9 @@
 import Darwin
 import Dispatch
 import Foundation
+import XcodeRunnerKit
 
-/// Compiled together with the production HostExecutionPool by the OS-process check.
+/// Uses the production package for the separate-process execution pool checks.
 @main
 struct ExecutionPoolProbe {
     static func main() async throws {

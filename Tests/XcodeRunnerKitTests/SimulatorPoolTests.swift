@@ -265,6 +265,222 @@ struct SimulatorPoolTests {
         #expect(FileManager.default.fileExists(atPath: inherited.path))
     }
 
+    @Test func savedLimitBoundsRetainedDevicesAcrossConfigurationsAndXcodes() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
+        try await pool.updateMaximumConcurrentJobs(to: 2, executableURL: fixture.root.appending(path: "simctl"))
+        var runner = fixture.runner
+        runner.executionPool = pool
+
+        let first = try await runner.run(.test, request: fixture.request("first"))
+        let reused = try await runner.run(.test, request: fixture.request("reused"))
+        #expect(reused.simulatorIdentifier == first.simulatorIdentifier)
+        for (index, configuration) in [
+            SimulatorConfiguration(runtimeIdentifier: "other-runtime", deviceTypeIdentifier: "device"),
+            SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "other-device"),
+            SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device"),
+        ].enumerated() {
+            if index == 2 { runner.developerDirectory = fixture.root.appending(path: "OtherXcode") }
+            var request = fixture.request("configuration-\(index)")
+            request.destination = .managedSimulator(configuration)
+            _ = try await runner.run(.test, request: request)
+            #expect(try fixture.devices().count == 2)
+        }
+        #expect(try fixture.calls().filter { $0.hasPrefix("create ") }.count == 4)
+    }
+
+    @Test func concurrentReservationsShareTheSavedSimulatorLimit() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
+        try await pool.updateMaximumConcurrentJobs(to: 2, executableURL: fixture.root.appending(path: "simctl"))
+        try Data("2".utf8).write(to: fixture.root.appending(path: "device-limit"))
+        let gate = fixture.root.appending(path: "payload-gate")
+        try Data().write(to: gate)
+        defer { try? FileManager.default.removeItem(at: gate) }
+        var runner = fixture.runner
+        runner.simulatorPool = pool.simulatorPool
+        let selectedRunner = runner
+        let operation = Task {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for index in 0..<4 {
+                    var request = fixture.request("concurrent-\(index)")
+                    request.environment["PAYLOAD_GATE"] = gate.path
+                    let selectedRequest = request
+                    group.addTask { _ = try await selectedRunner.run(.test, request: selectedRequest) }
+                }
+                try await group.waitForAll()
+            }
+        }
+        defer { operation.cancel() }
+        try await waitUntil {
+            try FileManager.default.contentsOfDirectory(atPath: fixture.root.path)
+                .filter { $0.hasPrefix("started-concurrent-") }.count >= 2
+        }
+        try FileManager.default.removeItem(at: gate)
+        try await operation.value
+
+        #expect(!FileManager.default.fileExists(atPath: fixture.root.appending(path: "exceeded-device-limit").path))
+        #expect(try fixture.devices().count == 2)
+    }
+
+    @Test func loweringTheLimitPreservesActiveDevicesAndTrimsAfterTheyFinish() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
+        let simctl = fixture.root.appending(path: "simctl")
+        try await pool.updateMaximumConcurrentJobs(to: 3, executableURL: simctl)
+        var runner = fixture.runner
+        runner.executionPool = pool
+        runner.simulatorPool = nil
+        let selectedRunner = runner
+        let gate = fixture.root.appending(path: "payload-gate")
+        try Data().write(to: gate)
+        defer { try? FileManager.default.removeItem(at: gate) }
+        let operations = (0..<3).map { index in
+            var request = fixture.request("active-\(index)")
+            request.environment["PAYLOAD_GATE"] = gate.path
+            request.destination = .managedSimulator(SimulatorConfiguration(
+                runtimeIdentifier: "runtime-\(index)", deviceTypeIdentifier: "device"
+            ))
+            let selectedRequest = request
+            return Task { try await selectedRunner.run(.test, request: selectedRequest) }
+        }
+        defer { operations.forEach { $0.cancel() } }
+        for index in 0..<3 { try await waitForFile(fixture.root.appending(path: "started-active-\(index)")) }
+
+        try await pool.updateMaximumConcurrentJobs(to: 1, executableURL: simctl)
+
+        #expect(try await pool.status()?.maximumConcurrentJobs == 1)
+        #expect(try fixture.devices().count == 3)
+        #expect(try !fixture.calls().contains { $0.hasPrefix("delete ") })
+        try FileManager.default.removeItem(at: gate)
+        for operation in operations { #expect(try await operation.value.succeeded) }
+        #expect(try fixture.devices().count == 1)
+    }
+
+    @Test func freshDevicesReplaceIdleDevicesWithinTheSavedLimit() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
+        try await pool.updateMaximumConcurrentJobs(to: 1, executableURL: fixture.root.appending(path: "simctl"))
+        try Data("1".utf8).write(to: fixture.root.appending(path: "device-limit"))
+        var runner = fixture.runner
+        runner.executionPool = pool
+        runner.simulatorPool = nil
+        let retained = try await runner.run(.test, request: fixture.request("retained"))
+        var request = fixture.request("fresh")
+        var configuration = SimulatorConfiguration(runtimeIdentifier: "runtime", deviceTypeIdentifier: "device")
+        configuration.reusesDevice = false
+        request.destination = .managedSimulator(configuration)
+
+        let fresh = try await runner.run(.test, request: request)
+
+        #expect(fresh.simulatorIdentifier != retained.simulatorIdentifier)
+        #expect(try fixture.devices().isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: fixture.root.appending(path: "exceeded-device-limit").path))
+    }
+
+    @Test func configurationFailureReportsTheSavedLimitAndAllowsCleanupRetry() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
+        let simctl = fixture.root.appending(path: "simctl")
+        var runner = fixture.runner
+        runner.simulatorPool = pool.simulatorPool
+        for index in 0..<3 {
+            var request = fixture.request("retained-\(index)")
+            request.destination = .managedSimulator(SimulatorConfiguration(
+                runtimeIdentifier: "runtime-\(index)", deviceTypeIdentifier: "device"
+            ))
+            _ = try await runner.run(.test, request: request)
+        }
+        try Data().write(to: fixture.root.appending(path: "fail-delete"))
+
+        do {
+            try await pool.updateMaximumConcurrentJobs(to: 1, executableURL: simctl)
+            Issue.record("Configuring the limit hid a Simulator deletion failure.")
+        } catch let failure as HostExecutionPool.ConfigurationCleanupFailure {
+            #expect(failure.savedMaximumConcurrentJobs == 1)
+            #expect(failure.underlyingError.localizedDescription.contains("delete-failed"))
+        }
+        #expect(try await pool.status()?.maximumConcurrentJobs == 1)
+        #expect(try fixture.devices().count == 3)
+
+        try FileManager.default.removeItem(at: fixture.root.appending(path: "fail-delete"))
+        try await pool.removeExcessSimulators(executableURL: simctl)
+        #expect(try fixture.devices().count == 1)
+    }
+
+    @Test func obsoleteXcodeDoesNotPreventReplacingAnIdleDevice() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
+        try await pool.updateMaximumConcurrentJobs(to: 1, executableURL: fixture.root.appending(path: "simctl"))
+        let oldXcode = fixture.root.appending(path: "OldXcode")
+        let currentXcode = fixture.root.appending(path: "CurrentXcode")
+        for directory in [oldXcode, currentXcode] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        try Data().write(to: fixture.root.appending(path: "require-valid-xcode"))
+        var runner = fixture.runner
+        runner.executionPool = pool
+        runner.simulatorPool = nil
+        runner.developerDirectory = oldXcode
+        let old = try await runner.run(.test, request: fixture.request("old-xcode"))
+        try FileManager.default.removeItem(at: oldXcode)
+        runner.developerDirectory = currentXcode
+
+        let current = try await runner.run(.test, request: fixture.request("current-xcode"))
+
+        #expect(current.simulatorIdentifier != old.simulatorIdentifier)
+        let currentIdentifier = try #require(current.simulatorIdentifier)
+        #expect(try fixture.devices() == [currentIdentifier])
+    }
+
+    @Test func loweringTheLimitImmediatelyTrimsACustomRegistry() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
+        let simctl = fixture.root.appending(path: "simctl")
+        try await pool.updateMaximumConcurrentJobs(to: 3, executableURL: simctl)
+        var runner = fixture.runner
+        runner.executionPool = pool
+        for index in 0..<3 {
+            var request = fixture.request("custom-\(index)")
+            request.destination = .managedSimulator(SimulatorConfiguration(
+                runtimeIdentifier: "runtime-\(index)", deviceTypeIdentifier: "device"
+            ))
+            _ = try await runner.run(.test, request: request)
+        }
+        #expect(try fixture.devices().count == 3)
+
+        try await pool.updateMaximumConcurrentJobs(to: 1, executableURL: simctl)
+
+        #expect(try fixture.devices().count == 1)
+    }
+
+    @Test func defaultAndCustomRegistriesShareOneDeviceLimit() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
+        try await pool.updateMaximumConcurrentJobs(to: 1, executableURL: fixture.root.appending(path: "simctl"))
+        try Data("1".utf8).write(to: fixture.root.appending(path: "device-limit"))
+        var runner = fixture.runner
+        runner.executionPool = pool
+        runner.simulatorPool = nil
+        let standard = try await runner.run(.test, request: fixture.request("default-registry"))
+        runner.simulatorPool = SimulatorPool(directory: fixture.poolDirectory)
+
+        let custom = try await runner.run(.test, request: fixture.request("custom-registry"))
+
+        #expect(custom.simulatorIdentifier != standard.simulatorIdentifier)
+        let customIdentifier = try #require(custom.simulatorIdentifier)
+        #expect(try fixture.devices() == [customIdentifier])
+        #expect(!FileManager.default.fileExists(atPath: fixture.root.appending(path: "exceeded-device-limit").path))
+    }
+
     private func completedResult(_ runner: XcodeRunner, request: XcodeBuildRequest) async throws -> XcodeBuildResult {
         do { return try await runner.run(.test, request: request) }
         catch let failure as XcodeBuildFailure { return try #require(failure.result) }
@@ -283,10 +499,18 @@ struct SimulatorPoolTests {
             try writeScript("""
                 root='\(root.path)'
                 (shift; printf '%s\\n' "$*") >> "$root/calls"
+                if [ -e "$root/require-valid-xcode" ] && [ -n "$DEVELOPER_DIR" ] && [ ! -d "$DEVELOPER_DIR" ]; then
+                    echo invalid-developer-directory >&2
+                    exit 9
+                fi
                 case "$2" in
                 create)
                     identifier=$(/usr/bin/uuidgen)
                     printf '%s' "$3" > "$root/devices/$identifier"
+                    if [ -f "$root/device-limit" ]; then
+                        set -- "$root/devices/"*
+                        if [ "$#" -gt "$(cat "$root/device-limit")" ]; then touch "$root/exceeded-device-limit"; fi
+                    fi
                     printf '%s\\n' "$identifier";;
                 list)
                     printf '{"devices":{"runtime":['
@@ -318,7 +542,9 @@ struct SimulatorPoolTests {
                 bootstatus)
                     if [ -e "$root/fail-boot" ]; then echo boot-failed >&2; exit 9; fi
                     touch "$root/booted-$3";;
-                delete) rm -f "$root/devices/$3" "$root/booted-$3";;
+                delete)
+                    if [ -e "$root/fail-delete" ]; then echo delete-failed >&2; exit 9; fi
+                    rm -f "$root/devices/$3" "$root/booted-$3";;
                 esac
                 """, to: root.appending(path: "simctl"))
             try writeScript("""
@@ -380,6 +606,10 @@ struct SimulatorPoolTests {
 
         func calls() throws -> [String] {
             try String(contentsOf: root.appending(path: "calls"), encoding: .utf8).split(separator: "\n").map(String.init)
+        }
+
+        func devices() throws -> [String] {
+            try FileManager.default.contentsOfDirectory(atPath: root.appending(path: "devices").path)
         }
 
         func remove() { try? FileManager.default.removeItem(at: root) }

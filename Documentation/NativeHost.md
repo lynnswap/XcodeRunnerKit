@@ -80,6 +80,12 @@ Lowering the limit lets running operations finish. Extra runner registrations
 stay in place. Deselecting a repository leaves its existing runners running;
 it stops the app from managing their count.
 
+The same limit caps the total managed Simulators across Xcode versions,
+runtimes, and device types. The host removes idle devices above the limit.
+Devices in use finish before they are removed, so lowering the limit can
+temporarily leave more devices than the new limit. Runner registrations and
+GitHub's in-progress job count can still be higher.
+
 Settings shows each repository's registered, online, and busy runner counts,
 plus any error. The host retries synchronization every five minutes while signed
 in. **Disconnect** removes local login tokens and stops registration management;

@@ -153,6 +153,14 @@ retires the device by deleting it.
 Cleanup waits for job subprocesses retaining the lease to exit. Other jobs can
 lease different devices while those subprocesses finish.
 
+With an execution pool, its saved job limit also caps the total number of managed
+Simulators across Xcode versions, runtimes, and device types. Before creating a
+device, the runner removes idle devices if needed to stay within the limit.
+Lowering the limit removes idle excess devices; devices still in use finish
+first and are removed as they return. Fresh devices also count toward this limit.
+A custom `runner.simulatorPool` shares the same budget when
+`runner.executionPool` is set.
+
 Cleanup removes installed user apps and resets keychain, privacy permissions,
 location simulation, and status bar overrides. Tests that change system app
 data or other device settings should use a fresh device: add
@@ -187,8 +195,8 @@ devices registered with a particular Xcode. Swift callers can use
 The runner disables parallel test workers by default to avoid Xcode creating
 additional device clones. A failed device cleanup appears in
 `XcodeBuildFailure.cleanupErrors` as a `SimulatorCleanupFailure` with the device's
-UDID and name. Use `pool clean-simulators` to retry removing any remaining pooled
-devices, or `xcrun simctl delete` for a fresh device.
+UDID and name. Use `pool clean-simulators` to retry removing remaining managed
+devices, or `xcrun simctl delete` with the reported UDID.
 
 ### Shared execution limit
 
@@ -212,6 +220,7 @@ xcode-runner pool status --pool-directory /path/to/shared-pool --json
 An increase lets waiting jobs start. A decrease lets current jobs finish and
 holds new jobs until the active count falls below the limit. All clients must
 use the same macOS user and local pool directory.
+The same limit bounds the pool's managed Simulators, including idle devices.
 
 In Swift, attach a pool to the runner:
 

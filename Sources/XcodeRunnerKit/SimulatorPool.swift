@@ -7,9 +7,11 @@ import Foundation
 /// A normal test exit returns its cleaned device to the pool without shutting it
 /// down. Builds reuse their destination without booting or changing runtime state.
 /// Cancelled, interrupted, or abandoned leases are retired before reuse.
+/// When attached to an execution pool, all configurations share its saved device limit.
 /// Keep the directory and its lock files in place while clients are running.
 public struct SimulatorPool: Sendable {
     public let directory: URL
+    var executionPool: HostExecutionPool?
 
     /// The registry XcodeRunner uses when no execution pool is configured.
     ///
@@ -23,55 +25,39 @@ public struct SimulatorPool: Sendable {
 
     public init(directory: URL = Self.defaultDirectory) {
         self.directory = directory.resolvingSymlinksInPath()
+        if self.directory == Self.defaultDirectory.resolvingSymlinksInPath() {
+            executionPool = HostExecutionPool(directory: self.directory.deletingLastPathComponent())
+        }
     }
 
-    /// Deletes this pool's idle devices, including abandoned devices.
+    /// Deletes idle devices, including abandoned devices. An execution pool also
+    /// includes the custom registries previously used by its runners.
     ///
     /// Active leases are skipped. Pass a developer directory to restrict cleanup
-    /// to devices registered with that Xcode; otherwise all registered Xcodes are used.
+    /// to devices registered with that Xcode. Deletion uses the currently selected Xcode.
     public func removeIdleSimulators(developerDirectory: URL? = nil) async throws {
         try await removeIdleSimulators(developerDirectory: developerDirectory, executableURL: URL(filePath: "/usr/bin/xcrun"))
     }
 
     func removeIdleSimulators(developerDirectory: URL? = nil, executableURL: URL) async throws {
         let selected = developerDirectory?.resolvingSymlinksInPath().path(percentEncoded: false)
-        let keys: [URL]
-        do { keys = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey]) }
-        catch let error as CocoaError where error.code == .fileReadNoSuchFile { return }
-        for keyDirectory in keys.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-            try Task.checkCancellation()
-            guard try keyDirectory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else { continue }
-            let coordinator = try Self.open(keyDirectory.appending(path: "pool.lock"))
-            try await Self.withHandle(coordinator) {
-                try await Self.lock(coordinator)
-                let key: Key
-                do { key = try JSONDecoder().decode(Key.self, from: Data(contentsOf: keyDirectory.appending(path: "configuration.json"))) }
-                catch let error as CocoaError where error.code == .fileReadNoSuchFile { return }
-                if let selected, selected != key.developerDirectory { return }
-                for recordURL in try Self.recordURLs(in: keyDirectory) {
-                    try Task.checkCancellation()
-                    guard let handles = try await Self.tryAcquireHandles(for: recordURL) else { continue }
-                    try await Self.withHandles(handles) {
-                        guard let record = try Self.readRecordIfPresent(recordURL) else { return }
-                        let tool = SimulatorTool(
-                            executableURL: executableURL, developerDirectory: URL(filePath: key.developerDirectory),
-                            inheritedLeaseDescriptor: handles.processHandle.fileDescriptor
-                        )
-                        do {
-                            try Self.saveRecord(Record(identifier: record.identifier, isReady: false), at: recordURL)
-                            try await Task.detached {
-                                try await tool.delete(identifier: record.identifier, name: Self.deviceName(for: recordURL))
-                                try Self.removeEntryFiles(for: recordURL)
-                            }.value
-                        } catch {
-                            throw SimulatorCleanupFailure(
-                                simulatorIdentifier: record.identifier, simulatorName: Self.deviceName(for: recordURL),
-                                underlyingError: error
-                            )
-                        }
-                    }
-                }
+        guard try hasRegistries() else { return }
+        try await withRegistryLock {
+            for entry in try await entries() where selected == nil || entry.key.developerDirectory == selected {
+                _ = try await deleteIdle(entry, tool: SimulatorTool(executableURL: executableURL))
             }
+        }
+    }
+
+    func removeExcessSimulators(executableURL: URL) async throws {
+        try await removeExcessSimulators(tool: SimulatorTool(executableURL: executableURL))
+    }
+
+    private func removeExcessSimulators(tool: SimulatorTool) async throws {
+        guard try hasRegistries() else { return }
+        try await withRegistryLock {
+            guard let capacity = try executionPool?.savedCapacity() else { return }
+            _ = try await removeIdleSimulators(above: capacity, tool: tool)
         }
     }
 
@@ -88,7 +74,7 @@ public struct SimulatorPool: Sendable {
             deviceTypeIdentifier: configuration.deviceTypeIdentifier
         )
         let lease: Lease
-        do { lease = try await acquire(key: key) }
+        do { lease = try await acquire(key: key, reusesDevice: configuration.reusesDevice, tool: tool) }
         catch { return .failure(wrapping: error) }
         let runsTests = action == .test || action == .testWithoutBuilding
         var cleanupErrors: [any Error] = []
@@ -122,7 +108,10 @@ public struct SimulatorPool: Sendable {
                 try await Task.detached { try await Self.lock(cleanupHandle) }.value
                 var cleanupTool = tool
                 cleanupTool.inheritedLeaseDescriptor = cleanupHandle.fileDescriptor
-                cleanupErrors += await Self.finish(lease, execution: execution, runsTests: runsTests, tool: cleanupTool)
+                cleanupErrors += await finish(
+                    lease, execution: execution, runsTests: runsTests,
+                    reusesDevice: configuration.reusesDevice, tool: cleanupTool
+                )
             } catch {
                 cleanupErrors.append(Self.cleanupFailure(lease, execution: execution, error: error))
             }
@@ -131,6 +120,8 @@ public struct SimulatorPool: Sendable {
             cleanupErrors.append(Self.cleanupFailure(lease, execution: execution, error: error))
         }
         do { try lease.handle.close() } catch { cleanupErrors.append(error) }
+        do { try await Task.detached { try await removeExcessSimulators(tool: tool) }.value }
+        catch { cleanupErrors.append(error) }
         return execution.outcome.cancelledIfNeeded().addingCleanupErrors(cleanupErrors)
     }
 
@@ -140,29 +131,29 @@ public struct SimulatorPool: Sendable {
     }
 
     /// Returns the device to the pool or retires it, reporting each cleanup failure.
-    private static func finish(
-        _ lease: Lease, execution: Execution, runsTests: Bool, tool: SimulatorTool
+    private func finish(
+        _ lease: Lease, execution: Execution, runsTests: Bool, reusesDevice: Bool, tool: SimulatorTool
     ) async -> [any Error] {
-        let reuse = execution.identifier != nil && !Task.isCancelled && canReuse(after: execution.outcome)
+        let reuse = reusesDevice && execution.identifier != nil && !Task.isCancelled && Self.canReuse(after: execution.outcome)
         do {
             if reuse, let identifier = execution.identifier {
                 try await Task.detached {
                     if runsTests { try await tool.prepareForReuse(identifier) }
-                    try saveRecord(Record(identifier: identifier, isReady: true), at: lease.recordURL)
+                    try Self.saveRecord(Record(identifier: identifier, isReady: true), at: lease.recordURL)
                 }.value
             } else {
                 try await retire(lease, identifier: execution.identifier, tool: tool)
             }
             if reuse, Task.isCancelled {
-                try saveRecord(Record(identifier: execution.identifier, isReady: false), at: lease.recordURL)
+                try Self.saveRecord(Record(identifier: execution.identifier, isReady: false), at: lease.recordURL)
                 try await retire(lease, identifier: execution.identifier, tool: tool)
             }
             return []
         } catch {
-            var errors = [cleanupFailure(lease, execution: execution, error: error)]
+            var errors = [Self.cleanupFailure(lease, execution: execution, error: error)]
             if reuse {
                 do { try await retire(lease, identifier: execution.identifier, tool: tool) }
-                catch { errors.append(cleanupFailure(lease, execution: execution, error: error)) }
+                catch { errors.append(Self.cleanupFailure(lease, execution: execution, error: error)) }
             }
             return errors
         }
@@ -193,37 +184,204 @@ public struct SimulatorPool: Sendable {
         let processHandle: FileHandle
     }
 
-    private func acquire(key: Key) async throws -> Lease {
-        try Task.checkCancellation()
+    private struct Entry: Sendable {
+        let key: Key
+        let recordURL: URL
+    }
+
+    private func acquire(key: Key, reusesDevice: Bool, tool: SimulatorTool) async throws -> Lease {
         let encodedKey = try JSONEncoder().encode([key.developerDirectory, key.runtimeIdentifier, key.deviceTypeIdentifier])
         let digest = SHA256.hash(data: encodedKey).map { String(format: "%02x", $0) }.joined()
         let keyDirectory = directory.appending(path: digest)
-        try FileManager.default.createDirectory(at: keyDirectory, withIntermediateDirectories: true)
-        let coordinator = try Self.open(keyDirectory.appending(path: "pool.lock"))
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        if let executionPool {
+            try FileManager.default.createDirectory(at: executionPool.directory, withIntermediateDirectories: true)
+        }
+        while true {
+            try Task.checkCancellation()
+            let lease: Lease? = try await withRegistryLock {
+                try registerRegistry()
+                let capacity = try executionPool?.savedCapacity()
+                try FileManager.default.createDirectory(at: keyDirectory, withIntermediateDirectories: true)
+                let existing: Lease? = try await Self.withKeyLock(keyDirectory) {
+                    try JSONEncoder().encode(key).write(to: keyDirectory.appending(path: "configuration.json"), options: .atomic)
+                    guard reusesDevice else { return nil }
+                    for recordURL in try Self.recordURLs(in: keyDirectory) {
+                        guard let handles = try await Self.tryAcquireHandles(for: recordURL) else { continue }
+                        do {
+                            if let record = try Self.readRecordIfPresent(recordURL) {
+                                try Self.saveRecord(Record(identifier: record.identifier, isReady: false), at: recordURL)
+                                return Lease(recordURL: recordURL, record: record, handle: handles.handle, processHandle: handles.processHandle)
+                            }
+                        } catch { return try await Self.withHandles(handles) { throw error } }
+                        try await Self.withHandles(handles) {}
+                    }
+                    return nil
+                }
+                if let existing {
+                    let remaining: Int?
+                    do {
+                        if let capacity {
+                            remaining = try await removeIdleSimulators(above: capacity, tool: tool)
+                        } else {
+                            remaining = nil
+                        }
+                    } catch {
+                        return try await Self.withHandles((existing.handle, existing.processHandle)) { throw error }
+                    }
+                    if let capacity, let remaining, remaining > capacity {
+                        return try await Self.withHandles((existing.handle, existing.processHandle)) {
+                            try Self.saveRecord(existing.record, at: existing.recordURL)
+                            return nil
+                        }
+                    }
+                    return existing
+                }
+                if let capacity,
+                   try await removeIdleSimulators(above: capacity - 1, tool: tool) >= capacity {
+                    return nil
+                }
+                return try await Self.withKeyLock(keyDirectory) {
+                    while true {
+                        let recordURL = keyDirectory.appending(path: "device-\(UUID().uuidString).json")
+                        guard let handles = try await Self.tryAcquireHandles(for: recordURL) else { continue }
+                        do {
+                            let record = Record(identifier: nil, isReady: false)
+                            // Count the reservation before simctl creates a device outside the registry lock.
+                            try Self.saveRecord(record, at: recordURL)
+                            return Lease(recordURL: recordURL, record: record, handle: handles.handle, processHandle: handles.processHandle)
+                        } catch { return try await Self.withHandles(handles) { throw error } }
+                    }
+                }
+            }
+            if let lease { return lease }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
+    private func entries() async throws -> [Entry] {
+        var result: [Entry] = []
+        for registry in try registryDirectories() {
+            let keys: [URL]
+            do { keys = try FileManager.default.contentsOfDirectory(at: registry, includingPropertiesForKeys: [.isDirectoryKey]) }
+            catch let error as CocoaError where error.code == .fileReadNoSuchFile { continue }
+            for keyDirectory in keys.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+                guard try keyDirectory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else { continue }
+                let found: [Entry] = try await Self.withKeyLock(keyDirectory) {
+                    let key: Key
+                    do { key = try JSONDecoder().decode(Key.self, from: Data(contentsOf: keyDirectory.appending(path: "configuration.json"))) }
+                    catch let error as CocoaError where error.code == .fileReadNoSuchFile { return [] }
+                    return try Self.recordURLs(in: keyDirectory).map { Entry(key: key, recordURL: $0) }
+                }
+                result += found
+            }
+        }
+        return result
+    }
+
+    /// Called under the registry coordinator; active entry locks are never waited on.
+    private func removeIdleSimulators(above limit: Int, tool: SimulatorTool) async throws -> Int {
+        let registered = try await entries()
+        var count = registered.count
+        for entry in registered where count > limit {
+            if try await deleteIdle(entry, tool: tool) { count -= 1 }
+        }
+        return count
+    }
+
+    private func deleteIdle(_ entry: Entry, tool: SimulatorTool) async throws -> Bool {
+        try Task.checkCancellation()
+        return try await Self.withKeyLock(entry.recordURL.deletingLastPathComponent()) {
+            guard let handles = try await Self.tryAcquireHandles(for: entry.recordURL) else { return false }
+            return try await Self.withHandles(handles) {
+                guard let record = try Self.readRecordIfPresent(entry.recordURL) else { return true }
+                do {
+                    var deletionTool = tool
+                    deletionTool.developerDirectory = try await SimulatorTool.selectedDeveloperDirectory(tool.developerDirectory)
+                    deletionTool.inheritedLeaseDescriptor = handles.processHandle.fileDescriptor
+                    let protectedTool = deletionTool
+                    try Self.saveRecord(Record(identifier: record.identifier, isReady: false), at: entry.recordURL)
+                    try await Task.detached {
+                        try await protectedTool.delete(identifier: record.identifier, name: Self.deviceName(for: entry.recordURL))
+                        try Self.removeEntryFiles(for: entry.recordURL)
+                    }.value
+                    return true
+                } catch {
+                    throw SimulatorCleanupFailure(
+                        simulatorIdentifier: record.identifier, simulatorName: Self.deviceName(for: entry.recordURL),
+                        underlyingError: error
+                    )
+                }
+            }
+        }
+    }
+
+    private func withRegistryLock<Value: Sendable>(
+        _ operation: @Sendable () async throws -> Value
+    ) async throws -> Value {
+        let lock = executionPool.map { $0.directory.appending(path: "simulator-pool.lock") }
+            ?? directory.appending(path: "pool.lock")
+        let coordinator = try Self.open(lock)
         return try await Self.withHandle(coordinator) {
             try await Self.lock(coordinator)
-            try JSONEncoder().encode(key).write(to: keyDirectory.appending(path: "configuration.json"), options: .atomic)
-            for recordURL in try Self.recordURLs(in: keyDirectory) {
-                guard let handles = try await Self.tryAcquireHandles(for: recordURL) else { continue }
-                do {
-                    if let record = try Self.readRecordIfPresent(recordURL) {
-                        // A free dirty record means the previous owner did not finish cleanup.
-                        try Self.saveRecord(Record(identifier: record.identifier, isReady: false), at: recordURL)
-                        return Lease(recordURL: recordURL, record: record, handle: handles.handle, processHandle: handles.processHandle)
-                    }
-                } catch { return try await Self.withHandles(handles) { throw error } }
-                try await Self.withHandles(handles) {}
-            }
-            while true {
-                let recordURL = keyDirectory.appending(path: "device-\(UUID().uuidString).json")
-                guard let handles = try await Self.tryAcquireHandles(for: recordURL) else { continue }
-                do {
-                    let record = Record(identifier: nil, isReady: false)
-                    // The name is durable before simctl runs, including its unknown-UDID window.
-                    try Self.saveRecord(record, at: recordURL)
-                    return Lease(recordURL: recordURL, record: record, handle: handles.handle, processHandle: handles.processHandle)
-                } catch { return try await Self.withHandles(handles) { throw error } }
-            }
+            return try await operation()
+        }
+    }
+
+    private var registryReferences: URL? {
+        executionPool?.directory.appending(path: "simulator-registries.json")
+    }
+
+    private func registeredPaths() throws -> [String] {
+        guard let registryReferences else { return [] }
+        let data: Data
+        do { data = try Data(contentsOf: registryReferences) }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile { return [] }
+        return try JSONDecoder().decode([String].self, from: data)
+    }
+
+    private func registryDirectories() throws -> [URL] {
+        let paths = try registeredPaths()
+        let defaultDirectory = executionPool?.simulatorPoolDirectory ?? directory
+        let registries = [directory, defaultDirectory] + paths.map { URL(filePath: $0) }
+        return Set(registries.map(Self.registryPath)).sorted().map { URL(filePath: $0, directoryHint: .isDirectory) }
+    }
+
+    private func registerRegistry() throws {
+        guard let executionPool, let registryReferences else { return }
+        let path = Self.registryPath(directory)
+        guard path != Self.registryPath(executionPool.simulatorPoolDirectory) else { return }
+        var paths = try registeredPaths().map { Self.registryPath(URL(filePath: $0)) }
+        guard !paths.contains(path) else { return }
+        paths.append(path)
+        try JSONEncoder().encode(paths.sorted()).write(to: registryReferences, options: .atomic)
+    }
+
+    private static func registryPath(_ directory: URL) -> String {
+        var path = directory.resolvingSymlinksInPath().path(percentEncoded: false)
+        // Resolving an existing directory can add a trailing slash to the same path.
+        while path.count > 1 && path.hasSuffix("/") { path.removeLast() }
+        return path
+    }
+
+    private func hasRegistries() throws -> Bool {
+        var found = false
+        for registry in try registryDirectories() {
+            do {
+                _ = try FileManager.default.attributesOfItem(atPath: registry.path(percentEncoded: false))
+                found = true
+            } catch let error as CocoaError where error.code == .fileReadNoSuchFile { continue }
+        }
+        return found
+    }
+
+    private static func withKeyLock<Value: Sendable>(
+        _ directory: URL, operation: @Sendable () async throws -> Value
+    ) async throws -> Value {
+        let coordinator = try open(directory.appending(path: "pool.lock"))
+        return try await withHandle(coordinator) {
+            try await lock(coordinator)
+            return try await operation()
         }
     }
 
@@ -238,15 +396,15 @@ public struct SimulatorPool: Sendable {
         return identifier
     }
 
-    private static func retire(_ lease: Lease, identifier: String? = nil, tool: SimulatorTool) async throws {
+    private func retire(_ lease: Lease, identifier: String? = nil, tool: SimulatorTool) async throws {
         try await Task.detached {
-            if let record = try readRecordIfPresent(lease.recordURL) {
-                try await tool.delete(identifier: identifier ?? record.identifier, name: deviceName(for: lease.recordURL))
+            if let record = try Self.readRecordIfPresent(lease.recordURL) {
+                try await tool.delete(identifier: identifier ?? record.identifier, name: Self.deviceName(for: lease.recordURL))
             }
-            let coordinator = try open(lease.recordURL.deletingLastPathComponent().appending(path: "pool.lock"))
-            try await withHandle(coordinator) {
-                try await lock(coordinator)
-                try removeEntryFiles(for: lease.recordURL)
+            try await withRegistryLock {
+                try await Self.withKeyLock(lease.recordURL.deletingLastPathComponent()) {
+                    try Self.removeEntryFiles(for: lease.recordURL)
+                }
             }
         }.value
     }
@@ -370,8 +528,13 @@ public struct SimulatorPool: Sendable {
 }
 
 extension HostExecutionPool {
-    /// The Simulator registry that XcodeRunner and `pool clean-simulators` use with this pool.
-    public var simulatorPool: SimulatorPool { SimulatorPool(directory: simulatorPoolDirectory) }
+    /// The default Simulator registry. Its limit and cleanup include custom
+    /// registries used by runners attached to this execution pool.
+    public var simulatorPool: SimulatorPool {
+        var pool = SimulatorPool(directory: simulatorPoolDirectory)
+        pool.executionPool = self
+        return pool
+    }
 
     fileprivate var simulatorPoolDirectory: URL { directory.appending(path: "Simulators") }
 }

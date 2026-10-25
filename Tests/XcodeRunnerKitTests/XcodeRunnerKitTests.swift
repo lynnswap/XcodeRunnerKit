@@ -210,16 +210,21 @@ struct XcodeRunnerKitTests {
         try """
             #!/bin/sh
             case "$2" in
-            create) echo \(identifier); printf '%s' "$DEVELOPER_DIR" > \(selectedXcode.path);;
+            create) touch \(root.appending(path: "created").path); echo \(identifier); printf '%s' "$DEVELOPER_DIR" > \(selectedXcode.path);;
+            list)
+                if [ -e \(root.appending(path: "created").path) ]; then
+                    echo '{"devices":{"runtime":[{"udid":"\(identifier)","name":"fixture","isAvailable":true}]}}'
+                else echo '{"devices":{}}'; fi;;
             bootstatus)
                 [ "$3" = "\(identifier)" ] && [ "$4" = "-b" ] || exit 9
                 touch \(booted.path);;
-            delete) printf '%s' "$3" > \(deleted.path);;
+            delete) printf '%s' "$3" > \(deleted.path); rm \(root.appending(path: "created").path);;
             esac
             """.write(to: simulator, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: simulator.path)
         let executable = try script("[ -e \(booted.path) ] || exit 9; printf '%s\\n' \"$@\"; exit \(exitCode)", at: root)
         var runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
+        runner.simulatorPool = SimulatorPool(directory: root.appending(path: "Simulators"))
         runner.executionPool = Self.pool(at: root, initialMaximumConcurrentJobs: 1)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
         request.destination = .managedSimulator(Self.freshSimulator)
@@ -248,14 +253,19 @@ struct XcodeRunnerKitTests {
         try """
             #!/bin/sh
             case "$2" in
-            create) echo \(identifier);;
+            create) touch \(root.appending(path: "created").path); echo \(identifier);;
+            list)
+                if [ -e \(root.appending(path: "created").path) ]; then
+                    echo '{"devices":{"runtime":[{"udid":"\(identifier)","name":"fixture","isAvailable":true}]}}'
+                else echo '{"devices":{}}'; fi;;
             bootstatus) echo boot-failed >&2; exit 9;;
-            delete) printf '%s' "$3" > \(deleted.path);;
+            delete) printf '%s' "$3" > \(deleted.path); rm \(root.appending(path: "created").path);;
             esac
             """.write(to: simulator, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: simulator.path)
         let executable = try script("touch \(started.path)", at: root)
-        let runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
+        var runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
+        runner.simulatorPool = SimulatorPool(directory: root.appending(path: "Simulators"))
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
         request.destination = .managedSimulator(Self.freshSimulator)
         do {
@@ -278,11 +288,21 @@ struct XcodeRunnerKitTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let identifier = UUID().uuidString
         let simulator = root.appending(path: "simctl")
-        try ("#!/bin/sh\ncase \"$2\" in\ncreate) echo " + identifier + ";;\ndelete) echo deletion-failed >&2; exit 9;;\nesac\n")
-            .write(to: simulator, atomically: true, encoding: .utf8)
+        try """
+            #!/bin/sh
+            case "$2" in
+            create) touch \(root.appending(path: "created").path); echo \(identifier);;
+            list)
+                if [ -e \(root.appending(path: "created").path) ]; then
+                    echo '{"devices":{"runtime":[{"udid":"\(identifier)","name":"fixture","isAvailable":true}]}}'
+                else echo '{"devices":{}}'; fi;;
+            delete) echo deletion-failed >&2; exit 9;;
+            esac
+            """.write(to: simulator, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: simulator.path)
         let executable = try script("exit 7", at: root)
-        let runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
+        var runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
+        runner.simulatorPool = SimulatorPool(directory: root.appending(path: "Simulators"))
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root)
         request.destination = .managedSimulator(Self.freshSimulator)
         do {
@@ -306,14 +326,25 @@ struct XcodeRunnerKitTests {
         let ready = root.appending(path: "creating")
         let deleted = root.appending(path: "deleted")
         let simulator = root.appending(path: "simctl")
-        try ("#!/bin/sh\ncase \"$2\" in\ncreate) touch " + ready.path + "; sleep 1; echo " + identifier + ";;\ndelete) touch " + deleted.path + ";;\nesac\n")
-            .write(to: simulator, atomically: true, encoding: .utf8)
+        try """
+            #!/bin/sh
+            case "$2" in
+            create) touch \(ready.path); sleep 1; touch \(root.appending(path: "created").path); echo \(identifier);;
+            list)
+                if [ -e \(root.appending(path: "created").path) ]; then
+                    echo '{"devices":{"runtime":[{"udid":"\(identifier)","name":"fixture","isAvailable":true}]}}'
+                else echo '{"devices":{}}'; fi;;
+            delete) touch \(deleted.path); rm \(root.appending(path: "created").path);;
+            esac
+            """.write(to: simulator, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: simulator.path)
-        let runner = XcodeRunner(executableURL: root.appending(path: "must-not-start"), simulatorExecutableURL: simulator)
+        var runner = XcodeRunner(executableURL: root.appending(path: "must-not-start"), simulatorExecutableURL: simulator)
+        runner.simulatorPool = SimulatorPool(directory: root.appending(path: "Simulators"))
+        let configuredRunner = runner
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
         request.destination = .managedSimulator(Self.freshSimulator)
         let configured = request
-        let task = Task { try await runner.run(.test, request: configured) }
+        let task = Task { try await configuredRunner.run(.test, request: configured) }
         defer { task.cancel() }
         try await waitForFile(ready)
         task.cancel()
@@ -341,16 +372,22 @@ struct XcodeRunnerKitTests {
         try """
             #!/bin/sh
             case "$2" in
-            create) echo \(identifier);;
+            create) touch \(root.appending(path: "created").path); echo \(identifier);;
+            list)
+                if [ -e \(root.appending(path: "created").path) ]; then
+                    echo '{"devices":{"runtime":[{"udid":"\(identifier)","name":"fixture","isAvailable":true}]}}'
+                else echo '{"devices":{}}'; fi;;
             delete)
                 touch \(ready.path)
                 while [ ! -e \(finish.path) ]; do sleep 0.02; done
-                touch \(deleted.path);;
+                touch \(deleted.path)
+                rm \(root.appending(path: "created").path);;
             esac
             """.write(to: simulator, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: simulator.path)
         let executable = try script("printf 'completed payload\\n'; exit \(exitCode)", at: root)
         var runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
+        runner.simulatorPool = SimulatorPool(directory: root.appending(path: "Simulators"))
         runner.executionPool = Self.pool(at: root, initialMaximumConcurrentJobs: 1)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
         request.destination = .managedSimulator(Self.freshSimulator)

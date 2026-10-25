@@ -56,6 +56,7 @@ final class HostSettingsModel {
     var runnerScanError: String?
     private(set) var poolStatus: HostExecutionPool.Status?
     private(set) var poolError: String?
+    private(set) var simulatorPoolError: String?
     private(set) var saveError: String?
     private(set) var isSaving = false
     private(set) var hasLoadedPoolStatus = false
@@ -158,6 +159,17 @@ final class HostSettingsModel {
         return "New jobs can start while slots are available."
     }
 
+    func trimSimulatorPool() async {
+        do {
+            try await pool.removeExcessSimulators()
+            simulatorPoolError = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            simulatorPoolError = "Could not reduce the Simulator pool to the execution limit: \(error.localizedDescription)"
+        }
+    }
+
     func refreshPoolStatus() async {
         do {
             let previousInput = String(poolStatus?.maximumConcurrentJobs ?? HostInstallation.defaultMaximumConcurrentJobs)
@@ -188,15 +200,21 @@ final class HostSettingsModel {
         isSaving = true
         defer { isSaving = false }
         do {
-            try await pool.updateMaximumConcurrentJobs(to: capacity)
+            var cleanupError: String?
+            do {
+                try await pool.updateMaximumConcurrentJobs(to: capacity)
+            } catch let failure as HostExecutionPool.ConfigurationCleanupFailure {
+                cleanupError = failure.localizedDescription
+            }
             do {
                 try github.saveSelection()
             } catch {
-                saveError = "The execution limit was saved as \(capacity), but the repository selection could not be saved: \(error.localizedDescription)"
+                saveError = [cleanupError, "The execution limit was saved as \(capacity), but the repository selection could not be saved: \(error.localizedDescription)"]
+                    .compactMap { $0 }.joined(separator: "\n")
                 await refreshPoolStatus()
                 return
             }
-            saveError = nil
+            saveError = cleanupError
             await refreshPoolStatus()
             await github.synchronize()
         } catch {
@@ -266,9 +284,12 @@ struct HostSettingsView: View {
                     Text(model.admissionMessage)
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                    Text("The Simulator pool uses the same limit across Xcode versions, runtimes, and device types. Idle devices above the limit are removed; devices in use finish first.")
+                        .font(.callout).foregroundStyle(.secondary)
                     Text("This limit is shared across all repositories. Selected repositories receive enough runner registrations to use it. GitHub jobs may wait here after assignment; their in-progress count can be higher than the Xcode execution count.")
                         .font(.callout).foregroundStyle(.secondary)
                     if let error = model.poolError { errorMessage(error) }
+                    if let error = model.simulatorPoolError { errorMessage(error) }
                     if let error = model.saveError { errorMessage(error) }
                 }
                 Section("Runner Services") {

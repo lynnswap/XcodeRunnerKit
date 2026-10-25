@@ -16,6 +16,8 @@ struct HostSettingsTests {
         #expect(!settings.hasLoadedPoolStatus)
         await settings.applyCapacity()
         #expect(!FileManager.default.fileExists(atPath: settings.pool.directory.path()))
+        await settings.trimSimulatorPool()
+        #expect(settings.simulatorPoolError == nil)
         await settings.refreshPoolStatus()
         #expect(settings.hasLoadedPoolStatus)
         #expect(settings.poolStatus == nil)

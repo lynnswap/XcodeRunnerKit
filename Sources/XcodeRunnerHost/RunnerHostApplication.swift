@@ -210,6 +210,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         }
         poolMonitoring = Task {
             while !Task.isCancelled {
+                await settings.trimSimulatorPool()
                 await settings.refreshPoolStatus()
                 updatePoolMenuItem()
                 do { try await Task.sleep(for: .seconds(2)) }

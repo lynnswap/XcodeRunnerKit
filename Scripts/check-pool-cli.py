@@ -9,6 +9,7 @@ import signal
 import subprocess
 import tempfile
 import time
+from execution_pool_probe import build_execution_pool_probe
 
 REPO = Path(__file__).resolve().parents[1]
 ACTIONS = ("build", "build-for-testing", "test", "test-without-building")
@@ -79,12 +80,7 @@ def main():
             "pool", "status", "--pool-directory", pool).stdout
 
         probe = root / "pool-probe"
-        subprocess.run([
-            "xcrun", "swiftc", "-parse-as-library", "-swift-version", "6",
-            str(REPO / "Sources/XcodeRunnerKit/HostExecutionPool.swift"),
-            str(REPO / "Tests/Fixtures/ExecutionPoolProbe.swift"),
-            "-o", str(probe),
-        ], check=True)
+        build_execution_pool_probe(probe)
         jobs = {}
         logs = []
 
@@ -261,14 +257,22 @@ exec "$(xcrun --find clang)" "$@"
         for name, body in {
             "xcrun": 'tool="$1"; shift; exec "$(dirname "$0")/$tool" "$@"',
             "xcodebuild": "echo fake-test-failure; exit 65",
-            "simctl": 'case "$1" in create) echo 11111111-2222-3333-4444-555555555555;;'
-                      ' delete) echo fake-deletion-failed >&2; exit 9;; esac',
+            "simctl": '''device="$(dirname "$0")/device-present"
+case "$1" in
+create) touch "$device"; echo 11111111-2222-3333-4444-555555555555;;
+list)
+    if [ -e "$device" ]; then
+        echo '{"devices":{"runtime":[{"udid":"11111111-2222-3333-4444-555555555555","name":"fixture","isAvailable":true}]}}'
+    else echo '{"devices":{}}'; fi;;
+delete) echo fake-deletion-failed >&2; exit 9;;
+esac''',
         }.items():
             (fake_tools / name).write_text("#!/bin/sh\n" + body + "\n")
             (fake_tools / name).chmod(0o755)
         result = command("test", "--package", package, "--scheme", "BuildProbe",
                          "--simulator-runtime", "runtime", "--simulator-device-type", "device",
                          "--fresh-simulator", "--developer-directory", fake_tools.parents[1],
+                         "--pool-directory", root / "CleanupFailurePool", "--maximum-concurrent-jobs", "1",
                          "--output-directory", root / "CleanupFailureOutput", success=False)
         assert result.returncode == 65, (result.returncode, result.stdout, result.stderr)
         assert "Log: " in result.stderr and "fake-deletion-failed" in result.stderr, result.stderr

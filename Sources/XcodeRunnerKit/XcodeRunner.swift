@@ -94,38 +94,14 @@ public struct XcodeRunner: Sendable {
         var selectedRequest = request
         selectedRequest.environment["DEVELOPER_DIR"] = selectedXcode.path(percentEncoded: false)
         let simulatorRequest = selectedRequest
-        if configuration.reusesDevice {
-            let pool = simulatorPool ?? executionPool?.simulatorPool ?? SimulatorPool()
-            return await pool.withSimulator(action: action, configuration: configuration, developerDirectory: selectedXcode, tool: tool) { identifier, leaseDescriptor in
-                await runOnSimulator(
-                    action, request: simulatorRequest, identifier: identifier,
-                    inheritedLeaseDescriptor: leaseDescriptor, onOutput: onOutput
-                )
-            }
+        var pool = simulatorPool ?? executionPool?.simulatorPool ?? SimulatorPool()
+        if let executionPool { pool.executionPool = executionPool }
+        return await pool.withSimulator(action: action, configuration: configuration, developerDirectory: selectedXcode, tool: tool) { identifier, leaseDescriptor in
+            await runOnSimulator(
+                action, request: simulatorRequest, identifier: identifier,
+                inheritedLeaseDescriptor: leaseDescriptor, onOutput: onOutput
+            )
         }
-        let name = SimulatorTool.freshDeviceName()
-        let identifier: String
-        // Finish creation even if the caller cancels, so the owned UDID is known.
-        do { identifier = try await Task.detached { try await tool.create(configuration, name: name) }.value }
-        catch { return .failure(wrapping: error) }
-        var outcome: XcodeBuildOutcome
-        do {
-            try Task.checkCancellation()
-            if action == .test || action == .testWithoutBuilding {
-                try await tool.boot(identifier)
-            }
-            outcome = await runOnSimulator(action, request: simulatorRequest, identifier: identifier, onOutput: onOutput)
-        } catch {
-            outcome = .failure(wrapping: error)
-        }
-
-        // Cleanup must run after cancellation, and remains inside the host slot.
-        var cleanupErrors: [any Error] = []
-        do { try await Task.detached { try await tool.delete(identifier) }.value }
-        catch {
-            cleanupErrors.append(SimulatorCleanupFailure(simulatorIdentifier: identifier, simulatorName: name, underlyingError: error))
-        }
-        return outcome.cancelledIfNeeded().addingCleanupErrors(cleanupErrors)
     }
 
     private func runOnSimulator(
