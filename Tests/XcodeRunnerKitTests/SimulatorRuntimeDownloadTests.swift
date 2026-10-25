@@ -131,13 +131,18 @@ struct SimulatorRuntimeDownloadTests {
             try writeScript("""
                 root=$(dirname "$0")
                 printf 'simctl:%s:%s\\n' "$DEVELOPER_DIR" "$*" >> "$root/calls"
-                if [ "$2" = list ]; then
+                if [ "$2" = list ] && [ "$3" = runtimes ]; then
                     if [ -e "$root/downloaded" ]; then cat "$root/after.json"; else cat "$root/before.json"; fi
+                elif [ "$2" = list ] && [ "$3" = devices ]; then
+                    if [ -e "$root/device-present" ]; then
+                        printf '%s\\n' '{"devices":{"runtime":[{"udid":"\(Self.deviceIdentifier)","name":"fixture","isAvailable":true}]}}'
+                    else printf '%s\\n' '{"devices":{}}'; fi
                 elif [ "$2" = create ]; then
-                    touch "$root/created"
+                    touch "$root/created" "$root/device-present"
                     printf '%s\\n' '\(Self.deviceIdentifier)'
                 elif [ "$2" = delete ]; then
                     touch "$root/deleted"
+                    rm "$root/device-present"
                 else
                     exit 1
                 fi
@@ -157,10 +162,11 @@ struct SimulatorRuntimeDownloadTests {
         }
 
         func run(onOutput: (@Sendable (Data) throws -> Void)? = nil) async throws -> XcodeBuildResult {
-            let runner = XcodeRunner(
+            var runner = XcodeRunner(
                 executableURL: root.appending(path: "xcodebuild"), developerDirectory: developerDirectory,
                 simulatorExecutableURL: root.appending(path: "xcrun")
             )
+            runner.simulatorPool = SimulatorPool(directory: root.appending(path: "Simulators"))
             let request = XcodeBuildRequest(
                 source: .package(root), scheme: "Probe", destination: .managedSimulator(configuration),
                 outputDirectory: root.appending(path: "Build")

@@ -17,8 +17,8 @@ public struct SimulatorConfiguration: Sendable {
 
 /// A Simulator that could not be prepared for reuse or deleted.
 ///
-/// Remove a remaining pooled device with SimulatorPool.removeIdleSimulators,
-/// or a fresh device with `xcrun simctl delete`.
+/// Remove a remaining managed device with SimulatorPool.removeIdleSimulators,
+/// or use `xcrun simctl delete` with its identifier.
 public struct SimulatorCleanupFailure: Error, LocalizedError {
     /// The device's UDID, or nil when it failed before simctl reported one.
     public let simulatorIdentifier: String?
@@ -38,8 +38,6 @@ struct SimulatorTool: Sendable {
     var inheritedLeaseDescriptor: Int32?
     var componentTool: XcodeComponentTool?
     var componentOutput: (@Sendable (Data) throws -> Void)?
-
-    static func freshDeviceName() -> String { "XcodeRunnerKit-" + UUID().uuidString }
 
     func create(_ configuration: SimulatorConfiguration, name: String) async throws -> String {
         let output = try await call([

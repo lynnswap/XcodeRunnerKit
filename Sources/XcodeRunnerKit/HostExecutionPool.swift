@@ -88,14 +88,46 @@ public struct HostExecutionPool: Sendable {
     ///
     /// Operations already holding slots continue. After a decrease, waiting
     /// operations start only when the active count is below the new limit.
+    /// Excess idle Simulators are deleted. ConfigurationCleanupFailure reports
+    /// a saved limit whose subsequent cleanup did not finish.
     public func updateMaximumConcurrentJobs(to capacity: Int) async throws {
+        try await updateMaximumConcurrentJobs(to: capacity, executableURL: URL(filePath: "/usr/bin/xcrun"))
+    }
+
+    func updateMaximumConcurrentJobs(to capacity: Int, executableURL: URL) async throws {
         guard capacity > 0 else { throw ConfigurationError.invalidMaximumConcurrentJobs }
         try Task.checkCancellation()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let coordinator = try Self.open(directory.appending(path: "pool.lock"))
-        try await Self.withHandle(coordinator) {
-            try await Self.lock(coordinator)
-            try saveCapacity(capacity)
+        do {
+            try await Self.withHandle(coordinator) {
+                try await Self.lock(coordinator)
+                try saveCapacity(capacity)
+            }
+        } catch let failure as HostExecutionCleanupFailure where failure.operationError == nil {
+            throw ConfigurationCleanupFailure(savedMaximumConcurrentJobs: capacity, underlyingError: failure)
+        }
+        do { try await removeExcessSimulators(executableURL: executableURL) }
+        catch { throw ConfigurationCleanupFailure(savedMaximumConcurrentJobs: capacity, underlyingError: error) }
+    }
+
+    /// Deletes idle managed Simulators above the saved limit across the default and
+    /// associated custom registries. Active devices finish normally.
+    public func removeExcessSimulators() async throws {
+        try await removeExcessSimulators(executableURL: URL(filePath: "/usr/bin/xcrun"))
+    }
+
+    func removeExcessSimulators(executableURL: URL) async throws {
+        try await simulatorPool.removeExcessSimulators(executableURL: executableURL)
+    }
+
+    /// The execution limit was saved, but subsequent cleanup failed.
+    public struct ConfigurationCleanupFailure: Error, LocalizedError {
+        public let savedMaximumConcurrentJobs: Int
+        public let underlyingError: any Error
+
+        public var errorDescription: String? {
+            "The execution limit was saved as \(savedMaximumConcurrentJobs), but cleanup failed: \(underlyingError.localizedDescription)"
         }
     }
 
@@ -261,7 +293,7 @@ public struct HostExecutionPool: Sendable {
         catch let error as CocoaError where error.code == .fileNoSuchFile { }
     }
 
-    private func savedCapacity() throws -> Int? {
+    func savedCapacity() throws -> Int? {
         let stored: Data
         do {
             stored = try Data(contentsOf: directory.appending(path: "capacity"))

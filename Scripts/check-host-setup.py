@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from execution_pool_probe import build_execution_pool_probe
 
 scripts = Path(__file__).resolve().parent
 executable = Path(sys.argv[1]).resolve()
@@ -134,10 +135,7 @@ with tempfile.TemporaryDirectory(prefix="Hosted CLI unavailable storage ") as te
     offline.rename(storage)
 
     probe = root / "pool-probe"
-    subprocess.run(["xcrun", "swiftc", "-parse-as-library", "-swift-version", "6",
-                    str(scripts.parent / "Sources/XcodeRunnerKit/HostExecutionPool.swift"),
-                    str(scripts.parent / "Tests/Fixtures/ExecutionPoolProbe.swift"),
-                    "-o", str(probe)], check=True)
+    build_execution_pool_probe(probe)
     admission = root / "Admission"
     admission.mkdir()
     pool = admission / "pool"
