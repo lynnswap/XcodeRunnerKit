@@ -36,6 +36,10 @@ public struct XcodeRunner: Sendable {
     /// the job's artifact locations once its directory exists, including
     /// incomplete output. Priority orders waiting operations when an
     /// executionPool is configured.
+    /// Missing managed Simulator runtimes are downloaded before device creation.
+    /// If compilation fails because the Metal Toolchain is missing, downloads
+    /// it and retries once, preserving both attempts in the job directory.
+    /// Download progress is delivered to onOutput using the selected Xcode.
     public func run(
         _ action: XcodeBuildAction,
         request: XcodeBuildRequest,
@@ -76,7 +80,14 @@ public struct XcodeRunner: Sendable {
                 developerDirectory ?? (request.environment["DEVELOPER_DIR"] ?? ProcessInfo.processInfo.environment["DEVELOPER_DIR"])
                     .map { URL(filePath: $0) }
             )
-            tool = SimulatorTool(executableURL: simulatorExecutableURL, developerDirectory: selectedXcode)
+            var componentEnvironment = request.environment
+            componentEnvironment["DEVELOPER_DIR"] = selectedXcode.path(percentEncoded: false)
+            tool = SimulatorTool(
+                executableURL: simulatorExecutableURL, developerDirectory: selectedXcode,
+                componentTool: XcodeComponentTool(executableURL: executableURL, environment: componentEnvironment),
+                componentOutput: onOutput
+            )
+            try await tool.prepareRuntime(configuration.runtimeIdentifier)
         } catch {
             return .failure(wrapping: error)
         }
@@ -200,27 +211,49 @@ public struct XcodeRunner: Sendable {
                     guard error == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(error)) }
                 }
             }
-            let execution = try await Subprocess.run(
-                .path(.init(executableURL.path(percentEncoded: false))),
-                arguments: .init(arguments),
-                environment: .inherit.updating(Dictionary(uniqueKeysWithValues: environment.map { (Environment.Key(stringLiteral: $0.key), Optional($0.value)) })),
-                workingDirectory: .init(commandSource.workingDirectory.path(percentEncoded: false)),
-                platformOptions: options,
-                input: .none,
-                output: .sequence,
-                error: .combinedWithOutput
-            ) { execution in
-                for try await buffer in execution.standardOutput {
-                    let data = buffer.withUnsafeBytes { Data($0) }
+            for attempt in 0..<2 {
+                try Task.checkCancellation()
+                let execution = try await Subprocess.run(
+                    .path(.init(executableURL.path(percentEncoded: false))),
+                    arguments: .init(arguments),
+                    environment: .inherit.updating(Dictionary(uniqueKeysWithValues: environment.map { (Environment.Key(stringLiteral: $0.key), Optional($0.value)) })),
+                    workingDirectory: .init(commandSource.workingDirectory.path(percentEncoded: false)),
+                    platformOptions: options,
+                    input: .none,
+                    output: .sequence,
+                    error: .combinedWithOutput
+                ) { execution in
+                    let diagnostic = Data("cannot execute tool 'metal' due to missing Metal Toolchain".utf8)
+                    var tail = Data()
+                    var needsMetalToolchain = false
+                    for try await buffer in execution.standardOutput {
+                        let data = buffer.withUnsafeBytes { Data($0) }
+                        try handle.write(contentsOf: data)
+                        try onOutput?(data)
+                        tail.append(data)
+                        if tail.range(of: diagnostic) != nil { needsMetalToolchain = true }
+                        tail = Data(tail.suffix(diagnostic.count))
+                    }
+                    return needsMetalToolchain
+                }
+                switch execution.terminationStatus {
+                case .exited(let code): status = .exited(code)
+                case .signaled(let signal): status = .terminated(signal)
+                }
+                if Task.isCancelled { status = .cancelled }
+                guard attempt == 0, case .exited(let code) = status, code != 0,
+                      action != .testWithoutBuilding, execution.closureResult else { break }
+                let components = XcodeComponentTool(executableURL: executableURL, environment: environment)
+                try await components.download(arguments: ["-downloadComponent", "MetalToolchain"]) { data in
                     try handle.write(contentsOf: data)
                     try onOutput?(data)
                 }
+                if FileManager.default.fileExists(atPath: bundleURL.path(percentEncoded: false)) {
+                    try FileManager.default.moveItem(
+                        at: bundleURL, to: directory.appending(path: "Results-before-component-download.xcresult")
+                    )
+                }
             }
-            switch execution.terminationStatus {
-            case .exited(let code): status = .exited(code)
-            case .signaled(let signal): status = .terminated(signal)
-            }
-            if Task.isCancelled { status = .cancelled }
         } catch {
             status = Task.isCancelled ? .cancelled : .executionFailed
             executionError = error

@@ -38,12 +38,14 @@ The installer places the app in `~/Applications` and starts it through a user
 LaunchAgent. An ad-hoc signature (`-`) is not accepted. Use the same signing
 identity for updates so macOS can retain the app's access permissions.
 
-Install the Simulator runtimes your projects use. Projects that compile Metal
-also need the Metal Toolchain:
-
-```sh
-xcodebuild -downloadComponent MetalToolchain
-```
+Complete Xcode's license acceptance and first-launch setup before starting jobs.
+Xcode installation and setup that requires administrator access remain manual.
+Jobs download a missing [managed Simulator runtime](../README.md#ios-simulators)
+when requested. If xcodebuild reports a missing Metal Toolchain, the runner
+downloads it and retries the operation once. Downloads use the job's selected
+Xcode, including `DEVELOPER_DIR`. Download progress appears in workflow output;
+Metal download output and both build attempts also remain in the job log. A
+failed download stops the job.
 
 ## Connect GitHub
 

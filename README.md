@@ -11,7 +11,10 @@ Xcode jobs.
 
 - macOS 26 or later
 - Swift 6.4 and Xcode 27.1 or later
-- The SDKs and Simulator runtimes needed by your project
+- The SDKs needed by your project
+
+Install Xcode and complete its license acceptance and first-launch setup before
+running. The runner downloads missing components as described below.
 
 The package is under development; APIs and CLI options may change.
 
@@ -76,6 +79,18 @@ Use repeated `--setting NAME=VALUE` and `--environment NAME=VALUE` options
 for build settings and environment values. `--developer-directory` selects
 Xcode without changing `xcode-select`.
 
+### Automatic Xcode components
+
+If xcodebuild reports that the Metal Toolchain is missing, the runner downloads
+it and retries the operation once. Other build or test failures are returned
+without a retry. A failed download stops the operation and keeps its output in
+the job log.
+
+Component downloads use the operation's selected Xcode, including
+`developerDirectory` in Swift, `--developer-directory` in the CLI, or inherited
+`DEVELOPER_DIR`. Xcode installation and setup that requires administrator access
+remain manual.
+
 ### Custom build service
 
 Pass `--build-service-path /path/to/SWBBuildServiceBundle` to select a custom
@@ -119,6 +134,14 @@ Find installed runtimes and their supported device types with
 these options. In Swift, set
 `request.destination = .managedSimulator(SimulatorConfiguration(runtimeIdentifier:deviceTypeIdentifier:))`.
 The runner passes the managed device to xcodebuild as `id=<UDID>`.
+
+If the requested runtime is absent, the runner downloads that platform and
+version before creating the device. Automatic downloads support standard
+`com.apple.CoreSimulator.SimRuntime` identifiers for iOS, tvOS, watchOS, and xrOS
+(visionOS), such as `com.apple.CoreSimulator.SimRuntime.iOS-27-0` for iOS 27.0.
+An installed runtime that CoreSimulator marks unavailable still produces an
+error. A `--destination` specifier or device ID does not trigger a runtime
+download.
 
 The runner leases a device exclusively for each operation. Devices are shared
 only when their runtime, device type, and selected Xcode match. Test operations
@@ -243,6 +266,11 @@ missing, but not their parent folders, so a job fails instead of writing to the
 startup volume when removable storage is not mounted.
 `XcodeBuildResult.jobDirectory` names it. Early failures may produce no result
 bundle.
+
+When a missing Metal Toolchain triggers a retry, `xcodebuild.log` includes both
+attempts and the download output. The first attempt's result bundle, when
+present, is kept as `Results-before-component-download.xcresult`;
+`Results.xcresult` belongs to the retry.
 
 `runner.run` throws `XcodeBuildFailure` for every unsuccessful operation.
 Its `result` contains the exit status and artifact paths, and is `nil` only when
