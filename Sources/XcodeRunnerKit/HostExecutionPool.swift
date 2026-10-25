@@ -6,6 +6,9 @@ import Foundation
 /// Repository runners share one local directory. Its saved maximum limits new
 /// operations. Do not remove the directory or its lock files while jobs are running.
 public struct HostExecutionPool: Sendable {
+    /// The idle retention period used when no Simulator retention setting is saved.
+    public static let defaultSimulatorIdleRetentionMinutes = 20
+
     /// The shared directory, with symlinks resolved when the pool is created.
     public let directory: URL
     /// The limit saved by the first slot acquisition in an unconfigured pool.
@@ -111,7 +114,42 @@ public struct HostExecutionPool: Sendable {
         catch { throw ConfigurationCleanupFailure(savedMaximumConcurrentJobs: capacity, underlyingError: error) }
     }
 
-    /// Deletes managed Simulators idle for 20 minutes, then the oldest idle devices
+    /// Reads the saved Simulator idle retention period in minutes without initializing the pool.
+    ///
+    /// An unset period uses `defaultSimulatorIdleRetentionMinutes`. Invalid saved
+    /// values throw `ConfigurationError.invalidStoredSimulatorIdleRetentionMinutes`.
+    public func simulatorIdleRetentionMinutes() throws -> Int {
+        let stored: Data
+        do {
+            stored = try Data(contentsOf: directory.appending(path: "simulator-idle-retention-minutes"))
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            return Self.defaultSimulatorIdleRetentionMinutes
+        }
+        guard let value = String(data: stored, encoding: .utf8),
+              let minutes = Int(value), minutes > 0 else {
+            throw ConfigurationError.invalidStoredSimulatorIdleRetentionMinutes(directory: directory)
+        }
+        return minutes
+    }
+
+    /// Saves a positive whole number of minutes for idle Simulator retention.
+    ///
+    /// The next lease or maintenance operation applies this period to existing
+    /// idle devices. Saving the setting does not interrupt active leases or run cleanup.
+    public func updateSimulatorIdleRetentionMinutes(to minutes: Int) async throws {
+        guard minutes > 0 else { throw ConfigurationError.invalidSimulatorIdleRetentionMinutes }
+        try Task.checkCancellation()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let coordinator = try Self.open(directory.appending(path: "pool.lock"))
+        try await Self.withHandle(coordinator) {
+            try await Self.lock(coordinator)
+            try Data(String(minutes).utf8).write(
+                to: directory.appending(path: "simulator-idle-retention-minutes"), options: .atomic
+            )
+        }
+    }
+
+    /// Deletes managed Simulators past their saved idle retention period, then the oldest idle devices
     /// above the saved limit across the default and associated custom registries.
     /// Active devices finish normally.
     public func removeExcessSimulators() async throws {
@@ -342,18 +380,24 @@ public struct HostExecutionPool: Sendable {
 
     public enum ConfigurationError: Error, LocalizedError {
         case invalidMaximumConcurrentJobs
+        case invalidSimulatorIdleRetentionMinutes
         case notConfigured(directory: URL)
         case invalidStoredMaximumConcurrentJobs(directory: URL)
+        case invalidStoredSimulatorIdleRetentionMinutes(directory: URL)
         case invalidStoredWaiter(URL)
 
         public var errorDescription: String? {
             switch self {
             case .invalidMaximumConcurrentJobs:
                 return "The maximum concurrent job count must be positive."
+            case .invalidSimulatorIdleRetentionMinutes:
+                return "The Simulator idle retention period must be a positive whole number of minutes."
             case .notConfigured(let directory):
                 return "The pool at \(directory.path(percentEncoded: false)) has no maximum concurrent job count. Configure the pool or provide an initial maximum."
             case .invalidStoredMaximumConcurrentJobs(let directory):
                 return "The pool at \(directory.path(percentEncoded: false)) has an invalid saved maximum concurrent job count. Expected a positive integer."
+            case .invalidStoredSimulatorIdleRetentionMinutes(let directory):
+                return "The pool at \(directory.path(percentEncoded: false)) has an invalid saved Simulator idle retention period. Expected a positive whole number of minutes."
             case .invalidStoredWaiter(let url):
                 return "The waiting record at \(url.path(percentEncoded: false)) has an invalid sequence or priority."
             }

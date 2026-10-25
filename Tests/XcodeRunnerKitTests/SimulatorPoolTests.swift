@@ -538,6 +538,52 @@ struct SimulatorPoolTests {
         #expect(try fixture.devices() == [identifier])
     }
 
+    @Test func changedRetentionAppliesToExistingIdleDevicesAndPersistsAcrossPoolInstances() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let clock = Clock()
+        let directory = fixture.root.appending(path: "execution")
+        let pool = HostExecutionPool(directory: directory)
+        #expect(try pool.simulatorIdleRetentionMinutes() == 20)
+        #expect(!FileManager.default.fileExists(atPath: directory.path))
+        try await pool.updateSimulatorIdleRetentionMinutes(to: 5)
+        let reopenedPool = HostExecutionPool(directory: directory)
+        #expect(try reopenedPool.simulatorIdleRetentionMinutes() == 5)
+        var runner = fixture.runner(clock: clock)
+        runner.simulatorPool?.executionPool = reopenedPool
+        _ = try await runner.run(.test, request: fixture.request("retained"))
+
+        clock.advance(by: 4 * 60)
+        try await pool.removeExcessSimulators(executableURL: fixture.root.appending(path: "simctl"), now: clock.now)
+        #expect(try fixture.devices().count == 1)
+        try await pool.updateSimulatorIdleRetentionMinutes(to: 10)
+        clock.advance(by: 2 * 60)
+        try await reopenedPool.removeExcessSimulators(executableURL: fixture.root.appending(path: "simctl"), now: clock.now)
+        #expect(try fixture.devices().count == 1)
+
+        try await pool.updateSimulatorIdleRetentionMinutes(to: 5)
+        try await reopenedPool.removeExcessSimulators(executableURL: fixture.root.appending(path: "simctl"), now: clock.now)
+        #expect(try fixture.devices().isEmpty)
+    }
+
+    @Test func acquisitionReadsAnUpdatedRetentionSetting() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let clock = Clock()
+        let directory = fixture.root.appending(path: "execution")
+        var runner = fixture.runner(clock: clock)
+        runner.simulatorPool?.executionPool = HostExecutionPool(directory: directory)
+        let first = try await runner.run(.test, request: fixture.request("first"))
+        try await HostExecutionPool(directory: directory).updateSimulatorIdleRetentionMinutes(to: 5)
+
+        clock.advance(by: 5 * 60)
+        let second = try await runner.run(.test, request: fixture.request("second"))
+
+        #expect(second.simulatorIdentifier != first.simulatorIdentifier)
+        let identifier = try #require(second.simulatorIdentifier)
+        #expect(try fixture.devices() == [identifier])
+    }
+
     @Test func newestReturnedDeviceIsReusedAndOldestIdleDeviceIsEvictedAcrossRegistries() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }

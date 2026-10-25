@@ -82,7 +82,11 @@ it stops the app from managing their count.
 
 The same limit caps the total managed Simulators across Xcode versions,
 runtimes, and device types. The host removes idle devices above the limit.
-It also deletes devices that have been idle for 20 minutes, even below the limit.
+It also deletes devices after their idle retention period, even below the limit.
+The default is 20 minutes. Change **Idle retention (minutes)** in Settings to
+save a positive whole number of minutes. The saved value applies to all runners
+using this host pool and takes effect without restarting the host. Existing idle
+devices keep their original return time when the setting changes.
 Matching devices are reused in order of most recent return. If space is needed,
 the oldest returned idle devices are removed first.
 Devices in use finish before they are removed, so lowering the limit can

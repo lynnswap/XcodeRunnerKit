@@ -21,6 +21,9 @@ struct HostSettingsTests {
         await settings.refreshPoolStatus()
         #expect(settings.hasLoadedPoolStatus)
         #expect(settings.poolStatus == nil)
+        #expect(settings.simulatorIdleRetentionMinutes == 20)
+        #expect(settings.simulatorIdleRetentionInput == "20")
+        #expect(settings.simulatorIdleRetentionError == nil)
         #expect(!FileManager.default.fileExists(atPath: settings.pool.directory.path()))
         settings.capacityInput = "6"
         await settings.applyCapacity()
@@ -30,6 +33,70 @@ struct HostSettingsTests {
         #expect(settings.poolStatus?.waitingJobCounts.total == 0)
         #expect(settings.pool.directory == settings.installation.poolDirectory)
         try FileManager.default.removeItem(at: root)
+    }
+
+    @Test func idleRetentionSavePersistsWithoutConfiguringCapacityOrSavingRepositorySelection() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let settings = model(at: root)
+        let record = settings.installation.hostRoot.appending(path: "github-host.json")
+        let repository = GitHubRepository(id: 1, fullName: "owner/Project")
+        try GitHubHostConfiguration(repositories: [repository]).save(to: record)
+        await settings.refreshPoolStatus()
+        settings.github.selectedRepositoryIDs = []
+        settings.simulatorIdleRetentionInput = "35"
+
+        await settings.applySimulatorIdleRetention()
+
+        #expect(settings.simulatorIdleRetentionMinutes == 35)
+        #expect(settings.simulatorIdleRetentionSaveError == nil)
+        #expect(settings.simulatorPoolError == nil)
+        #expect(!settings.isSavingSimulatorIdleRetention)
+        #expect(try await settings.pool.status() == nil)
+        #expect(try GitHubHostConfiguration.load(from: record).repositories == [repository])
+        let reopened = model(at: root)
+        await reopened.refreshPoolStatus()
+        #expect(reopened.simulatorIdleRetentionMinutes == 35)
+        #expect(reopened.simulatorIdleRetentionInput == "35")
+    }
+
+    @Test func idleRetentionRefreshPreservesEditsAndShowsExternalChanges() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let settings = model(at: root)
+        try await settings.pool.updateSimulatorIdleRetentionMinutes(to: 30)
+        settings.simulatorIdleRetentionInput = "5"
+        await settings.refreshPoolStatus()
+        #expect(settings.simulatorIdleRetentionMinutes == 30)
+        #expect(settings.simulatorIdleRetentionInput == "5")
+        try await settings.pool.updateSimulatorIdleRetentionMinutes(to: 10)
+        await settings.refreshPoolStatus()
+        #expect(settings.simulatorIdleRetentionMinutes == 10)
+        #expect(settings.simulatorIdleRetentionInput == "5")
+        await settings.applySimulatorIdleRetention()
+        #expect(settings.simulatorIdleRetentionMinutes == 5)
+        try await settings.pool.updateSimulatorIdleRetentionMinutes(to: 8)
+        await settings.refreshPoolStatus()
+        #expect(settings.simulatorIdleRetentionInput == "8")
+    }
+
+    @Test func invalidIdleRetentionInputDoesNotReplaceSavedDuration() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let settings = model(at: root)
+        try await settings.pool.updateSimulatorIdleRetentionMinutes(to: 15)
+        await settings.refreshPoolStatus()
+        for input in ["0", "-1", "1.5", ""] {
+            settings.simulatorIdleRetentionInput = input
+            await settings.applySimulatorIdleRetention()
+            #expect(settings.simulatorIdleRetentionSaveError != nil)
+            #expect(try settings.pool.simulatorIdleRetentionMinutes() == 15)
+            #expect(!settings.isSavingSimulatorIdleRetention)
+        }
+        settings.simulatorIdleRetentionInput = "10"
+        await settings.applySimulatorIdleRetention()
+        #expect(settings.simulatorIdleRetentionSaveError == nil)
+        #expect(settings.simulatorIdleRetentionMinutes == 10)
     }
 
     @Test func refreshPreservesEditsAndShowsExternalCapacityChanges() async throws {

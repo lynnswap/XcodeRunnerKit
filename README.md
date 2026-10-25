@@ -147,10 +147,11 @@ The runner leases a device exclusively for each operation. Devices are shared
 only when their runtime, device type, and selected Xcode match. Test operations
 wait for the Simulator to finish booting before launching xcodebuild. After a
 normal test exit, including a failed test run, cleanup prepares the device for
-its next operation and leaves it booted for up to 20 minutes while idle.
-The most recently returned matching device is reused first. Each successful
-return starts a new 20-minute retention period. Build operations reuse their destination
-without booting or changing runtime state. Cancellation or abnormal termination
+its next operation and leaves it booted during its idle retention period,
+which defaults to 20 minutes. The most recently returned matching device is
+reused first. Each successful return restarts the retention period. Build
+operations reuse their destination without booting or changing runtime state.
+Cancellation or abnormal termination
 retires the device by deleting it.
 Cleanup waits for job subprocesses retaining the lease to exit. Other jobs can
 lease different devices while those subprocesses finish.
@@ -163,6 +164,14 @@ Lowering the limit removes idle excess devices; devices still in use finish
 first and are removed as they return. Fresh devices also count toward this limit.
 A custom `runner.simulatorPool` shares the same budget when
 `runner.executionPool` is set.
+
+Change **Idle retention (minutes)** in the host settings to save a different
+positive whole number of minutes. The setting applies to all runners sharing
+the host execution pool, including CLI runs. In Swift, use
+`executionPool.updateSimulatorIdleRetentionMinutes(to:)` to save it and
+`executionPool.simulatorIdleRetentionMinutes()` to read it. Changes apply to
+existing idle devices on the next maintenance pass or pool operation; changing
+the setting does not restart their retention periods.
 
 The native host removes expired idle devices automatically. Standalone library
 and CLI runs remove expired devices when the pool is next used; callers can

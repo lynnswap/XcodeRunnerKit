@@ -8,14 +8,13 @@ import Foundation
 /// down. Builds reuse their destination without booting or changing runtime state.
 /// Cancelled, interrupted, or abandoned leases are retired before reuse.
 /// When attached to an execution pool, all configurations share its saved device limit.
-/// Matching devices are reused by most recent return and expire after 20 minutes idle.
+/// Matching devices are reused by most recent return and expire after the execution
+/// pool's saved idle retention period, or 20 minutes by default.
 /// Keep the directory and its lock files in place while clients are running.
 public struct SimulatorPool: Sendable {
     public let directory: URL
     var executionPool: HostExecutionPool?
     var now: @Sendable () -> Date = { Date() }
-
-    private static let idleRetention: TimeInterval = 20 * 60
 
     /// The registry XcodeRunner uses when no execution pool is configured.
     ///
@@ -298,7 +297,8 @@ public struct SimulatorPool: Sendable {
     /// Called under the registry coordinator. Recheck the date after taking the
     /// entry locks because an active owner can finish while entries are enumerated.
     private func removeExpiredSimulators(tool: SimulatorTool) async throws {
-        let cutoff = now().addingTimeInterval(-Self.idleRetention)
+        let minutes = try executionPool?.simulatorIdleRetentionMinutes() ?? HostExecutionPool.defaultSimulatorIdleRetentionMinutes
+        let cutoff = now().addingTimeInterval(-TimeInterval(minutes) * 60)
         for entry in try await entries() where entry.returnedAt <= cutoff {
             _ = try await deleteIdle(entry, tool: tool, returnedBefore: cutoff)
         }
