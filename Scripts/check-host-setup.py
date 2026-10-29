@@ -755,7 +755,8 @@ with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
     subprocess.run(command, env=env, check=True, capture_output=True)
     plist = plistlib.loads((home / "Library/LaunchAgents/dev.lynnswap.XcodeRunnerHost.plist").read_bytes())
     assert plist["AssociatedBundleIdentifiers"] == ["dev.lynnswap.XcodeRunnerHost"]
-    assert plist["ProgramArguments"] == [str(applications.resolve() / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host")]
+    assert plist["ProgramArguments"] == [str(applications.resolve() / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host"), "--settings-service"]
+    assert plist["MachServices"] == {"dev.lynnswap.XcodeRunnerHost.Settings": True}
     assert (applications / "XcodeRunnerHost.app/Contents/Resources/HostSetup/install-github-runner.sh").read_text() == "first setup script"
     (app / "Contents/MacOS/xcode-runner-host").write_text("updated executable")
     (setup / "install-github-runner.sh").write_text("updated setup script")
