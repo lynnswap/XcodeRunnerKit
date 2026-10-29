@@ -126,7 +126,7 @@ struct GitHubHostSettingsTests {
         ] : []))
         let client = await transport.client
         let pool = HostExecutionPool(directory: installation.poolDirectory)
-        try await pool.updateMaximumConcurrentJobs(to: 1)
+        try await pool.configure(maximumConcurrentJobs: 1)
         let model = GitHubHostSettings(
             installation: installation, pool: pool, client: client,
             authentication: GitHubAuthentication(client: client, store: store)
@@ -172,7 +172,7 @@ struct GitHubHostSettingsTests {
         ])
         let client = await transport.client
         let pool = HostExecutionPool(directory: installation.poolDirectory)
-        try await pool.updateMaximumConcurrentJobs(to: 1)
+        try await pool.configure(maximumConcurrentJobs: 1)
         let model = GitHubHostSettings(
             installation: installation, pool: pool, client: client,
             authentication: GitHubAuthentication(client: client, store: store)
@@ -400,7 +400,7 @@ struct GitHubHostSettingsTests {
             return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
         })
         let pool = HostExecutionPool(directory: installation.poolDirectory)
-        try await pool.updateMaximumConcurrentJobs(to: 24)
+        try await pool.configure(maximumConcurrentJobs: 24)
         let model = GitHubHostSettings(
             installation: installation, pool: pool, client: client,
             authentication: GitHubAuthentication(client: client, store: store)
@@ -468,7 +468,7 @@ struct GitHubHostSettingsTests {
         #expect(model.selectableRepositories == [repository])
         #expect(model.selectedRepositoryIDs == [repository.id])
         model.selectedRepositoryIDs = []
-        try model.saveSelection()
+        try model.saveSelection(model.selectedRepositoryIDs)
         #expect(try GitHubHostConfiguration.load(from: record).repositories.isEmpty)
     }
 
@@ -483,9 +483,9 @@ struct GitHubHostSettingsTests {
         model.github.storageIsReady = true
         await model.refreshPoolStatus()
         model.capacityInput = "24"
-        await model.applyCapacity()
+        await model.applyPoolConfiguration()
         #expect(model.saveError == nil)
-        #expect(model.poolStatus?.maximumConcurrentJobs == 24)
+        #expect(model.poolStatus?.configuration.maximumConcurrentJobs == 24)
         #expect(model.github.errorMessage?.contains("Sign in") == true)
         #expect(try GitHubHostConfiguration.load(from: record).repositories == [repository])
     }

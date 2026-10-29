@@ -165,13 +165,24 @@ first and are removed as they return. Fresh devices also count toward this limit
 A custom `runner.simulatorPool` shares the same budget when
 `runner.executionPool` is set.
 
-Change **Idle retention (minutes)** in the host settings to save a different
-positive whole number of minutes. The setting applies to all runners sharing
-the host execution pool, including CLI runs. In Swift, use
-`executionPool.updateSimulatorIdleRetentionMinutes(to:)` to save it and
-`executionPool.simulatorIdleRetentionMinutes()` to read it. Changes apply to
-existing idle devices on the next maintenance pass or pool operation; changing
-the setting does not restart their retention periods.
+Choose **Keep indefinitely** or **Remove after an idle period** in the host
+settings. To retain healthy idle devices without a time limit from the CLI, run:
+
+```sh
+xcode-runner pool configure --simulator-retention forever
+```
+
+For a timeout, use `--simulator-retention idleTimeout --idle-timeout-minutes 20`.
+In Swift, call `try await executionPool.configure(simulatorRetention: .forever)`
+or pass `.idleTimeout(minutes: 20)`. Read the saved values with
+`try executionPool.configuration()`. The setting applies to all runners sharing
+the execution pool, including CLI runs. Changes affect existing idle devices on
+the next maintenance pass or pool operation without resetting their return time.
+
+**Forever** removes idle expiry only. Capacity limits, fresh-device requests,
+cancellation, abnormal termination, and explicit cleanup can still delete a
+device. Abandoned devices left by terminated processes are reclaimed even with
+this policy.
 
 The native host removes expired idle devices automatically. Standalone library
 and CLI runs remove expired devices when the pool is next used; callers can
@@ -216,17 +227,19 @@ devices, or `xcrun simctl delete` with the reported UDID.
 
 ### Shared execution limit
 
-Point cooperating processes at the same local pool directory:
+Configure a local pool once, then point cooperating processes at it:
 
 ```sh
+xcode-runner pool configure --pool-directory /path/to/shared-pool \
+  --maximum-concurrent-jobs 4 --simulator-retention forever
+
 xcode-runner test --package /path/to/Package --scheme PackageName \
   --destination 'platform=macOS,arch=arm64' \
-  --pool-directory /path/to/shared-pool --maximum-concurrent-jobs 4
+  --pool-directory /path/to/shared-pool
 ```
 
-`--maximum-concurrent-jobs` sets the limit when the run creates the pool. Later
-runs can omit it because the pool keeps its saved limit. Change the saved limit
-with:
+Build and test commands use the saved configuration and fail if the pool is
+unconfigured. Change either setting without replacing the other:
 
 ```sh
 xcode-runner pool configure --pool-directory /path/to/shared-pool --maximum-concurrent-jobs 8
@@ -241,30 +254,38 @@ The same limit bounds the pool's managed Simulators, including idle devices.
 In Swift, attach a pool to the runner:
 
 ```swift
-var pool = HostExecutionPool(directory: URL(filePath: "/path/to/shared-pool"))
-pool.initialMaximumConcurrentJobs = 4
+let pool = HostExecutionPool(directory: URL(filePath: "/path/to/shared-pool"))
+try await pool.configure(maximumConcurrentJobs: 4, simulatorRetention: .forever)
 var runner = XcodeRunner()
 runner.executionPool = pool
 
 let status = try await pool.status()
-try await pool.updateMaximumConcurrentJobs(to: 8)
+try await pool.configure(maximumConcurrentJobs: 8)
 ```
 
-`initialMaximumConcurrentJobs` applies only when an operation finds the pool
-unconfigured; without it, that operation fails instead of creating the pool.
-`status()` returns `nil` for an unused pool without creating it.
+`configuration()` and `status()` return `nil` for an unconfigured pool without
+creating it. `status.configuration` contains `maximumConcurrentJobs` and
+`simulatorRetention`; the remaining status fields report active and waiting jobs.
 `--priority high|medium|low`, or `runner.run(..., priority: .high)` in Swift,
 sets the queue priority. Higher priorities start first; equal priorities start
 in arrival order. Running operations are not interrupted.
 
-For a native GitHub Actions host, use **Apply** in the app's settings. It updates
-the execution limit and registers enough GitHub runners to use it. The CLI's
-`pool configure` command changes only the local limit. GitHub assigns jobs to
-runners before they enter the local Xcode queue.
+For a native GitHub Actions host, use **Apply** in the app's execution settings.
+The app synchronizes runner registrations to the saved job limit.
+The CLI's `pool configure` command saves the local configuration without requiring
+the app or a GitHub connection. GitHub assigns jobs to runners before they enter
+the local Xcode queue. See the [host guide](Documentation/NativeHost.md#settings-from-cli-and-mcp)
+for the settings catalog and MCP updates.
 
-When upgrading from the old `capacity.lock` pool format, stop all clients,
-update them together, then recreate the pool. Keep pool files in place while
-jobs are running.
+When upgrading, stop all clients and update them together. The first explicit
+configuration update migrates the previous capacity and retention files into
+`configuration.json`, preserving unspecified values. Remove
+`--maximum-concurrent-jobs` from build and test commands; it is now a
+`pool configure` option only. Swift callers must replace
+`initialMaximumConcurrentJobs` and the individual update methods with
+`configure(maximumConcurrentJobs:simulatorRetention:)`. Keep pool files in place
+while jobs are running. Pools using the older `capacity.lock` format must still
+be recreated after stopping their clients.
 
 ### Shared compilation cache
 

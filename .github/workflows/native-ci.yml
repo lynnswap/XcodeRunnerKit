@@ -43,10 +43,12 @@ jobs:
         run: python3 Scripts/check-host-setup.py "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner"
       - name: Test macOS library and CLI
         run: |
+          "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner" pool configure \
+            --pool-directory "$RUNNER_TEMP/Pool" --maximum-concurrent-jobs 2
           exec "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner" test \
             --package "$GITHUB_WORKSPACE" --scheme XcodeRunnerKit-Package \
             --destination 'platform=macOS,arch=arm64' \
-            --pool-directory "$RUNNER_TEMP/Pool" --maximum-concurrent-jobs 2 \
+            --pool-directory "$RUNNER_TEMP/Pool" \
             --compilation-cache "$RUNNER_TEMP/CompilationCache" \
             --output-directory "$RUNNER_TEMP/XcodeRunnerKit-macos" \
             -- -parallel-testing-enabled NO -jobs 3
@@ -56,6 +58,8 @@ jobs:
         run: python3 Scripts/check-execution-pool.py
       - name: Check pool administration and Xcode CLI commands
         run: exec python3 Scripts/check-pool-cli.py "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner"
+      - name: Check MCP settings discovery and updates
+        run: python3 Scripts/check-settings-mcp.py "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner"
       - name: Check cancellation through shell wrappers
         run: python3 Scripts/check-cancellation.py "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -6,21 +6,56 @@ import Foundation
 /// Repository runners share one local directory. Its saved maximum limits new
 /// operations. Do not remove the directory or its lock files while jobs are running.
 public struct HostExecutionPool: Sendable {
-    /// The idle retention period used when no Simulator retention setting is saved.
-    public static let defaultSimulatorIdleRetentionMinutes = 20
-
     /// The shared directory, with symlinks resolved when the pool is created.
     public let directory: URL
-    /// The limit saved by the first slot acquisition in an unconfigured pool.
-    ///
-    /// A configured pool keeps its saved limit. Acquiring a slot rejects a
-    /// nonpositive value whether or not the pool is configured. When this is
-    /// nil, acquiring a slot in an unconfigured pool throws ConfigurationError.notConfigured.
-    public var initialMaximumConcurrentJobs: Int?
-
     /// Refers to a pool directory without reading or configuring it.
     public init(directory: URL) {
         self.directory = directory.resolvingSymlinksInPath()
+    }
+
+    /// How long a normally returned Simulator remains available for reuse.
+    public enum SimulatorRetention: Sendable, Equatable, Codable {
+        case forever
+        case idleTimeout(minutes: Int)
+
+        private enum CodingKeys: String, CodingKey { case mode, minutes }
+        private enum Mode: String, Codable { case forever, idleTimeout }
+
+        public init(from decoder: any Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            switch try values.decode(Mode.self, forKey: .mode) {
+            case .forever: self = .forever
+            case .idleTimeout: self = .idleTimeout(minutes: try values.decode(Int.self, forKey: .minutes))
+            }
+        }
+
+        public func encode(to encoder: any Encoder) throws {
+            var values = encoder.container(keyedBy: CodingKeys.self)
+            switch self {
+            case .forever: try values.encode(Mode.forever, forKey: .mode)
+            case .idleTimeout(let minutes):
+                try values.encode(Mode.idleTimeout, forKey: .mode)
+                try values.encode(minutes, forKey: .minutes)
+            }
+        }
+    }
+
+    /// Settings shared by every client of this execution pool.
+    public struct Configuration: Sendable, Equatable, Codable {
+        public var maximumConcurrentJobs: Int
+        public var simulatorRetention: SimulatorRetention
+
+        public init(maximumConcurrentJobs: Int, simulatorRetention: SimulatorRetention = .idleTimeout(minutes: 20)) {
+            self.maximumConcurrentJobs = maximumConcurrentJobs
+            self.simulatorRetention = simulatorRetention
+        }
+
+        fileprivate func validate() throws {
+            guard maximumConcurrentJobs > 0 else { throw ConfigurationError.invalidMaximumConcurrentJobs }
+            if case .idleTimeout(let minutes) = simulatorRetention, minutes <= 0 {
+                throw ConfigurationError.invalidSimulatorRetention
+            }
+        }
     }
 
     /// The admission order for waiting operations. Running operations are never preempted.
@@ -57,7 +92,7 @@ public struct HostExecutionPool: Sendable {
 
     /// The configured limit, slots observed in use, and waiting operation counts.
     public struct Status: Sendable, Equatable, Codable {
-        public let maximumConcurrentJobs: Int
+        public let configuration: Configuration
         public let activeJobCount: Int
         public let waitingJobCounts: WaitingJobCounts
     }
@@ -74,10 +109,10 @@ public struct HostExecutionPool: Sendable {
         }
         return try await Self.withHandle(coordinator) {
             try await Self.lock(coordinator)
-            guard let capacity = try savedCapacity() else { return nil }
+            guard let configuration = try configuration() else { return nil }
             let waiters = try inspectWaiters()
             return try Status(
-                maximumConcurrentJobs: capacity, activeJobCount: inspectSlots().activeJobCount,
+                configuration: configuration, activeJobCount: inspectSlots().activeJobCount,
                 waitingJobCounts: WaitingJobCounts(
                     high: waiters.count(where: { $0.priority == .high }),
                     medium: waiters.count(where: { $0.priority == .medium }),
@@ -87,71 +122,86 @@ public struct HostExecutionPool: Sendable {
         }
     }
 
-    /// Changes the limit for subsequent slot acquisitions, including waiting operations.
-    ///
-    /// Operations already holding slots continue. After a decrease, waiting
-    /// operations start only when the active count is below the new limit.
-    /// Excess idle Simulators are deleted. ConfigurationCleanupFailure reports
-    /// a saved limit whose subsequent cleanup did not finish.
-    public func updateMaximumConcurrentJobs(to capacity: Int) async throws {
-        try await updateMaximumConcurrentJobs(to: capacity, executableURL: URL(filePath: "/usr/bin/xcrun"))
-    }
-
-    func updateMaximumConcurrentJobs(to capacity: Int, executableURL: URL) async throws {
-        guard capacity > 0 else { throw ConfigurationError.invalidMaximumConcurrentJobs }
-        try Task.checkCancellation()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let coordinator = try Self.open(directory.appending(path: "pool.lock"))
+    /// Reads saved settings without creating the pool or migrating its files.
+    public func configuration() throws -> Configuration? {
+        let data: Data
         do {
-            try await Self.withHandle(coordinator) {
-                try await Self.lock(coordinator)
-                try saveCapacity(capacity)
-            }
-        } catch let failure as HostExecutionCleanupFailure where failure.operationError == nil {
-            throw ConfigurationCleanupFailure(savedMaximumConcurrentJobs: capacity, underlyingError: failure)
-        }
-        do { try await removeExcessSimulators(executableURL: executableURL) }
-        catch { throw ConfigurationCleanupFailure(savedMaximumConcurrentJobs: capacity, underlyingError: error) }
-    }
-
-    /// Reads the saved Simulator idle retention period in minutes without initializing the pool.
-    ///
-    /// An unset period uses `defaultSimulatorIdleRetentionMinutes`. Invalid saved
-    /// values throw `ConfigurationError.invalidStoredSimulatorIdleRetentionMinutes`.
-    public func simulatorIdleRetentionMinutes() throws -> Int {
-        let stored: Data
-        do {
-            stored = try Data(contentsOf: directory.appending(path: "simulator-idle-retention-minutes"))
+            data = try Data(contentsOf: directory.appending(path: "configuration.json"))
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
-            return Self.defaultSimulatorIdleRetentionMinutes
-        }
-        guard let value = String(data: stored, encoding: .utf8),
-              let minutes = Int(value), minutes > 0 else {
-            throw ConfigurationError.invalidStoredSimulatorIdleRetentionMinutes(directory: directory)
-        }
-        return minutes
-    }
-
-    /// Saves a positive whole number of minutes for idle Simulator retention.
-    ///
-    /// The next lease or maintenance operation applies this period to existing
-    /// idle devices. Saving the setting does not interrupt active leases or run cleanup.
-    public func updateSimulatorIdleRetentionMinutes(to minutes: Int) async throws {
-        guard minutes > 0 else { throw ConfigurationError.invalidSimulatorIdleRetentionMinutes }
-        try Task.checkCancellation()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let coordinator = try Self.open(directory.appending(path: "pool.lock"))
-        try await Self.withHandle(coordinator) {
-            try await Self.lock(coordinator)
-            try Data(String(minutes).utf8).write(
-                to: directory.appending(path: "simulator-idle-retention-minutes"), options: .atomic
+            guard let capacity = try legacyCapacity() else { return nil }
+            return Configuration(
+                maximumConcurrentJobs: capacity,
+                simulatorRetention: try legacySimulatorRetention() ?? .idleTimeout(minutes: 20)
             )
         }
+        let configuration = try JSONDecoder().decode(Configuration.self, from: data)
+        try configuration.validate()
+        return configuration
     }
 
-    /// Deletes managed Simulators past their saved idle retention period, then the oldest idle devices
-    /// above the saved limit across the default and associated custom registries.
-    /// Active devices finish normally.
+    /// Updates only the supplied settings and returns the saved configuration.
+    ///
+    /// A new pool requires an explicit maximum. Existing operations finish normally;
+    /// subsequent admissions and Simulator maintenance read the new settings.
+    /// Legacy settings are migrated on the first update. ConfigurationCleanupFailure
+    /// preserves the saved settings if removing legacy files or Simulators fails.
+    @discardableResult
+    public func configure(
+        maximumConcurrentJobs: Int? = nil, simulatorRetention: SimulatorRetention? = nil
+    ) async throws -> Configuration {
+        try await configure(
+            maximumConcurrentJobs: maximumConcurrentJobs, simulatorRetention: simulatorRetention,
+            executableURL: URL(filePath: "/usr/bin/xcrun")
+        )
+    }
+
+    @discardableResult
+    func configure(
+        maximumConcurrentJobs: Int? = nil, simulatorRetention: SimulatorRetention? = nil, executableURL: URL
+    ) async throws -> Configuration {
+        try Task.checkCancellation()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let coordinator = try Self.open(directory.appending(path: "pool.lock"))
+        let saved: Configuration
+        do {
+            try await Self.lock(coordinator)
+            let current = try configuration()
+            guard let capacity = maximumConcurrentJobs ?? current?.maximumConcurrentJobs else {
+                throw ConfigurationError.notConfigured(directory: directory)
+            }
+            saved = Configuration(
+                maximumConcurrentJobs: capacity,
+                simulatorRetention: try simulatorRetention ?? current?.simulatorRetention
+                    ?? legacySimulatorRetention() ?? .idleTimeout(minutes: 20)
+            )
+            try saved.validate()
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            try encoder.encode(saved).write(to: directory.appending(path: "configuration.json"), options: .atomic)
+        } catch {
+            return try Self.withHandle(coordinator) { throw error }
+        }
+        var cleanupErrors: [any Error] = []
+        for name in ["capacity", "simulator-idle-retention-minutes"] {
+            do { try FileManager.default.removeItem(at: directory.appending(path: name)) }
+            catch let error as CocoaError where error.code == .fileNoSuchFile { }
+            catch { cleanupErrors.append(error) }
+        }
+        do { try coordinator.close() } catch { cleanupErrors.append(error) }
+        do { try await removeExcessSimulators(executableURL: executableURL) }
+        catch { cleanupErrors.append(error) }
+        guard cleanupErrors.isEmpty else {
+            throw ConfigurationCleanupFailure(
+                savedConfiguration: saved,
+                underlyingError: HostExecutionCleanupFailure(operationError: nil, cleanupErrors: cleanupErrors)
+            )
+        }
+        return saved
+    }
+
+    /// Removes abandoned Simulators, expired idle devices, and idle devices above
+    /// the saved limit across the default and associated custom registries.
+    /// Active devices finish normally. Indefinite retention applies only to clean idle devices.
     public func removeExcessSimulators() async throws {
         try await removeExcessSimulators(executableURL: URL(filePath: "/usr/bin/xcrun"))
     }
@@ -162,13 +212,13 @@ public struct HostExecutionPool: Sendable {
         try await pool.removeExcessSimulators(executableURL: executableURL)
     }
 
-    /// The execution limit was saved, but subsequent cleanup failed.
+    /// The settings were saved, but subsequent cleanup failed.
     public struct ConfigurationCleanupFailure: Error, LocalizedError {
-        public let savedMaximumConcurrentJobs: Int
+        public let savedConfiguration: Configuration
         public let underlyingError: any Error
 
         public var errorDescription: String? {
-            "The execution limit was saved as \(savedMaximumConcurrentJobs), but cleanup failed: \(underlyingError.localizedDescription)"
+            "The pool configuration was saved, but cleanup failed: \(underlyingError.localizedDescription)"
         }
     }
 
@@ -228,11 +278,11 @@ public struct HostExecutionPool: Sendable {
                 let coordinator = try Self.open(directory.appending(path: "pool.lock"))
                 slot = try await Self.withHandle(coordinator) {
                     try await Self.lock(coordinator)
-                    guard let capacity = try savedCapacity() else {
-                        throw ConfigurationError.invalidStoredMaximumConcurrentJobs(directory: directory)
+                    guard let configuration = try configuration() else {
+                        throw ConfigurationError.notConfigured(directory: directory)
                     }
                     let slots = try inspectSlots()
-                    guard slots.activeJobCount < capacity else { return nil }
+                    guard slots.activeJobCount < configuration.maximumConcurrentJobs else { return nil }
                     let waiters = try inspectWaiters()
                     guard waiters.first?.url.lastPathComponent == waiter.url.lastPathComponent else { return nil }
                     let handle = try Self.open(directory.appending(path: "slot-\(slots.availableIndex).lock"))
@@ -273,15 +323,7 @@ public struct HostExecutionPool: Sendable {
         let coordinator = try Self.open(directory.appending(path: "pool.lock"))
         return try await Self.withHandle(coordinator) {
             try await Self.lock(coordinator)
-            // Reject an invalid value even when the saved limit makes it unused, so callers do not
-            // depend on whether another process created the pool first.
-            if let initialMaximumConcurrentJobs, initialMaximumConcurrentJobs <= 0 {
-                throw ConfigurationError.invalidMaximumConcurrentJobs
-            }
-            if try savedCapacity() == nil {
-                guard let initialMaximumConcurrentJobs else { throw ConfigurationError.notConfigured(directory: directory) }
-                try saveCapacity(initialMaximumConcurrentJobs)
-            }
+            guard try configuration() != nil else { throw ConfigurationError.notConfigured(directory: directory) }
             let previousSequence = try inspectWaiters().map(\.sequence).max() ?? -1
             let (sequence, overflow) = previousSequence.addingReportingOverflow(1)
             guard !overflow else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(EOVERFLOW)) }
@@ -334,7 +376,7 @@ public struct HostExecutionPool: Sendable {
         catch let error as CocoaError where error.code == .fileNoSuchFile { }
     }
 
-    func savedCapacity() throws -> Int? {
+    private func legacyCapacity() throws -> Int? {
         let stored: Data
         do {
             stored = try Data(contentsOf: directory.appending(path: "capacity"))
@@ -343,14 +385,22 @@ public struct HostExecutionPool: Sendable {
         }
         guard let value = String(data: stored, encoding: .utf8),
               let capacity = Int(value), capacity > 0 else {
-            throw ConfigurationError.invalidStoredMaximumConcurrentJobs(directory: directory)
+            throw ConfigurationError.invalidStoredConfiguration(directory: directory)
         }
         return capacity
     }
 
-    private func saveCapacity(_ capacity: Int) throws {
-        // The coordinator inode stays in place while the data is atomically replaced.
-        try Data(String(capacity).utf8).write(to: directory.appending(path: "capacity"), options: .atomic)
+    private func legacySimulatorRetention() throws -> SimulatorRetention? {
+        let stored: Data
+        do {
+            stored = try Data(contentsOf: directory.appending(path: "simulator-idle-retention-minutes"))
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            return nil
+        }
+        guard let value = String(data: stored, encoding: .utf8), let minutes = Int(value), minutes > 0 else {
+            throw ConfigurationError.invalidStoredConfiguration(directory: directory)
+        }
+        return .idleTimeout(minutes: minutes)
     }
 
     private func inspectSlots() throws -> (activeJobCount: Int, availableIndex: Int) {
@@ -380,24 +430,21 @@ public struct HostExecutionPool: Sendable {
 
     public enum ConfigurationError: Error, LocalizedError {
         case invalidMaximumConcurrentJobs
-        case invalidSimulatorIdleRetentionMinutes
+        case invalidSimulatorRetention
         case notConfigured(directory: URL)
-        case invalidStoredMaximumConcurrentJobs(directory: URL)
-        case invalidStoredSimulatorIdleRetentionMinutes(directory: URL)
+        case invalidStoredConfiguration(directory: URL)
         case invalidStoredWaiter(URL)
 
         public var errorDescription: String? {
             switch self {
             case .invalidMaximumConcurrentJobs:
                 return "The maximum concurrent job count must be positive."
-            case .invalidSimulatorIdleRetentionMinutes:
+            case .invalidSimulatorRetention:
                 return "The Simulator idle retention period must be a positive whole number of minutes."
             case .notConfigured(let directory):
-                return "The pool at \(directory.path(percentEncoded: false)) has no maximum concurrent job count. Configure the pool or provide an initial maximum."
-            case .invalidStoredMaximumConcurrentJobs(let directory):
-                return "The pool at \(directory.path(percentEncoded: false)) has an invalid saved maximum concurrent job count. Expected a positive integer."
-            case .invalidStoredSimulatorIdleRetentionMinutes(let directory):
-                return "The pool at \(directory.path(percentEncoded: false)) has an invalid saved Simulator idle retention period. Expected a positive whole number of minutes."
+                return "The pool at \(directory.path(percentEncoded: false)) has no maximum concurrent job count. Configure the pool before starting jobs."
+            case .invalidStoredConfiguration(let directory):
+                return "The pool at \(directory.path(percentEncoded: false)) has invalid saved settings."
             case .invalidStoredWaiter(let url):
                 return "The waiting record at \(url.path(percentEncoded: false)) has an invalid sequence or priority."
             }

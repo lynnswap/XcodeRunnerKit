@@ -8,8 +8,9 @@ import Foundation
 /// down. Builds reuse their destination without booting or changing runtime state.
 /// Cancelled, interrupted, or abandoned leases are retired before reuse.
 /// When attached to an execution pool, all configurations share its saved device limit.
-/// Matching devices are reused by most recent return and expire after the execution
-/// pool's saved idle retention period, or 20 minutes by default.
+/// Matching devices are reused by most recent return. Clean idle devices follow
+/// the execution pool's retention policy, or expire after 20 minutes by default.
+/// Abandoned devices are removed regardless of the retention policy.
 /// Keep the directory and its lock files in place while clients are running.
 public struct SimulatorPool: Sendable {
     public let directory: URL
@@ -59,8 +60,11 @@ public struct SimulatorPool: Sendable {
     private func removeExcessSimulators(tool: SimulatorTool) async throws {
         guard try hasRegistries() else { return }
         try await withRegistryLock {
-            try await removeExpiredSimulators(tool: tool)
-            if let capacity = try executionPool?.savedCapacity() {
+            let configuration = try executionPool?.configuration()
+            try await removeAbandonedOrExpiredSimulators(
+                retention: configuration?.simulatorRetention ?? .idleTimeout(minutes: 20), tool: tool
+            )
+            if let capacity = configuration?.maximumConcurrentJobs {
                 _ = try await removeIdleSimulators(above: capacity, tool: tool)
             }
         }
@@ -124,9 +128,16 @@ public struct SimulatorPool: Sendable {
         } catch {
             cleanupErrors.append(Self.cleanupFailure(lease, execution: execution, error: error))
         }
-        do { try lease.handle.close() } catch { cleanupErrors.append(error) }
+        // Failed cleanup keeps ownership so this maintenance pass cannot retry its own retirement.
+        let releaseBeforeMaintenance = cleanupErrors.isEmpty
+        if releaseBeforeMaintenance {
+            do { try lease.handle.close() } catch { cleanupErrors.append(error) }
+        }
         do { try await Task.detached { try await removeExcessSimulators(tool: tool) }.value }
         catch { cleanupErrors.append(error) }
+        if !releaseBeforeMaintenance {
+            do { try lease.handle.close() } catch { cleanupErrors.append(error) }
+        }
         return execution.outcome.cancelledIfNeeded().addingCleanupErrors(cleanupErrors)
     }
 
@@ -208,8 +219,11 @@ public struct SimulatorPool: Sendable {
             try Task.checkCancellation()
             let lease: Lease? = try await withRegistryLock {
                 try registerRegistry()
-                try await removeExpiredSimulators(tool: tool)
-                let capacity = try executionPool?.savedCapacity()
+                let configuration = try executionPool?.configuration()
+                try await removeAbandonedOrExpiredSimulators(
+                    retention: configuration?.simulatorRetention ?? .idleTimeout(minutes: 20), tool: tool
+                )
+                let capacity = configuration?.maximumConcurrentJobs
                 try FileManager.default.createDirectory(at: keyDirectory, withIntermediateDirectories: true)
                 let existing: Lease? = try await Self.withKeyLock(keyDirectory) {
                     try JSONEncoder().encode(key).write(to: keyDirectory.appending(path: "configuration.json"), options: .atomic)
@@ -294,13 +308,20 @@ public struct SimulatorPool: Sendable {
         }
     }
 
-    /// Called under the registry coordinator. Recheck the date after taking the
-    /// entry locks because an active owner can finish while entries are enumerated.
-    private func removeExpiredSimulators(tool: SimulatorTool) async throws {
-        let minutes = try executionPool?.simulatorIdleRetentionMinutes() ?? HostExecutionPool.defaultSimulatorIdleRetentionMinutes
-        let cutoff = now().addingTimeInterval(-TimeInterval(minutes) * 60)
-        for entry in try await entries() where entry.returnedAt <= cutoff {
-            _ = try await deleteIdle(entry, tool: tool, returnedBefore: cutoff)
+    /// Called under the registry coordinator. Both entry locks and a record reread
+    /// distinguish an abandoned operation from one whose children still own its device.
+    private func removeAbandonedOrExpiredSimulators(
+        retention: HostExecutionPool.SimulatorRetention, tool: SimulatorTool
+    ) async throws {
+        let cutoff: Date?
+        switch retention {
+        case .forever: cutoff = nil
+        case .idleTimeout(let minutes): cutoff = now().addingTimeInterval(-TimeInterval(minutes) * 60)
+        }
+        for entry in try await entries() {
+            _ = try await deleteIdle(entry, tool: tool) { record, returnedAt in
+                !record.isReady || cutoff.map { returnedAt <= $0 } == true
+            }
         }
     }
 
@@ -314,14 +335,17 @@ public struct SimulatorPool: Sendable {
         return count
     }
 
-    private func deleteIdle(_ entry: Entry, tool: SimulatorTool, returnedBefore cutoff: Date? = nil) async throws -> Bool {
+    private func deleteIdle(
+        _ entry: Entry, tool: SimulatorTool,
+        shouldRemove: @Sendable (Record, Date) -> Bool = { _, _ in true }
+    ) async throws -> Bool {
         try Task.checkCancellation()
         return try await Self.withKeyLock(entry.recordURL.deletingLastPathComponent()) {
             guard let handles = try await Self.tryAcquireHandles(for: entry.recordURL) else { return false }
             return try await Self.withHandles(handles) {
                 guard let record = try Self.readRecordIfPresent(entry.recordURL) else { return true }
                 let returnedAt = try Self.returnDate(of: record, at: entry.recordURL)
-                guard returnedAt <= (cutoff ?? entry.returnedAt) else { return false }
+                guard returnedAt <= entry.returnedAt, shouldRemove(record, returnedAt) else { return false }
                 do {
                     var deletionTool = tool
                     deletionTool.developerDirectory = try await SimulatorTool.selectedDeveloperDirectory(tool.developerDirectory)

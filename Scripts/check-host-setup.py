@@ -145,8 +145,10 @@ with tempfile.TemporaryDirectory(prefix="Hosted CLI unavailable storage ") as te
                                 env=environment, check=True, capture_output=True, text=True)
         return json.loads(result.stdout)
 
-    pool_arguments = ["--pool-directory", str(pool), "--maximum-concurrent-jobs", "1"]
-    blocker = subprocess.Popen([str(probe), str(admission), "blocker", "1"],
+    subprocess.run([str(executable), "pool", "configure", "--pool-directory", str(pool),
+                    "--maximum-concurrent-jobs", "1"], env=environment, check=True, capture_output=True)
+    pool_arguments = ["--pool-directory", str(pool)]
+    blocker = subprocess.Popen([str(probe), str(admission), "blocker"],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     queued = None
     try:
@@ -291,6 +293,10 @@ int main(int argc, char **argv) {
                           "XCBBUILDSERVICE_PATH": str(root / "missing inherited XCB service")}
     build = [str(executable), "build", "--package", str(package), "--scheme", "BuildProbe",
              "--destination", "platform=macOS,arch=arm64", "--", "-jobs", "2"]
+    missing_configuration = subprocess.run(build, env=hosted_environment, capture_output=True, text=True, timeout=HANG_LIMIT)
+    assert missing_configuration.returncode != 0, "A hosted operation initialized an unconfigured pool"
+    subprocess.run([str(executable), "pool", "configure", "--pool-directory", str(host / "Pool"),
+                    "--maximum-concurrent-jobs", "4"], env=environment, check=True, capture_output=True)
     shutil.rmtree(storage / "Build")
     result = subprocess.run(build, env=hosted_environment, check=True, capture_output=True, text=True, timeout=300)
     log = Path(next(line[5:] for line in result.stdout.splitlines() if line.startswith("Log: ")))
@@ -300,22 +306,24 @@ int main(int argc, char **argv) {
     assert saved_service_launches and not service_markers[1].exists()
     pool_status = subprocess.run([str(executable), "pool", "status", "--pool-directory", str(host / "Pool"), "--json"],
                                  env=environment, check=True, capture_output=True, text=True)
-    assert json.loads(pool_status.stdout)["maximumConcurrentJobs"] == 4
+    assert json.loads(pool_status.stdout)["configuration"]["maximumConcurrentJobs"] == 4
     assert not (root / "different-home").exists()
     override = root / "Overrides"
     override_build = override / "Build"
     override_cache = override / "Cache"
     override_pool = override / "Pool"
+    subprocess.run([str(executable), "pool", "configure", "--pool-directory", str(override_pool),
+                    "--maximum-concurrent-jobs", "1"], env=environment, check=True, capture_output=True)
     result = subprocess.run(build[:-3] + ["--output-directory", str(override_build),
                             "--compilation-cache", str(override_cache),
-                            "--pool-directory", str(override_pool), "--maximum-concurrent-jobs", "1",
+                            "--pool-directory", str(override_pool),
                             "--build-service-path", str(service_wrappers[1]),
                             *build[-3:]], env=hosted_environment, check=True, capture_output=True, text=True, timeout=300)
     log = Path(next(line[5:] for line in result.stdout.splitlines() if line.startswith("Log: ")))
     assert override_build.resolve() in log.resolve().parents
     assert compilation_cache_in(log) == override_cache.resolve()
     assert json.loads(subprocess.run([str(executable), "pool", "status", "--pool-directory", str(override_pool), "--json"],
-                                    env=environment, check=True, capture_output=True, text=True).stdout)["maximumConcurrentJobs"] == 1
+                                    env=environment, check=True, capture_output=True, text=True).stdout)["configuration"]["maximumConcurrentJobs"] == 1
     assert service_markers[1].read_text()
     assert service_markers[0].read_text() == saved_service_launches
     assert json.loads(subprocess.run(service_command + ["status", "--json"], env=environment,

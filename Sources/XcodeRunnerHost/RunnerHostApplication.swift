@@ -14,6 +14,7 @@ struct HostOptions: ParsableCommand {
     )
 
     @Option(help: .hidden) var homeDirectory: String?
+    @Flag(help: .hidden) var settingsService = false
 
     @Option(help: .hidden) var serviceDirectory: String?
     @Option(help: .hidden) var parentProcessID: Int32?
@@ -42,7 +43,7 @@ private enum RunnerHostApplication {
                 withExtendedLifetime(service) { dispatchMain() }
             }
             let installation = options.installation
-            let host = try RunnerHost(installation: installation)
+            let host = try RunnerHost(installation: installation, settingsService: options.settingsService)
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
             application.delegate = host
@@ -132,6 +133,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     }
     private var runners: [URL: HostedRunner] = [:]
     private let settings: HostSettingsModel
+    private var settingsServer: HostSettingsServer?
     private var statusItem: NSStatusItem?
     private var poolMenuItem: NSMenuItem?
     private var settingsWindow: NSWindow?
@@ -144,7 +146,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private var stopped = false
     private var terminationReplyPending = false
 
-    init(installation: HostInstallation) throws {
+    init(installation: HostInstallation, settingsService: Bool) throws {
         let root = installation.runnersRoot
         let logs = installation.logsDirectory
         self.root = root.resolvingSymlinksInPath()
@@ -170,12 +172,14 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             ])
         }
         super.init()
+        if settingsService { settingsServer = HostSettingsServer(github: settings.github) }
     }
 
     deinit { close(lockDescriptor) }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installStatusItem()
+        settingsServer?.start()
         settings.hostState = .preparingStorage
         for number in [SIGTERM, SIGINT] {
             signal(number, SIG_IGN)
@@ -269,7 +273,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
 
     private func updatePoolMenuItem() {
         if let status = settings.poolStatus {
-            poolMenuItem?.title = "\(status.activeJobCount) running · Limit \(status.maximumConcurrentJobs)"
+            poolMenuItem?.title = "\(status.activeJobCount) running · Limit \(status.configuration.maximumConcurrentJobs)"
         } else {
             poolMenuItem?.title = settings.poolError == nil ? "Execution pool not configured" : "Execution pool unavailable"
         }
@@ -305,6 +309,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         guard !stopping else { return }
         stopping = true
         settings.hostState = .stopping
+        settingsServer?.stop()
         monitoring?.cancel()
         poolMonitoring?.cancel()
         githubMonitoring?.cancel()

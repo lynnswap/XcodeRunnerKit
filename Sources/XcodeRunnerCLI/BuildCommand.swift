@@ -66,8 +66,6 @@ struct BuildOptions: ParsableArguments {
     var freshSimulator = false
     @Option(help: "Local directory shared by every repository runner on this Mac.")
     var poolDirectory: String?
-    @Option(help: "Maximum concurrent jobs saved when this run creates the pool at --pool-directory. Existing pools keep their saved limit.")
-    var maximumConcurrentJobs: Int?
     @Option(
         help: "Local admission priority with --pool-directory: high, medium, or low (default: medium). Running jobs continue; GitHub dispatch is unaffected.",
         completion: .list(HostExecutionPool.Priority.allCases.map(\.rawValue)),
@@ -120,15 +118,9 @@ struct BuildOptions: ParsableArguments {
         var runner = XcodeRunner(developerDirectory: developerDirectory.map(Self.url))
         runner.buildServiceExecutableURL = buildServicePath.map(Self.url) ?? host?.buildServiceExecutableURL
         if let poolDirectory {
-            var pool = HostExecutionPool(directory: Self.url(poolDirectory))
-            pool.initialMaximumConcurrentJobs = maximumConcurrentJobs
-            runner.executionPool = pool
-        } else if maximumConcurrentJobs != nil {
-            throw ValidationError("Specify --pool-directory with --maximum-concurrent-jobs.")
+            runner.executionPool = HostExecutionPool(directory: Self.url(poolDirectory))
         } else if let host {
-            var pool = HostExecutionPool(directory: host.poolDirectory)
-            pool.initialMaximumConcurrentJobs = HostInstallation.defaultMaximumConcurrentJobs
-            runner.executionPool = pool
+            runner.executionPool = HostExecutionPool(directory: host.poolDirectory)
         }
         let configuredRunner = runner
         let executionPriority = priority

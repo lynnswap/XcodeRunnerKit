@@ -5,7 +5,7 @@ import XcodeRunnerKit
 
 struct Host: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Manage the installed runner host.", subcommands: [Storage.self, BuildService.self]
+        abstract: "Manage the installed runner host.", subcommands: [Storage.self, BuildService.self, Settings.self]
     )
 
     struct BuildService: AsyncParsableCommand {
@@ -31,7 +31,7 @@ struct Host: AsyncParsableCommand {
 
             mutating func run() async throws {
                 let installation = HostInstallation()
-                let executable = try installation.saveBuildServiceExecutableURL(path.map {
+                let executable = try HostSettingsService(installation: installation).saveBuildServiceExecutableURL(path.map {
                     URL(filePath: $0, relativeTo: .currentDirectory())
                 })
                 try reportBuildService(installation, executable: executable, json: json)
@@ -68,6 +68,39 @@ struct Host: AsyncParsableCommand {
             }
         }
     }
+
+    struct Settings: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Inspect or update host settings as JSON.", subcommands: [Get.self, Update.self])
+
+        struct Get: AsyncParsableCommand {
+            @Option(help: "Return only this scope: pool, buildService, storage, or githubRepositories.")
+            var scope: String?
+
+            mutating func run() async throws {
+                let selected = try scope.map { value in
+                    guard let scope = HostSettingsScope(rawValue: value) else { throw ValidationError("Unknown settings scope: \(value)") }
+                    return scope
+                }
+                try writeSettingsJSON(await HostSettingsService().getSettings(scope: selected))
+            }
+        }
+
+        struct Update: AsyncParsableCommand {
+            @Argument(help: "A JSON settings patch with a typed scope; unspecified fields are preserved.")
+            var patch: String
+
+            mutating func run() async throws {
+                let update = try JSONDecoder().decode(HostSettingsUpdate.self, from: Data(patch.utf8))
+                try writeSettingsJSON(await HostSettingsService().update(update))
+            }
+        }
+    }
+}
+
+private func writeSettingsJSON(_ result: some Encodable) throws {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try FileHandle.standardOutput.write(contentsOf: encoder.encode(result) + Data("\n".utf8))
 }
 
 private struct HostBuildServiceStatus: Encodable {

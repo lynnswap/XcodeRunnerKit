@@ -9,7 +9,7 @@ struct XcodeRunnerKitTests {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let pool = Self.pool(at: root, initialMaximumConcurrentJobs: 1)
+        let pool = try await Self.pool(at: root, maximumConcurrentJobs: 1)
         let executable = try script("touch \"$STARTED_PATH\"; while [ ! -e \"$RELEASE_PATH\" ]; do sleep 0.02; done", at: root)
         var configuredRunner = XcodeRunner(executableURL: executable)
         configuredRunner.executionPool = pool
@@ -159,7 +159,7 @@ struct XcodeRunnerKitTests {
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root)
         request.environment["READY_PATH"] = marker.path(percentEncoded: false)
         var runner = XcodeRunner(executableURL: executable)
-        runner.executionPool = Self.pool(at: root, initialMaximumConcurrentJobs: 1)
+        runner.executionPool = try await Self.pool(at: root, maximumConcurrentJobs: 1)
         let configuredRunner = runner
         let task = Task { try await configuredRunner.run(.test, request: request) }
         defer { task.cancel() }
@@ -188,7 +188,7 @@ struct XcodeRunnerKitTests {
         let blocked = root.appending(path: "pool")
         try Data().write(to: blocked)
         let marker = root.appending(path: "unexpected-payload")
-        let pool = Self.pool(at: root, initialMaximumConcurrentJobs: 2)
+        let pool = HostExecutionPool(directory: blocked)
         do {
             try await pool.withSlot { try Data().write(to: marker) }
             Issue.record("A pool I/O failure bypassed the limit.")
@@ -225,7 +225,7 @@ struct XcodeRunnerKitTests {
         let executable = try script("[ -e \(booted.path) ] || exit 9; printf '%s\\n' \"$@\"; exit \(exitCode)", at: root)
         var runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
         runner.simulatorPool = SimulatorPool(directory: root.appending(path: "Simulators"))
-        runner.executionPool = Self.pool(at: root, initialMaximumConcurrentJobs: 1)
+        runner.executionPool = try await Self.pool(at: root, maximumConcurrentJobs: 1)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
         request.destination = .managedSimulator(Self.freshSimulator)
         request.arguments = ["-parallel-testing-enabled", "NO"]
@@ -388,7 +388,7 @@ struct XcodeRunnerKitTests {
         let executable = try script("printf 'completed payload\\n'; exit \(exitCode)", at: root)
         var runner = XcodeRunner(executableURL: executable, simulatorExecutableURL: simulator)
         runner.simulatorPool = SimulatorPool(directory: root.appending(path: "Simulators"))
-        runner.executionPool = Self.pool(at: root, initialMaximumConcurrentJobs: 1)
+        runner.executionPool = try await Self.pool(at: root, maximumConcurrentJobs: 1)
         var request = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "output"))
         request.destination = .managedSimulator(Self.freshSimulator)
         let configuredRunner = runner
@@ -421,9 +421,9 @@ struct XcodeRunnerKitTests {
         return configuration
     }
 
-    private static func pool(at root: URL, initialMaximumConcurrentJobs: Int) -> HostExecutionPool {
-        var pool = HostExecutionPool(directory: root.appending(path: "pool"))
-        pool.initialMaximumConcurrentJobs = initialMaximumConcurrentJobs
+    private static func pool(at root: URL, maximumConcurrentJobs: Int) async throws -> HostExecutionPool {
+        let pool = HostExecutionPool(directory: root.appending(path: "pool"))
+        try await pool.configure(maximumConcurrentJobs: maximumConcurrentJobs)
         return pool
     }
 

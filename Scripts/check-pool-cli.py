@@ -17,9 +17,10 @@ ACTIONS = ("build", "build-for-testing", "test", "test-without-building")
 HANG_LIMIT = 120
 
 
-def expected_status(capacity, active, high=0, medium=0, low=0):
-    return {"maximumConcurrentJobs": capacity, "activeJobCount": active,
-            "waitingJobCounts": {"high": high, "medium": medium, "low": low}}
+def expected_status(capacity, active, high=0, medium=0, low=0, retention=None):
+    return {"configuration": {"maximumConcurrentJobs": capacity,
+                              "simulatorRetention": retention or {"mode": "idleTimeout", "minutes": 20}},
+            "activeJobCount": active, "waitingJobCounts": {"high": high, "medium": medium, "low": low}}
 
 
 def wait_for(predicate, timeout=HANG_LIMIT):
@@ -87,7 +88,7 @@ def main():
         def start(name):
             output = open(root / (name + ".log"), "wb")
             logs.append(output)
-            jobs[name] = subprocess.Popen([str(probe), str(root), name, "6"],
+            jobs[name] = subprocess.Popen([str(probe), str(root), name],
                                           stdout=output, stderr=subprocess.STDOUT)
             wait_for(lambda: (root / (name + ".ready")).exists() or jobs[name].poll() is not None)
             assert jobs[name].poll() is None, (root / (name + ".log")).read_text()
@@ -153,7 +154,7 @@ exec "$(xcrun --find clang)" "$@"
                     executable, "build", "--package", str(package), "--scheme", "BuildProbe",
                     "--destination", "platform=macOS,arch=arm64",
                     "--output-directory", str(root / (priority + "-output")),
-                    "--pool-directory", str(pool), "--maximum-concurrent-jobs", "2",
+                    "--pool-directory", str(pool),
                     "--setting", f"CC={compiler}",
                     "--environment", f"CLI_PRIORITY_GATE={root / priority}",
                     *priority_arguments, "--", "-jobs", "2",
@@ -196,22 +197,23 @@ exec "$(xcrun --find clang)" "$@"
         assert "not configured" in command("pool", "status", env=host_environment).stdout
         configured = command("pool", "configure", "--maximum-concurrent-jobs", "4", "--json", env=host_environment)
         assert json.loads(configured.stdout) == expected_status(4, 0)
-        assert (host_home / "Library/Application Support/XcodeRunnerKit/Pool/capacity").read_text() == "4"
+        host_pool = host_home / "Library/Application Support/XcodeRunnerKit/Pool"
+        assert json.loads((host_pool / "configuration.json").read_text()) == expected_status(4, 0)["configuration"]
         assert json.loads(command("pool", "status", "--json", env=host_environment).stdout) == expected_status(4, 0)
+        retained = command("pool", "configure", "--simulator-retention", "forever", "--json", env=host_environment)
+        assert json.loads(retained.stdout) == expected_status(4, 0, retention={"mode": "forever"})
+        resized = command("pool", "configure", "--maximum-concurrent-jobs", "2", "--json", env=host_environment)
+        assert json.loads(resized.stdout) == expected_status(2, 0, retention={"mode": "forever"})
         result = command("build", "--package", root / "Missing", "--scheme", "Fixture",
                          "--pool-directory", root / "Unconfigured pool", success=False)
         assert "has no maximum concurrent job count" in result.stderr, result.stderr
-        # An invalid initial limit fails the same way whether or not the pool already has a saved limit.
-        for directory in (root / "Unconfigured pool", pool):
-            result = command("build", "--package", root / "Missing", "--scheme", "Fixture",
-                             "--pool-directory", directory, "--maximum-concurrent-jobs", "0", success=False)
-            assert "must be positive" in result.stderr, result.stderr
-        assert not (root / "Unconfigured pool/capacity").exists()
+        assert not (root / "Unconfigured pool/configuration.json").exists(), "A build initialized pool settings"
         for action in ACTIONS:
             command(action, "--help")
         # All actions share BuildOptions and run for real below, so one action checks the shared help and rejections.
         help_text = command("build", "--help").stdout
         assert all(option in help_text for option in ("--scheme", "--compilation-cache", "--priority"))
+        assert "--maximum-concurrent-jobs" not in help_text
         assert "GitHub dispatch is unaffected" in " ".join(help_text.split())
         # Priorities are case-sensitive, and an explicit empty value does not fall back to medium.
         for invalid in ("HIGH", ""):
@@ -234,9 +236,7 @@ exec "$(xcrun --find clang)" "$@"
         for action, priority in (("build-for-testing", "high"), ("test-without-building", "low"),
                                  ("build", "medium"), ("test", None)):
             priority_arguments = ["--priority", priority] if priority else []
-            # An existing pool keeps its saved limit, so the test action omits it.
-            pool_arguments = {"build": [], "test": ["--pool-directory", pool]}.get(
-                action, ["--pool-directory", pool, "--maximum-concurrent-jobs", "2"])
+            pool_arguments = [] if action == "build" else ["--pool-directory", pool]
             result = command(action, "--package", package, "--scheme", "BuildProbe",
                              "--destination", "platform=macOS,arch=arm64",
                              "--derived-data", root / "FixtureDerivedData",
@@ -269,14 +269,16 @@ esac''',
         }.items():
             (fake_tools / name).write_text("#!/bin/sh\n" + body + "\n")
             (fake_tools / name).chmod(0o755)
+        cleanup_pool = root / "CleanupFailurePool"
+        command("pool", "configure", "--pool-directory", cleanup_pool, "--maximum-concurrent-jobs", "1")
         result = command("test", "--package", package, "--scheme", "BuildProbe",
                          "--simulator-runtime", "runtime", "--simulator-device-type", "device",
                          "--fresh-simulator", "--developer-directory", fake_tools.parents[1],
-                         "--pool-directory", root / "CleanupFailurePool", "--maximum-concurrent-jobs", "1",
+                         "--pool-directory", cleanup_pool,
                          "--output-directory", root / "CleanupFailureOutput", success=False)
         assert result.returncode == 65, (result.returncode, result.stdout, result.stderr)
         assert "Log: " in result.stderr and "fake-deletion-failed" in result.stderr, result.stderr
-        print("PASS: CLI status/configure, live shrink, priority admission and counts, invalid input, existing Xcode actions, host pool defaults, cleanup failure exit status")
+        print("PASS: CLI status/configure and partial retention updates, live shrink, priority admission and counts, invalid input, existing Xcode actions, explicit pool setup, cleanup failure exit status")
 
 
 if __name__ == "__main__":
