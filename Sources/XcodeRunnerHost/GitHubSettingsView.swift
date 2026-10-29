@@ -21,7 +21,7 @@ struct GitHubSettingsView: View {
                     Button("Disconnect") { Task { await model.signOut() } }
                         .disabled(!model.canDisconnect)
                 }
-                Text("Choose the repositories this Mac should accept jobs from. Apply the execution limit below to register their runners.")
+                Text("Choose the repositories this Mac should accept jobs from, then apply the selection to register their runners.")
                     .font(.callout).foregroundStyle(.secondary)
                 ForEach(model.selectableRepositories) { repository in
                     Toggle(repository.fullName, isOn: Binding(
@@ -33,6 +33,15 @@ struct GitHubSettingsView: View {
                     ))
                     .disabled(model.isBusy)
                 }
+                if model.selectedRepositoryIDs != model.savedRepositoryIDs {
+                    Text("Repository selection has unapplied changes.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                Button(model.isSavingSelection ? "Saving…" : "Apply Repository Selection") {
+                    Task { await model.applyRepositorySelection() }
+                }
+                .disabled(model.isBusy || model.isLoadingRepositories)
+                .accessibilityIdentifier("apply-repository-selection")
                 if model.isLoadingRepositories {
                     ProgressView("Loading repositories…")
                 } else if model.repositories.isEmpty {

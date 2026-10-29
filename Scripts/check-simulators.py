@@ -49,6 +49,11 @@ def main():
         logs = []
 
         pool = root / "pool"
+        subprocess.run([
+            str(args.executable.resolve()), "pool", "configure",
+            "--pool-directory", str(pool), "--maximum-concurrent-jobs", "2",
+            "--simulator-retention", "forever",
+        ], check=True, capture_output=True)
 
         def clean_pool():
             subprocess.run([
@@ -68,7 +73,7 @@ def main():
             jobs[name] = subprocess.Popen([
                 str(args.executable.resolve()), "test", "--package", str(package),
                 "--scheme", "BuildProbe", "--output-directory", str(output),
-                "--pool-directory", str(pool), "--maximum-concurrent-jobs", "2",
+                "--pool-directory", str(pool),
                 "--simulator-runtime", runtime["identifier"], "--simulator-device-type", device["identifier"],
                 *(["--fresh-simulator"] if fresh else []),
                 "--environment", "TEST_RUNNER_PROBE_MODE=" + mode,

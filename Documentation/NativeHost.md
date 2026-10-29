@@ -23,8 +23,10 @@ Replace `/path/to/JobData` with the folder for checkouts, build output, and the
 compiler cache. Omit that argument to use
 `~/Library/Application Support/XcodeRunnerKit/Storage`.
 
-For an update, wait for running CI jobs to finish before installing. The
-installer stops the current host and its runner services.
+For an update, wait for running and queued CI jobs to finish before replacing
+the CLI and app together. `install-host-tools.sh` replaces the CLI;
+`install-runner-host.sh` stops the current host and its runner services before
+replacing the app.
 
 Build and install the app with a certificate from
 `security find-identity -v -p codesigning`:
@@ -57,8 +59,9 @@ Click the hammer icon in the menu bar and open **Settings…**.
    filled in automatically.
 2. The installation page opens. Select the repositories this Mac will run.
 3. Return to settings, choose **Sign In…**, and approve access in the browser.
-4. Select the repositories to manage, enter **Maximum concurrent Xcode jobs**,
-   and choose **Apply**.
+4. Enter **Maximum concurrent Xcode jobs**, choose the Simulator retention
+   policy, and select **Apply** in the execution settings.
+5. Select the repositories to manage and choose **Apply Repository Selection**.
 
 The app saves its client secret and login tokens in Keychain. It refreshes
 expiring tokens automatically. To change repository access later, choose
@@ -82,11 +85,13 @@ it stops the app from managing their count.
 
 The same limit caps the total managed Simulators across Xcode versions,
 runtimes, and device types. The host removes idle devices above the limit.
-It also deletes devices after their idle retention period, even below the limit.
-The default is 20 minutes. Change **Idle retention (minutes)** in Settings to
-save a positive whole number of minutes. The saved value applies to all runners
-using this host pool and takes effect without restarting the host. Existing idle
-devices keep their original return time when the setting changes.
+With **Remove after an idle period**, it also deletes devices after the chosen
+number of idle minutes, even below the limit. The default is 20 minutes. Choose
+**Keep indefinitely** to keep healthy idle devices booted without a time limit. Capacity limits,
+cancellation, abnormal termination, fresh-device requests, and explicit cleanup
+can still delete them. The saved policy applies to all runners using this host
+pool without restarting the host. Existing idle devices keep their original
+return time when the setting changes.
 Matching devices are reused in order of most recent return. If space is needed,
 the oldest returned idle devices are removed first.
 Devices in use finish before they are removed, so lowering the limit can
@@ -95,8 +100,63 @@ GitHub's in-progress job count can still be higher.
 
 Settings shows each repository's registered, online, and busy runner counts,
 plus any error. The host retries synchronization every five minutes while signed
-in. **Disconnect** removes local login tokens and stops registration management;
-it leaves existing runner services running.
+in. Pool and repository settings are saved separately; editing one does not
+apply pending changes in the other. **Disconnect** removes local login tokens and
+stops registration management; it leaves existing runner services running.
+
+## Settings from CLI and MCP
+
+The GUI, CLI, and MCP server use the same settings operations. Read the catalog
+from an installed CLI:
+
+```sh
+xcode-runner host settings get
+xcode-runner host settings get --scope pool
+xcode-runner host settings update \
+  '{"scope":"pool","maximumConcurrentJobs":2,"simulatorRetention":{"mode":"forever"}}'
+```
+
+Updates are partial and apply to one scope. Omitted fields retain their saved
+values. A new pool requires `maximumConcurrentJobs`. The catalog includes each
+setting's current value, type, constraints, choices, and application timing.
+Storage also reports the active directory separately from the requested one.
+Read failures are returned as `readError`; they are distinct from unset values.
+
+Start the MCP server with `xcode-runner mcp`. It uses stdio and exposes
+`get_settings` and `update_settings`. To run it on a remote host, configure your
+MCP client to launch SSH with this command:
+
+```sh
+ssh -T ci-host 'exec "$HOME/Library/Application Support/XcodeRunnerKit/bin/xcode-runner" mcp'
+```
+
+`get_settings` accepts an optional `scope`. Pass an update object directly to
+`update_settings`, for example:
+
+```json
+{"scope":"pool","simulatorRetention":{"mode":"idleTimeout","minutes":30}}
+```
+
+Available scopes and when they take effect:
+
+| Scope | Fields | Takes effect |
+| --- | --- | --- |
+| `pool` | `maximumConcurrentJobs`, `simulatorRetention` | Next admission or Simulator maintenance; active jobs continue |
+| `buildService` | `path` (absolute path or `null` to clear) | Next CLI operation |
+| `storage` | `directory` (absolute path to an existing folder) | Next host launch, after migration succeeds |
+| `githubRepositories` | `selectedRepositoryIDs` | Saved by the running app, then runner registrations synchronize |
+
+GitHub repository updates need the installed app running. Synchronizing runner
+registrations also requires sign-in; a saved selection with pending
+synchronization returns `savedWithErrors`. The catalog reports availability and
+the selectable repository IDs. Credentials remain in the app's Keychain. Other
+scopes can be read and saved without the app.
+
+Pool fields are saved together under the pool lock. Saving a configuration can
+succeed even if subsequent Simulator cleanup or runner synchronization fails;
+the update then returns `state: "savedWithErrors"` and an `errors` list. Retrying
+cleanup does not require reverting the saved settings. Invalid input and failures
+before saving produce an error.
 
 ## Configure a workflow
 

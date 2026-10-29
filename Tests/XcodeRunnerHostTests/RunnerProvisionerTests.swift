@@ -265,16 +265,16 @@ struct RunnerProvisionerTests {
         defer { try? FileManager.default.removeItem(at: root) }
         try await client.addRunner(
             repository: firstRepository, identifier: 1, name: "existing-first",
-            labels: ["self-hosted", "macOS", "ARM64", "m1pro", "xcode-runnerkit", "ci-interactive"]
+            labels: ["self-hosted", "macOS", "ARM64", "ci-host", "xcode-runnerkit", "ci-interactive"]
         )
         try await client.addRunner(
             repository: firstRepository, identifier: 2, name: "existing-second",
-            labels: ["self-hosted", "macOS", "ARM64", "m1pro", "xcode-runnerkit", "ci-batch"]
+            labels: ["self-hosted", "macOS", "ARM64", "ci-host", "xcode-runnerkit", "ci-batch"]
         )
         _ = try await provisioner.reconcile(repositories: [firstRepository, secondRepository], capacity: 3, token: "access-token")
         let requests = await client.installations
         #expect(requests.count == 4)
-        #expect(requests.allSatisfy { $0.labels == ["m1pro", "xcode-runnerkit"] })
+        #expect(requests.allSatisfy { $0.labels == ["ci-host", "xcode-runnerkit"] })
     }
 
     @Test func decreasingCapacityPreservesBusyAndIdleListeners() async throws {

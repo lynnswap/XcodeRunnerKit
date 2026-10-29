@@ -14,7 +14,7 @@ struct ExecutionPoolProbe {
             do {
                 let pool = HostExecutionPool(directory: root.appending(path: "pool"))
                 if identifier == "update" {
-                    try await pool.updateMaximumConcurrentJobs(to: Int(values[3])!)
+                    try await pool.configure(maximumConcurrentJobs: Int(values[3])!)
                 }
                 let data = try JSONEncoder().encode(try await pool.status())
                 try FileHandle.standardOutput.write(contentsOf: data)
@@ -24,11 +24,8 @@ struct ExecutionPoolProbe {
             }
             return
         }
-        let capacity = Int(values[3])!
-        let priority = values.count > 4 ? HostExecutionPool.Priority(rawValue: values[4])! : .medium
-        var configuredPool = HostExecutionPool(directory: root.appending(path: "pool"))
-        configuredPool.initialMaximumConcurrentJobs = capacity
-        let pool = configuredPool
+        let priority = values.count > 3 ? HostExecutionPool.Priority(rawValue: values[3])! : .medium
+        let pool = HostExecutionPool(directory: root.appending(path: "pool"))
         let task = Task {
             try await pool.withSlot(priority: priority) {
                 try "\(getpid())".write(to: root.appending(path: identifier + ".started"), atomically: true, encoding: .utf8)

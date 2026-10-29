@@ -49,11 +49,13 @@ final class GitHubHostSettings {
     private(set) var isSynchronizing = false
     private(set) var isLoadingRepositories = false
     private(set) var hasRestored = false
+    private(set) var isSavingSelection = false
+    private var isShuttingDown = false
     var storageIsReady = false
 
     var hasPendingApp: Bool { pendingApp != nil }
-    /// Connecting or synchronizing; actions that change the connection wait for either to finish.
-    var isBusy: Bool { isConnecting || isSynchronizing }
+    /// Connection, selection, and registration updates serialize changes to the saved GitHub settings.
+    var isBusy: Bool { isConnecting || isSynchronizing || isSavingSelection }
     var canReloadRepositories: Bool { !isBusy && !isLoadingRepositories }
     var canDisconnect: Bool { !isBusy && !isLoadingRepositories }
 
@@ -292,11 +294,21 @@ final class GitHubHostSettings {
         } catch { handleGitHubFailure(error, operation: "load repositories") }
     }
 
-    func saveSelection() throws {
+    var savedRepositoryIDs: Set<Int> { Set(configuration.repositories.map(\.id)) }
+
+    var repositorySettings: HostGitHubRepositorySettings {
+        HostGitHubRepositorySettings(
+            selectedRepositoryIDs: savedRepositoryIDs.sorted(),
+            choices: selectableRepositories.map { HostSettingsRepository(id: $0.id, fullName: $0.fullName) }
+        )
+    }
+
+    func saveSelection(_ selectedIDs: Set<Int>) throws {
+        let draftWasUnedited = selectedRepositoryIDs == savedRepositoryIDs
         var available: [Int: GitHubRepository] = [:]
         for repository in configuration.repositories + repositories { available[repository.id] = repository }
         var next = configuration
-        next.repositories = try selectedRepositoryIDs.sorted().map { id in
+        next.repositories = try selectedIDs.sorted().map { id in
             guard let repository = available[id] else {
                 throw CocoaError(.fileReadUnknown, userInfo: [NSLocalizedDescriptionKey: "Reload repositories before applying their selection."])
             }
@@ -304,6 +316,43 @@ final class GitHubHostSettings {
         }
         try next.save(to: record)
         configuration = next
+        if draftWasUnedited { selectedRepositoryIDs = selectedIDs }
+    }
+
+    /// Saves through the same owner for GUI and local automation, then reconciles registrations.
+    func updateRepositorySelection(_ selectedIDs: Set<Int>) async throws -> String? {
+        guard !isShuttingDown else { throw HostSettingsError("The runner host is stopping.") }
+        guard !isBusy, !isLoadingRepositories else {
+            throw HostSettingsError("GitHub runner management is busy. Retry after the current operation finishes.")
+        }
+        isSavingSelection = true
+        defer { isSavingSelection = false }
+        try saveSelection(selectedIDs)
+        return await applySavedRepositorySelection()
+    }
+
+    private func applySavedRepositorySelection() async -> String? {
+        if configuration.repositories.isEmpty {
+            runnerStatuses = []
+            errorMessage = nil
+            return nil
+        }
+        guard storageIsReady else {
+            return "Repository selection was saved. Runner registration changes are pending until host storage is ready."
+        }
+        await synchronize()
+        if isShuttingDown {
+            return "Repository selection was saved. Runner registration changes will resume at the next host launch."
+        }
+        let problems = runnerStatuses.compactMap(\.errorMessage)
+        let messages = [errorMessage].compactMap { $0 } + problems
+        return messages.isEmpty ? nil : messages.joined(separator: "\n")
+    }
+
+    func applyRepositorySelection() async {
+        do {
+            errorMessage = try await updateRepositorySelection(selectedRepositoryIDs)
+        } catch { errorMessage = "Could not save the repository selection: \(error.localizedDescription)" }
     }
 
     func synchronize() async {
@@ -325,7 +374,10 @@ final class GitHubHostSettings {
 
     private func performSynchronization() async {
         do {
-            guard let status = try await pool.status() else { return }
+            guard let status = try await pool.status() else {
+                errorMessage = "Configure the execution pool to synchronize runner registrations."
+                return
+            }
             let selected = configuration.repositories
             runnerStatuses = try await authenticated { token in
                 let available = try await client.listRepositories(accessToken: token)
@@ -333,13 +385,13 @@ final class GitHubHostSettings {
                 let current = Dictionary(uniqueKeysWithValues: available.map { ($0.id, $0) })
                 let inaccessible = selected.filter { current[$0.id] == nil }.map { repository in
                     RepositoryRunnerStatus(
-                        repository: repository, desiredCount: status.maximumConcurrentJobs,
+                        repository: repository, desiredCount: status.configuration.maximumConcurrentJobs,
                         registeredCount: 0, onlineCount: 0, busyCount: 0, excessCount: 0, problems: [.repositoryInaccessible]
                     )
                 }
                 do {
                     return try await provisioner.reconcile(
-                        repositories: selected.compactMap { current[$0.id] }, capacity: status.maximumConcurrentJobs, token: token
+                        repositories: selected.compactMap { current[$0.id] }, capacity: status.configuration.maximumConcurrentJobs, token: token
                     ) + inaccessible
                 } catch let failure as RunnerProvisioningAuthenticationFailure {
                     // Keep the latest counts visible while the token is refreshed or the user signs in again.
@@ -376,6 +428,7 @@ final class GitHubHostSettings {
     }
 
     func shutDown() async {
+        isShuttingDown = true
         cancelConnection()
         synchronizationTask?.cancel()
         await connectionTask?.value

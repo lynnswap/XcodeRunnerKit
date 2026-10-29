@@ -122,6 +122,7 @@ struct SimulatorPoolTests {
         defer { try? FileManager.default.removeItem(at: gate) }
         let clock = Clock()
         let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
+        try await pool.configure(maximumConcurrentJobs: 2, simulatorRetention: .forever)
         var runner = fixture.runner(clock: clock)
         runner.simulatorPool?.executionPool = pool
         let selectedRunner = runner
@@ -246,20 +247,34 @@ struct SimulatorPoolTests {
         #expect(try fixture.calls().contains { $0.hasPrefix("delete " + identifier) })
     }
 
-    @Test func abandonedDirtyDeviceIsDiscardedBeforeTheNextOperation() async throws {
+    @Test func indefiniteRetentionStillReclaimsAbandonedDevicesDuringMaintenance() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
-        let first = try await fixture.runner.run(.test, request: fixture.request("first"))
+        let clock = Clock()
+        let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
+        try await pool.configure(maximumConcurrentJobs: 2, simulatorRetention: .forever)
+        var runner = fixture.runner(clock: clock)
+        runner.executionPool = pool
+        let first = try await runner.run(.test, request: fixture.request("first"))
+        var otherRequest = fixture.request("ready")
+        otherRequest.destination = .managedSimulator(SimulatorConfiguration(runtimeIdentifier: "other-runtime", deviceTypeIdentifier: "device"))
+        let ready = try await runner.run(.test, request: otherRequest)
         let files = try FileManager.default.subpathsOfDirectory(atPath: fixture.poolDirectory.path)
-        let record = try #require(files.first { URL(filePath: $0).lastPathComponent.hasPrefix("device-") && $0.hasSuffix(".json") })
-        let recordURL = fixture.poolDirectory.appending(path: record)
-        var contents = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: recordURL)) as? [String: Any])
-        contents["isReady"] = false
-        try JSONSerialization.data(withJSONObject: contents).write(to: recordURL, options: .atomic)
+        var abandoned = false
+        for record in files where URL(filePath: record).lastPathComponent.hasPrefix("device-") && record.hasSuffix(".json") {
+            let recordURL = fixture.poolDirectory.appending(path: record)
+            var contents = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: recordURL)) as? [String: Any])
+            guard contents["identifier"] as? String == first.simulatorIdentifier else { continue }
+            contents["isReady"] = false
+            try JSONSerialization.data(withJSONObject: contents).write(to: recordURL, options: .atomic)
+            abandoned = true
+        }
+        try #require(abandoned)
 
-        let second = try await fixture.runner.run(.test, request: fixture.request("second"))
-        #expect(second.simulatorIdentifier != first.simulatorIdentifier)
-        #expect(try fixture.calls().contains { $0.hasPrefix("delete " + (first.simulatorIdentifier ?? "")) })
+        clock.advance(by: 24 * 60 * 60)
+        try await pool.removeExcessSimulators(executableURL: fixture.root.appending(path: "simctl"), now: clock.now)
+
+        #expect(try fixture.devices() == [try #require(ready.simulatorIdentifier)])
     }
 
     @Test func simulatorChildInheritsTheExplicitLeaseDescriptor() async throws {
@@ -290,7 +305,7 @@ struct SimulatorPoolTests {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
-        try await pool.updateMaximumConcurrentJobs(to: 2, executableURL: fixture.root.appending(path: "simctl"))
+        try await pool.configure(maximumConcurrentJobs: 2, simulatorRetention: .forever, executableURL: fixture.root.appending(path: "simctl"))
         var runner = fixture.runner
         runner.executionPool = pool
 
@@ -315,7 +330,7 @@ struct SimulatorPoolTests {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
-        try await pool.updateMaximumConcurrentJobs(to: 2, executableURL: fixture.root.appending(path: "simctl"))
+        try await pool.configure(maximumConcurrentJobs: 2, executableURL: fixture.root.appending(path: "simctl"))
         try Data("2".utf8).write(to: fixture.root.appending(path: "device-limit"))
         let gate = fixture.root.appending(path: "payload-gate")
         try Data().write(to: gate)
@@ -351,7 +366,7 @@ struct SimulatorPoolTests {
         defer { fixture.remove() }
         let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
         let simctl = fixture.root.appending(path: "simctl")
-        try await pool.updateMaximumConcurrentJobs(to: 3, executableURL: simctl)
+        try await pool.configure(maximumConcurrentJobs: 3, executableURL: simctl)
         var runner = fixture.runner
         runner.executionPool = pool
         runner.simulatorPool = nil
@@ -371,9 +386,9 @@ struct SimulatorPoolTests {
         defer { operations.forEach { $0.cancel() } }
         for index in 0..<3 { try await waitForFile(fixture.root.appending(path: "started-active-\(index)")) }
 
-        try await pool.updateMaximumConcurrentJobs(to: 1, executableURL: simctl)
+        try await pool.configure(maximumConcurrentJobs: 1, executableURL: simctl)
 
-        #expect(try await pool.status()?.maximumConcurrentJobs == 1)
+        #expect(try await pool.status()?.configuration.maximumConcurrentJobs == 1)
         #expect(try fixture.devices().count == 3)
         #expect(try !fixture.calls().contains { $0.hasPrefix("delete ") })
         try FileManager.default.removeItem(at: gate)
@@ -385,7 +400,7 @@ struct SimulatorPoolTests {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
-        try await pool.updateMaximumConcurrentJobs(to: 1, executableURL: fixture.root.appending(path: "simctl"))
+        try await pool.configure(maximumConcurrentJobs: 1, executableURL: fixture.root.appending(path: "simctl"))
         try Data("1".utf8).write(to: fixture.root.appending(path: "device-limit"))
         var runner = fixture.runner
         runner.executionPool = pool
@@ -420,13 +435,13 @@ struct SimulatorPoolTests {
         try Data().write(to: fixture.root.appending(path: "fail-delete"))
 
         do {
-            try await pool.updateMaximumConcurrentJobs(to: 1, executableURL: simctl)
+            try await pool.configure(maximumConcurrentJobs: 1, executableURL: simctl)
             Issue.record("Configuring the limit hid a Simulator deletion failure.")
         } catch let failure as HostExecutionPool.ConfigurationCleanupFailure {
-            #expect(failure.savedMaximumConcurrentJobs == 1)
+            #expect(failure.savedConfiguration.maximumConcurrentJobs == 1)
             #expect(failure.underlyingError.localizedDescription.contains("delete-failed"))
         }
-        #expect(try await pool.status()?.maximumConcurrentJobs == 1)
+        #expect(try await pool.status()?.configuration.maximumConcurrentJobs == 1)
         #expect(try fixture.devices().count == 3)
 
         try FileManager.default.removeItem(at: fixture.root.appending(path: "fail-delete"))
@@ -438,7 +453,7 @@ struct SimulatorPoolTests {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
-        try await pool.updateMaximumConcurrentJobs(to: 1, executableURL: fixture.root.appending(path: "simctl"))
+        try await pool.configure(maximumConcurrentJobs: 1, executableURL: fixture.root.appending(path: "simctl"))
         let oldXcode = fixture.root.appending(path: "OldXcode")
         let currentXcode = fixture.root.appending(path: "CurrentXcode")
         for directory in [oldXcode, currentXcode] {
@@ -465,7 +480,7 @@ struct SimulatorPoolTests {
         defer { fixture.remove() }
         let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
         let simctl = fixture.root.appending(path: "simctl")
-        try await pool.updateMaximumConcurrentJobs(to: 3, executableURL: simctl)
+        try await pool.configure(maximumConcurrentJobs: 3, executableURL: simctl)
         var runner = fixture.runner
         runner.executionPool = pool
         for index in 0..<3 {
@@ -477,7 +492,7 @@ struct SimulatorPoolTests {
         }
         #expect(try fixture.devices().count == 3)
 
-        try await pool.updateMaximumConcurrentJobs(to: 1, executableURL: simctl)
+        try await pool.configure(maximumConcurrentJobs: 1, executableURL: simctl)
 
         #expect(try fixture.devices().count == 1)
     }
@@ -486,7 +501,7 @@ struct SimulatorPoolTests {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
-        try await pool.updateMaximumConcurrentJobs(to: 1, executableURL: fixture.root.appending(path: "simctl"))
+        try await pool.configure(maximumConcurrentJobs: 1, executableURL: fixture.root.appending(path: "simctl"))
         try Data("1".utf8).write(to: fixture.root.appending(path: "device-limit"))
         var runner = fixture.runner
         runner.executionPool = pool
@@ -538,17 +553,41 @@ struct SimulatorPoolTests {
         #expect(try fixture.devices() == [identifier])
     }
 
+    @Test func indefiniteRetentionReusesDevicesUntilATimeoutIsConfigured() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let clock = Clock()
+        let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
+        let simctl = fixture.root.appending(path: "simctl")
+        try await pool.configure(maximumConcurrentJobs: 2, simulatorRetention: .forever, executableURL: simctl)
+        var runner = fixture.runner(clock: clock)
+        runner.executionPool = pool
+        let first = try await runner.run(.test, request: fixture.request("first"))
+
+        clock.advance(by: 24 * 60 * 60)
+        try await pool.removeExcessSimulators(executableURL: simctl, now: clock.now)
+        let second = try await runner.run(.test, request: fixture.request("reused"))
+        #expect(second.simulatorIdentifier == first.simulatorIdentifier)
+
+        try await pool.configure(simulatorRetention: .idleTimeout(minutes: 5), executableURL: simctl)
+        clock.advance(by: 5 * 60)
+        let third = try await runner.run(.test, request: fixture.request("expired"))
+
+        #expect(third.simulatorIdentifier != first.simulatorIdentifier)
+        #expect(try fixture.devices() == [try #require(third.simulatorIdentifier)])
+    }
+
     @Test func changedRetentionAppliesToExistingIdleDevicesAndPersistsAcrossPoolInstances() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let clock = Clock()
         let directory = fixture.root.appending(path: "execution")
         let pool = HostExecutionPool(directory: directory)
-        #expect(try pool.simulatorIdleRetentionMinutes() == 20)
+        #expect(try pool.configuration() == nil)
         #expect(!FileManager.default.fileExists(atPath: directory.path))
-        try await pool.updateSimulatorIdleRetentionMinutes(to: 5)
+        try await pool.configure(maximumConcurrentJobs: 2, simulatorRetention: .idleTimeout(minutes: 5))
         let reopenedPool = HostExecutionPool(directory: directory)
-        #expect(try reopenedPool.simulatorIdleRetentionMinutes() == 5)
+        #expect(try reopenedPool.configuration()?.simulatorRetention == .idleTimeout(minutes: 5))
         var runner = fixture.runner(clock: clock)
         runner.simulatorPool?.executionPool = reopenedPool
         _ = try await runner.run(.test, request: fixture.request("retained"))
@@ -556,12 +595,12 @@ struct SimulatorPoolTests {
         clock.advance(by: 4 * 60)
         try await pool.removeExcessSimulators(executableURL: fixture.root.appending(path: "simctl"), now: clock.now)
         #expect(try fixture.devices().count == 1)
-        try await pool.updateSimulatorIdleRetentionMinutes(to: 10)
+        try await pool.configure(simulatorRetention: .idleTimeout(minutes: 10))
         clock.advance(by: 2 * 60)
         try await reopenedPool.removeExcessSimulators(executableURL: fixture.root.appending(path: "simctl"), now: clock.now)
         #expect(try fixture.devices().count == 1)
 
-        try await pool.updateSimulatorIdleRetentionMinutes(to: 5)
+        try await pool.configure(simulatorRetention: .idleTimeout(minutes: 5))
         try await reopenedPool.removeExcessSimulators(executableURL: fixture.root.appending(path: "simctl"), now: clock.now)
         #expect(try fixture.devices().isEmpty)
     }
@@ -574,7 +613,7 @@ struct SimulatorPoolTests {
         var runner = fixture.runner(clock: clock)
         runner.simulatorPool?.executionPool = HostExecutionPool(directory: directory)
         let first = try await runner.run(.test, request: fixture.request("first"))
-        try await HostExecutionPool(directory: directory).updateSimulatorIdleRetentionMinutes(to: 5)
+        try await HostExecutionPool(directory: directory).configure(maximumConcurrentJobs: 2, simulatorRetention: .idleTimeout(minutes: 5))
 
         clock.advance(by: 5 * 60)
         let second = try await runner.run(.test, request: fixture.request("second"))
@@ -589,7 +628,7 @@ struct SimulatorPoolTests {
         defer { fixture.remove() }
         let clock = Clock()
         let pool = HostExecutionPool(directory: fixture.root.appending(path: "execution"))
-        try await pool.updateMaximumConcurrentJobs(to: 2, executableURL: fixture.root.appending(path: "simctl"))
+        try await pool.configure(maximumConcurrentJobs: 2, executableURL: fixture.root.appending(path: "simctl"))
         var runner = fixture.runner(clock: clock)
         runner.executionPool = pool
         let selectedRunner = runner

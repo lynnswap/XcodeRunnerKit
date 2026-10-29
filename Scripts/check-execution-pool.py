@@ -29,12 +29,12 @@ def main():
         roots = {}
         logs = []
 
-        def start(name, capacity=2, job_root=root, priority="medium"):
+        def start(name, job_root=root, priority="medium"):
             roots[name] = job_root
             log = open(root / (name + ".log"), "wb")
             logs.append(log)
             jobs[name] = subprocess.Popen(
-                [str(executable), str(job_root), name, str(capacity), priority], stdout=log, stderr=subprocess.STDOUT
+                [str(executable), str(job_root), name, priority], stdout=log, stderr=subprocess.STDOUT
             )
             wait_for(lambda: (job_root / (name + ".ready")).exists() or jobs[name].poll() is not None)
             return jobs[name]
@@ -63,7 +63,9 @@ def main():
 
         def expected_status(capacity, active, high=0, medium=0, low=0):
             return {
-                "maximumConcurrentJobs": capacity, "activeJobCount": active,
+                "configuration": {"maximumConcurrentJobs": capacity,
+                                  "simulatorRetention": {"mode": "idleTimeout", "minutes": 20}},
+                "activeJobCount": active,
                 "waitingJobCounts": {"high": high, "medium": medium, "low": low},
             }
 
@@ -76,6 +78,7 @@ def main():
         try:
             assert status() is None
             assert not (root / "pool").exists(), "Reading status initialized an empty pool"
+            assert update(2) == expected_status(2, 0)
             start("a")
             start("b")
             wait_for(lambda: started("a") and started("b"))
@@ -90,41 +93,20 @@ def main():
             wait_for(lambda: started("d"))
             assert jobs["b"].poll() is None
 
-            start("overflow", 4)
-            # A larger initial limit from this caller does not change the saved two-slot limit.
-            assert_waiting("overflow", root, expected_status(2, 2, medium=1))
-            release("b")
-            wait_for(lambda: started("overflow"))
-            assert status() == expected_status(2, 2)
-
-            for name in ("overflow", "d"):
+            for name in ("b", "d"):
                 release(name)
             start("e")
             wait_for(lambda: started("e"))
             release("e")
 
-            larger = root / "larger"
-            larger.mkdir()
-            start("large-a", 4, larger)
-            wait_for(lambda: started("large-a"))
-            for name in ("large-b", "large-c", "large-d"):
-                start(name, 2, larger)
-            wait_for(lambda: all(started(name) for name in ("large-b", "large-c", "large-d")))
-            start("large-waiter", 2, larger)
-            assert_waiting("large-waiter", larger, expected_status(4, 4, medium=1))
-            release("large-a")
-            wait_for(lambda: started("large-waiter"))
-            assert status(larger) == expected_status(4, 4)
-            for name in ("large-b", "large-c", "large-d", "large-waiter"):
-                release(name)
-
             shrink = root / "shrink"
             shrink.mkdir()
+            update(6, shrink)
             for index in range(6):
                 name = f"shrink-{index}"
-                start(name, 6, shrink)
+                start(name, shrink)
                 wait_for(lambda name=name: started(name))
-            start("shrink-waiter", 6, shrink)
+            start("shrink-waiter", shrink)
             assert_waiting("shrink-waiter", shrink, expected_status(6, 6, medium=1))
             coordinator_inode = (shrink / "pool/pool.lock").stat().st_ino
             assert update(4, shrink) == expected_status(4, 6, medium=1)
@@ -143,17 +125,18 @@ def main():
 
             grow = root / "grow"
             grow.mkdir()
+            update(2, grow)
             for name in ("grow-a", "grow-b"):
-                start(name, 2, grow)
+                start(name, grow)
                 wait_for(lambda name=name: started(name))
-            start("grow-c", 2, grow)
+            start("grow-c", grow)
             assert_waiting("grow-c", grow, expected_status(2, 2, medium=1))
-            assert update(4, grow)["maximumConcurrentJobs"] == 4
+            assert update(4, grow)["configuration"]["maximumConcurrentJobs"] == 4
             wait_for(lambda: started("grow-c"))
-            start("grow-d", 2, grow)
+            start("grow-d", grow)
             wait_for(lambda: started("grow-d"))
             assert status(grow) == expected_status(4, 4)
-            start("grow-after-exit", 2, grow)
+            start("grow-after-exit", grow)
             assert_waiting("grow-after-exit", grow, expected_status(4, 4, medium=1))
             jobs["grow-a"].kill()
             assert jobs["grow-a"].wait(timeout=HANG_LIMIT) == -signal.SIGKILL
@@ -164,7 +147,8 @@ def main():
 
             ordered = root / "ordered"
             ordered.mkdir()
-            start("priority-running", 1, ordered, priority="low")
+            update(1, ordered)
+            start("priority-running", ordered, priority="low")
             wait_for(lambda: started("priority-running"))
             priorities = (
                 ("low-first", "low"), ("medium-first", "medium"), ("low-second", "low"),
@@ -172,7 +156,7 @@ def main():
             )
             counts = {"high": 0, "medium": 0, "low": 0}
             for name, priority in priorities:
-                start(name, 1, ordered, priority=priority)
+                start(name, ordered, priority=priority)
                 counts[priority] += 1
                 wait_for(lambda: status(ordered)["waitingJobCounts"] == counts)
                 assert not started(name)
@@ -191,15 +175,16 @@ def main():
 
             abandoned = root / "abandoned"
             abandoned.mkdir()
-            start("abandoned-running", 1, abandoned)
+            update(1, abandoned)
+            start("abandoned-running", abandoned)
             wait_for(lambda: started("abandoned-running"))
-            start("surviving-low", 1, abandoned, priority="low")
+            start("surviving-low", abandoned, priority="low")
             wait_for(lambda: status(abandoned)["waitingJobCounts"]["low"] == 1)
-            start("cancelled-high", 1, abandoned, priority="high")
+            start("cancelled-high", abandoned, priority="high")
             wait_for(lambda: status(abandoned)["waitingJobCounts"]["high"] == 1)
             cancel("cancelled-high")
             assert status(abandoned) == expected_status(1, 1, low=1)
-            start("killed-high", 1, abandoned, priority="high")
+            start("killed-high", abandoned, priority="high")
             wait_for(lambda: status(abandoned)["waitingJobCounts"]["high"] == 1)
             jobs["killed-high"].kill()
             assert jobs["killed-high"].wait(timeout=HANG_LIMIT) == -signal.SIGKILL
@@ -212,12 +197,13 @@ def main():
 
             resized_priority = root / "resized-priority"
             resized_priority.mkdir()
+            update(2, resized_priority)
             for name in ("resize-running-a", "resize-running-b"):
-                start(name, 2, resized_priority, priority="low")
+                start(name, resized_priority, priority="low")
                 wait_for(lambda name=name: started(name))
-            start("resize-low", 2, resized_priority, priority="low")
+            start("resize-low", resized_priority, priority="low")
             wait_for(lambda: status(resized_priority)["waitingJobCounts"]["low"] == 1)
-            start("resize-high", 2, resized_priority, priority="high")
+            start("resize-high", resized_priority, priority="high")
             wait_for(lambda: status(resized_priority)["waitingJobCounts"]["high"] == 1)
             assert update(1, resized_priority) == expected_status(1, 2, high=1, low=1)
             release("resize-running-a")
@@ -240,11 +226,11 @@ def main():
             assert not list((physical / "pool").iterdir()), "Reading an unconfigured alias initialized its target"
             assert update(2, physical) == expected_status(2, 0)
             assert status(alias) == status(physical)
-            start("alias-a", 4, alias)
+            start("alias-a", alias)
             wait_for(lambda: started("alias-a"))
-            start("physical-b", 4, physical)
+            start("physical-b", physical)
             wait_for(lambda: started("physical-b"))
-            start("alias-waiter", 4, alias)
+            start("alias-waiter", alias)
             assert_waiting("alias-waiter", alias, expected_status(2, 2, medium=1))
             assert update(1, alias) == expected_status(1, 2, medium=1)
             release("alias-a")
@@ -258,33 +244,37 @@ def main():
             (unconfigured / "pool").mkdir(parents=True)
             (unconfigured / "pool/pool.lock").touch()
             assert status(unconfigured) is None
-            assert not (unconfigured / "pool/capacity").exists()
+            job = start("unconfigured-job", unconfigured)
+            assert job.wait(timeout=HANG_LIMIT) != 0
+            assert not started("unconfigured-job"), "An unconfigured pool executed a payload"
+            configuration_file = unconfigured / "pool/configuration.json"
+            assert not configuration_file.exists(), "A job initialized pool settings"
             assert update(3, unconfigured) == expected_status(3, 0)
-            assert (unconfigured / "pool/capacity").read_text() == "3"
+            assert json.loads(configuration_file.read_text()) == expected_status(3, 0)["configuration"]
             for capacity in (0, -1):
                 result = subprocess.run(
                     [str(executable), str(unconfigured), "update", str(capacity)], capture_output=True
                 )
                 assert result.returncode != 0
                 assert "invalidMaximumConcurrentJobs" in result.stderr.decode()
-                assert status(unconfigured)["maximumConcurrentJobs"] == 3
+                assert status(unconfigured)["configuration"]["maximumConcurrentJobs"] == 3
 
-            unreadable = unconfigured / "pool/capacity"
+            unreadable = configuration_file
             unreadable.chmod(0)
             try:
                 result = subprocess.run([str(executable), str(unconfigured), "status"], capture_output=True)
-                assert result.returncode != 0, "A saved-capacity read failure returned an empty status"
-                job = start("unreadable-capacity", 4, unconfigured)
+                assert result.returncode != 0, "A configuration read failure returned an empty status"
+                job = start("unreadable-configuration", unconfigured)
                 assert job.wait(timeout=HANG_LIMIT) != 0
-                assert not started("unreadable-capacity"), "A capacity read failure executed a payload"
+                assert not started("unreadable-configuration"), "A configuration read failure executed a payload"
             finally:
                 unreadable.chmod(0o600)
             pool_directory = unconfigured / "pool"
             pool_directory.chmod(0o500)
             try:
                 result = subprocess.run([str(executable), str(unconfigured), "update", "5"], capture_output=True)
-                assert result.returncode != 0, "A saved-capacity write failure returned success"
-                job = start("unwritable-queue", 3, unconfigured, priority="high")
+                assert result.returncode != 0, "A configuration write failure returned success"
+                job = start("unwritable-queue", unconfigured, priority="high")
                 assert job.wait(timeout=HANG_LIMIT) != 0
                 assert not started("unwritable-queue"), "A waiting-record write failure executed a payload"
             finally:
@@ -299,22 +289,26 @@ def main():
             finally:
                 coordinator.chmod(0o600)
 
-            (unconfigured / "pool/capacity").write_text("")
+            configuration_file.write_text("")
             result = subprocess.run([str(executable), str(unconfigured), "status"], capture_output=True)
-            assert result.returncode != 0
-            assert "invalidStoredMaximumConcurrentJobs" in result.stderr.decode()
+            assert result.returncode != 0, "Invalid JSON returned an empty status"
 
-            for index, value in enumerate(("0", "invalid")):
+            invalid_values = (
+                {"maximumConcurrentJobs": 0, "simulatorRetention": {"mode": "idleTimeout", "minutes": 20}},
+                {"maximumConcurrentJobs": 2, "simulatorRetention": {"mode": "idleTimeout", "minutes": 0}},
+            )
+            for index, value in enumerate(invalid_values):
                 invalid = root / f"invalid-{index}"
                 (invalid / "pool").mkdir(parents=True)
-                (invalid / "pool/capacity").write_text(value)
+                saved = invalid / "pool/configuration.json"
+                saved.write_text(json.dumps(value))
                 name = f"invalid-{index}"
-                job = start(name, 2, invalid)
+                job = start(name, invalid)
                 assert job.wait(timeout=HANG_LIMIT) != 0
-                assert not started(name), "Invalid saved capacity executed a payload"
-                assert "invalidStoredMaximumConcurrentJobs" in (root / (name + ".log")).read_text()
+                assert not started(name), "Invalid saved settings executed a payload"
+                assert json.loads(saved.read_text()) == value, "A job replaced invalid settings"
 
-            print("PASS: stored capacities, differing callers, live shrink/grow, priorities, same-priority FIFO, queued counts, cancellation, process exit, invalid configuration, I/O failures")
+            print("PASS: explicit configuration, live shrink/grow, priorities, same-priority FIFO, queued counts, cancellation, process exit, invalid settings, I/O failures")
         finally:
             for job in jobs.values():
                 if job.poll() is None:

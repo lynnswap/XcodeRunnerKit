@@ -24,6 +24,9 @@ def replace(path, old, new):
 def main():
     with tempfile.TemporaryDirectory(prefix="XcodeRunner Cache ") as temporary:
         root = Path(temporary)
+        subprocess.run([str(args.executable.resolve()), "pool", "configure",
+                        "--pool-directory", str(root / "pool"), "--maximum-concurrent-jobs", "2"],
+                       check=True, capture_output=True)
 
         def run(name, changed=False):
             package = root / name / "BuildProbe"
@@ -43,7 +46,7 @@ def main():
                     "--package", str(package), "--scheme", "BuildProbe",
                     "--destination", "platform=macOS,arch=arm64",
                     "--output-directory", str(output),
-                    "--pool-directory", str(root / "pool"), "--maximum-concurrent-jobs", "2",
+                    "--pool-directory", str(root / "pool"),
                     "--compilation-cache", str(root / "cas"), "--cache-diagnostics",
                     "--prefix-mapping", str((package / "Sources").resolve()) + "=/^xcodeRunnerFixtureSources",
                     "--", "-parallel-testing-enabled", "NO", "-jobs", "4",

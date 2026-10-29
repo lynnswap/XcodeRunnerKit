@@ -55,12 +55,15 @@ def main():
         package = root / "BuildProbe"
         shutil.copytree(REPO / "Tests/Fixtures/BuildProbe", package,
                         ignore=shutil.ignore_patterns(".build", ".swiftpm"))
+        subprocess.run([str(args.executable.resolve()), "pool", "configure",
+                        "--pool-directory", str(root / "pool"), "--maximum-concurrent-jobs", "1"],
+                       check=True, capture_output=True)
         results = []
         for name, number in (("SIGINT", signal.SIGINT), ("SIGTERM", signal.SIGTERM)):
             command = [str(args.executable.resolve()), "test", "--package", str(package),
                        "--scheme", "BuildProbe", "--destination", "platform=macOS,arch=arm64",
                        "--output-directory", str(root / name),
-                       "--pool-directory", str(root / "pool"), "--maximum-concurrent-jobs", "1",
+                       "--pool-directory", str(root / "pool"),
                        "--environment", "TEST_RUNNER_PROBE_MODE=wait",
                        "--", "-parallel-testing-enabled", "NO", "-jobs", "3"]
             wrapper = root / (name + ".sh")

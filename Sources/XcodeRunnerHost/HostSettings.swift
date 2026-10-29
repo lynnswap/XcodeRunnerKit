@@ -51,6 +51,7 @@ final class HostSettingsModel {
     let installation: HostInstallation
     let pool: HostExecutionPool
     let github: GitHubHostSettings
+    let settingsService: HostSettingsService
     var hostState = HostState.starting
     var runners: [RunnerSettingsRow] = []
     var runnerScanError: String?
@@ -58,14 +59,13 @@ final class HostSettingsModel {
     private(set) var poolError: String?
     private(set) var simulatorPoolError: String?
     private(set) var saveError: String?
+    private(set) var configurationCleanupError: String?
     private(set) var isSaving = false
     private(set) var hasLoadedPoolStatus = false
+    private var poolDraftBase = HostExecutionPool.Configuration(maximumConcurrentJobs: HostInstallation.defaultMaximumConcurrentJobs)
     var capacityInput = String(HostInstallation.defaultMaximumConcurrentJobs)
-    private(set) var simulatorIdleRetentionMinutes: Int?
-    private(set) var simulatorIdleRetentionError: String?
-    private(set) var simulatorIdleRetentionSaveError: String?
-    private(set) var isSavingSimulatorIdleRetention = false
-    var simulatorIdleRetentionInput = String(HostExecutionPool.defaultSimulatorIdleRetentionMinutes)
+    var keepsSimulatorsForever = false
+    var simulatorIdleRetentionInput = "20"
     private(set) var activeStorage: HostInstallation.Storage?
     private(set) var storageError: String?
     private(set) var storageSaveError: String?
@@ -75,8 +75,9 @@ final class HostSettingsModel {
 
     init(installation: HostInstallation) {
         self.installation = installation
-        // Reading status does not initialize the pool. Only Apply or a job can do that.
+        // Reading status leaves an unconfigured pool unchanged.
         self.pool = HostExecutionPool(directory: installation.poolDirectory)
+        self.settingsService = HostSettingsService(installation: installation, pool: pool)
         self.github = GitHubHostSettings(installation: installation, pool: pool)
         do {
             savedStorageDirectory = try installation.requestedStorageDirectory() ?? installation.storage()?.directory
@@ -123,7 +124,7 @@ final class HostSettingsModel {
         isSavingStorage = true
         defer { isSavingStorage = false }
         do {
-            let directory = try await installation.requestStorageDirectory(URL(filePath: storageDirectoryInput))
+            let directory = try await settingsService.requestStorageDirectory(URL(filePath: storageDirectoryInput))
             savedStorageDirectory = directory
             storageDirectoryInput = directory.path(percentEncoded: false)
             storageSaveError = nil
@@ -155,10 +156,10 @@ final class HostSettingsModel {
         if !hasLoadedPoolStatus { return "Checking the execution pool…" }
         if poolError != nil { return "The execution pool is unavailable." }
         guard let poolStatus else { return "Set a limit to configure the shared execution pool." }
-        if poolStatus.activeJobCount > poolStatus.maximumConcurrentJobs {
+        if poolStatus.activeJobCount > poolStatus.configuration.maximumConcurrentJobs {
             return "Existing jobs will finish. New jobs wait until the running count falls below the limit."
         }
-        if poolStatus.activeJobCount == poolStatus.maximumConcurrentJobs {
+        if poolStatus.activeJobCount == poolStatus.configuration.maximumConcurrentJobs {
             return "New jobs wait for an available slot."
         }
         return "New jobs can start while slots are available."
@@ -175,16 +176,44 @@ final class HostSettingsModel {
         }
     }
 
+    var savedSimulatorRetention: HostExecutionPool.SimulatorRetention {
+        poolStatus?.configuration.simulatorRetention ?? .idleTimeout(minutes: 20)
+    }
+
+    var simulatorRetentionDescription: String {
+        if !hasLoadedPoolStatus { return "Checking…" }
+        if poolError != nil { return "Unavailable" }
+        if poolStatus == nil { return "Not configured" }
+        return switch savedSimulatorRetention {
+        case .forever: "Keep indefinitely"
+        case .idleTimeout(let minutes): "Remove after \(minutes) idle minutes"
+        }
+    }
+
     func refreshPoolStatus() async {
-        refreshSimulatorIdleRetention()
+        refreshStorageSelection()
+        let previousCapacity = String(poolDraftBase.maximumConcurrentJobs)
+        let capacityDraft = capacityInput
+        let retentionDraft = (keepsSimulatorsForever, simulatorIdleRetentionInput)
+        let previousRetention = poolDraftBase.simulatorRetention
+        let retentionWasUnedited: Bool
+        switch previousRetention {
+        case .forever: retentionWasUnedited = keepsSimulatorsForever
+        case .idleTimeout(let minutes):
+            retentionWasUnedited = !keepsSimulatorsForever && simulatorIdleRetentionInput == String(minutes)
+        }
         do {
-            let previousInput = String(poolStatus?.maximumConcurrentJobs ?? HostInstallation.defaultMaximumConcurrentJobs)
             let status = try await pool.status()
             poolStatus = status
             poolError = nil
             hasLoadedPoolStatus = true
-            if capacityInput == previousInput, let status {
-                capacityInput = String(status.maximumConcurrentJobs)
+            poolDraftBase = status?.configuration ?? .init(maximumConcurrentJobs: HostInstallation.defaultMaximumConcurrentJobs)
+            if capacityDraft == previousCapacity, capacityInput == capacityDraft, let status {
+                capacityInput = String(status.configuration.maximumConcurrentJobs)
+            }
+            if retentionWasUnedited,
+               keepsSimulatorsForever == retentionDraft.0, simulatorIdleRetentionInput == retentionDraft.1 {
+                updateRetentionDraft(from: savedSimulatorRetention)
             }
         } catch is CancellationError {
             return
@@ -195,73 +224,68 @@ final class HostSettingsModel {
         }
     }
 
-    private func refreshSimulatorIdleRetention() {
+    private func refreshStorageSelection() {
+        let previousInput = savedStorageDirectory?.path(percentEncoded: false) ?? ""
         do {
-            let previousInput = String(simulatorIdleRetentionMinutes ?? HostExecutionPool.defaultSimulatorIdleRetentionMinutes)
-            let minutes = try pool.simulatorIdleRetentionMinutes()
-            simulatorIdleRetentionMinutes = minutes
-            simulatorIdleRetentionError = nil
-            if simulatorIdleRetentionInput == previousInput {
-                simulatorIdleRetentionInput = String(minutes)
+            savedStorageDirectory = try installation.requestedStorageDirectory() ?? installation.storage()?.directory
+            if storageDirectoryInput == previousInput {
+                storageDirectoryInput = savedStorageDirectory?.path(percentEncoded: false) ?? ""
             }
         } catch {
-            simulatorIdleRetentionMinutes = nil
-            simulatorIdleRetentionError = "Could not read the Simulator idle retention: \(error.localizedDescription)"
+            storageSaveError = "Could not read the saved storage folder: \(error.localizedDescription)"
         }
     }
 
-    var canApplySimulatorIdleRetention: Bool {
-        hasLoadedPoolStatus && !isSavingSimulatorIdleRetention && hostState != .stopping
-    }
-
-    func applySimulatorIdleRetention() async {
-        guard canApplySimulatorIdleRetention else { return }
-        guard let minutes = Int(simulatorIdleRetentionInput), minutes > 0 else {
-            simulatorIdleRetentionSaveError = "Enter a positive whole number of minutes."
-            return
-        }
-        isSavingSimulatorIdleRetention = true
-        defer { isSavingSimulatorIdleRetention = false }
-        do {
-            try await pool.updateSimulatorIdleRetentionMinutes(to: minutes)
-            simulatorIdleRetentionSaveError = nil
-            refreshSimulatorIdleRetention()
-            await trimSimulatorPool()
-        } catch {
-            simulatorIdleRetentionSaveError = "Could not save the Simulator idle retention: \(error.localizedDescription)"
+    private func updateRetentionDraft(from retention: HostExecutionPool.SimulatorRetention) {
+        switch retention {
+        case .forever: keepsSimulatorsForever = true
+        case .idleTimeout(let minutes):
+            keepsSimulatorsForever = false
+            simulatorIdleRetentionInput = String(minutes)
         }
     }
 
-    var canApplyLimit: Bool { hasLoadedPoolStatus && !isSaving && !github.isBusy && hostState != .stopping }
+    var canApplyPoolConfiguration: Bool { hasLoadedPoolStatus && !isSaving && !github.isBusy && hostState != .stopping }
 
-    func applyCapacity() async {
-        guard canApplyLimit else { return }
+    func applyPoolConfiguration() async {
+        guard canApplyPoolConfiguration else { return }
         guard let capacity = Int(capacityInput), capacity > 0 else {
-            saveError = "Enter a positive whole number."
+            saveError = "Enter a positive whole number of concurrent jobs."
             return
         }
+        let retention: HostExecutionPool.SimulatorRetention
+        if keepsSimulatorsForever {
+            retention = .forever
+        } else {
+            guard let minutes = Int(simulatorIdleRetentionInput), minutes > 0 else {
+                saveError = "Enter a positive whole number of idle minutes."
+                return
+            }
+            retention = .idleTimeout(minutes: minutes)
+        }
+        let previousCapacity = poolStatus?.configuration.maximumConcurrentJobs
+        let isNewPool = poolStatus == nil && poolError == nil
+        let maximumPatch = isNewPool || capacity != poolDraftBase.maximumConcurrentJobs ? capacity : nil
+        let retentionPatch = isNewPool || retention != poolDraftBase.simulatorRetention ? retention : nil
         isSaving = true
         defer { isSaving = false }
         do {
-            var cleanupError: String?
+            let saved: HostExecutionPool.Configuration
             do {
-                try await pool.updateMaximumConcurrentJobs(to: capacity)
+                saved = try await settingsService.configurePool(maximumConcurrentJobs: maximumPatch, simulatorRetention: retentionPatch)
+                configurationCleanupError = nil
             } catch let failure as HostExecutionPool.ConfigurationCleanupFailure {
-                cleanupError = failure.localizedDescription
+                saved = failure.savedConfiguration
+                configurationCleanupError = failure.localizedDescription
             }
-            do {
-                try github.saveSelection()
-            } catch {
-                saveError = [cleanupError, "The execution limit was saved as \(capacity), but the repository selection could not be saved: \(error.localizedDescription)"]
-                    .compactMap { $0 }.joined(separator: "\n")
-                await refreshPoolStatus()
-                return
-            }
-            saveError = cleanupError
+            saveError = nil
+            capacityInput = String(saved.maximumConcurrentJobs)
+            updateRetentionDraft(from: saved.simulatorRetention)
+            poolDraftBase = saved
             await refreshPoolStatus()
-            await github.synchronize()
+            if previousCapacity != saved.maximumConcurrentJobs { await github.synchronize() }
         } catch {
-            saveError = "Could not save the execution limit: \(error.localizedDescription)"
+            saveError = "Could not save the execution pool settings: \(error.localizedDescription)"
         }
     }
 }
@@ -311,50 +335,40 @@ struct HostSettingsView: View {
                             .monospacedDigit()
                     }
                     LabeledContent("Current limit") {
-                        Text(model.poolStatus.map { String($0.maximumConcurrentJobs) } ?? unavailablePoolValue)
+                        Text(model.poolStatus.map { String($0.configuration.maximumConcurrentJobs) } ?? unavailablePoolValue)
                             .monospacedDigit()
                     }
-                    HStack {
-                        TextField("Maximum concurrent Xcode jobs", text: $model.capacityInput)
-                            .textFieldStyle(.roundedBorder)
-                            .accessibilityIdentifier("execution-limit")
-                        Button(model.isSaving ? "Applying…" : "Apply") {
-                            Task { await model.applyCapacity() }
-                        }
-                        .disabled(!model.canApplyLimit)
-                        .accessibilityIdentifier("apply-execution-limit")
+                    TextField("Maximum concurrent Xcode jobs", text: $model.capacityInput)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(model.isSaving)
+                        .accessibilityIdentifier("execution-limit")
+                    LabeledContent("Current Simulator retention", value: model.simulatorRetentionDescription)
+                    Picker("Idle Simulators", selection: $model.keepsSimulatorsForever) {
+                        Text("Remove after an idle period").tag(false)
+                        Text("Keep indefinitely").tag(true)
                     }
+                    .disabled(model.isSaving)
+                    .accessibilityIdentifier("simulator-retention-mode")
+                    if !model.keepsSimulatorsForever {
+                        TextField("Idle retention (minutes)", text: $model.simulatorIdleRetentionInput)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(model.isSaving)
+                            .accessibilityIdentifier("simulator-idle-retention")
+                    }
+                    Button(model.isSaving ? "Applying…" : "Apply") {
+                        Task { await model.applyPoolConfiguration() }
+                    }
+                    .disabled(!model.canApplyPoolConfiguration)
+                    .accessibilityIdentifier("apply-pool-configuration")
                     Text(model.admissionMessage)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                    Text("This limit is shared across all repositories. Selected repositories receive enough runner registrations to use it. GitHub jobs may wait here after assignment; their in-progress count can be higher than the Xcode execution count.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Text("This limit is shared across all repositories. Changes apply to new jobs; running jobs finish first. Runner registrations are synchronized to the saved limit.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Text("Idle Simulators stay booted for reuse. Keep indefinitely disables expiry; the pool still removes excess or unhealthy devices. With an idle period, each return starts a new retention period.")
                         .font(.callout).foregroundStyle(.secondary)
                     if let error = model.poolError { errorMessage(error) }
                     if let error = model.saveError { errorMessage(error) }
-                }
-                Section("Simulator Pool") {
-                    LabeledContent("Current idle retention") {
-                        Text(model.simulatorIdleRetentionMinutes.map { "\($0) min" }
-                             ?? (model.simulatorIdleRetentionError == nil ? "Checking…" : "Unavailable"))
-                            .monospacedDigit()
-                    }
-                    HStack {
-                        TextField("Idle retention (minutes)", text: $model.simulatorIdleRetentionInput)
-                            .textFieldStyle(.roundedBorder)
-                            .disabled(model.isSavingSimulatorIdleRetention)
-                            .accessibilityIdentifier("simulator-idle-retention")
-                        Button(model.isSavingSimulatorIdleRetention ? "Applying…" : "Apply") {
-                            Task { await model.applySimulatorIdleRetention() }
-                        }
-                        .disabled(!model.canApplySimulatorIdleRetention)
-                        .accessibilityIdentifier("apply-simulator-idle-retention")
-                    }
-                    Text("Idle devices are removed after this period. The default is \(HostExecutionPool.defaultSimulatorIdleRetentionMinutes) minutes. Changes apply immediately. Devices in use finish first; each return starts a new retention period.")
-                        .font(.callout).foregroundStyle(.secondary)
-                    Text("The pool shares the Xcode execution limit across Xcode versions, runtimes, and device types. Recently returned devices are reused first. The oldest idle devices are removed first when space is needed.")
-                        .font(.callout).foregroundStyle(.secondary)
-                    if let error = model.simulatorIdleRetentionError { errorMessage(error) }
-                    if let error = model.simulatorIdleRetentionSaveError { errorMessage(error) }
+                    if let error = model.configurationCleanupError { errorMessage(error) }
                     if let error = model.simulatorPoolError { errorMessage(error) }
                 }
                 Section("Runner Services") {

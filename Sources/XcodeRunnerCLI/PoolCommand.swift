@@ -30,13 +30,31 @@ struct Pool: AsyncParsableCommand {
 
         @OptionGroup private var options: PoolOptions
         @Option(help: "Maximum number of concurrent jobs; must be positive.")
-        var maximumConcurrentJobs: Int
+        var maximumConcurrentJobs: Int?
+        @Option(help: "Idle Simulator retention: forever or idleTimeout.")
+        var simulatorRetention: String?
+        @Option(help: "Minutes before deleting idle Simulators; requires --simulator-retention idleTimeout.")
+        var idleTimeoutMinutes: Int?
         @Flag(help: "Write the resulting status as JSON.")
         var json = false
 
         mutating func run() async throws {
             let pool = try options.pool()
-            try await pool.updateMaximumConcurrentJobs(to: maximumConcurrentJobs)
+            let retention: HostExecutionPool.SimulatorRetention?
+            switch simulatorRetention {
+            case "forever":
+                guard idleTimeoutMinutes == nil else { throw ValidationError("--idle-timeout-minutes requires idleTimeout retention.") }
+                retention = .forever
+            case "idleTimeout":
+                guard let idleTimeoutMinutes else { throw ValidationError("Specify --idle-timeout-minutes with idleTimeout retention.") }
+                retention = .idleTimeout(minutes: idleTimeoutMinutes)
+            case nil:
+                guard idleTimeoutMinutes == nil else { throw ValidationError("Specify --simulator-retention idleTimeout.") }
+                retention = nil
+            default: throw ValidationError("Expected forever or idleTimeout for --simulator-retention.")
+            }
+            guard maximumConcurrentJobs != nil || retention != nil else { throw ValidationError("Specify a pool setting to configure.") }
+            try await HostSettingsService(pool: pool).configurePool(maximumConcurrentJobs: maximumConcurrentJobs, simulatorRetention: retention)
             try report(await pool.status(), json: json)
         }
     }
@@ -84,7 +102,11 @@ private func report(_ status: HostExecutionPool.Status?, json: Bool) throws {
         print("Pool is not configured.")
         return
     }
-    print("Maximum concurrent jobs: \(status.maximumConcurrentJobs)")
+    print("Maximum concurrent jobs: \(status.configuration.maximumConcurrentJobs)")
+    switch status.configuration.simulatorRetention {
+    case .forever: print("Simulator retention: forever")
+    case .idleTimeout(let minutes): print("Simulator retention: \(minutes) idle minutes")
+    }
     print("Active jobs: \(status.activeJobCount)")
     let waiting = status.waitingJobCounts
     print("Waiting jobs: \(waiting.total) (high: \(waiting.high), medium: \(waiting.medium), low: \(waiting.low))")
