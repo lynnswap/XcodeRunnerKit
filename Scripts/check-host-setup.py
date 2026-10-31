@@ -120,7 +120,8 @@ with tempfile.TemporaryDirectory(prefix="Hosted CLI unavailable storage ") as te
     offline = root / "Offline job data"
     environment = {**os.environ, "HOME": str(home),
                    "XCODE_RUNNER_HOST_STORAGE_DIRECTORY": layout["storageDirectory"],
-                   "XCODE_RUNNER_HOST_ROOT": layout["hostRoot"]}
+                   "XCODE_RUNNER_HOST_ROOT": layout["hostRoot"],
+                   "GITHUB_REPOSITORY_ID": "101"}
     package = root / "BuildProbe"
     shutil.copytree(scripts.parent / "Tests/Fixtures/BuildProbe", package,
                     ignore=shutil.ignore_patterns(".build", ".swiftpm"))
@@ -288,6 +289,7 @@ int main(int argc, char **argv) {
     hosted_environment = {**environment, "HOME": str(root / "different-home"),
                           "XCODE_RUNNER_HOST_STORAGE_DIRECTORY": str(storage.resolve()),
                           "XCODE_RUNNER_HOST_ROOT": str(host.resolve()),
+                          "GITHUB_REPOSITORY_ID": "101",
                           "XRK_FIXTURE_BUNDLED_SERVICE": str(bundled_service),
                           "SWBBUILDSERVICE_PATH": str(root / "missing inherited SWB service"),
                           "XCBBUILDSERVICE_PATH": str(root / "missing inherited XCB service")}
@@ -298,12 +300,40 @@ int main(int argc, char **argv) {
     subprocess.run([str(executable), "pool", "configure", "--pool-directory", str(host / "Pool"),
                     "--maximum-concurrent-jobs", "4"], env=environment, check=True, capture_output=True)
     shutil.rmtree(storage / "Build")
-    result = subprocess.run(build, env=hosted_environment, check=True, capture_output=True, text=True, timeout=300)
+    derived_data_directories = []
+    for repository_id in ("101", "101", "202"):
+        result = subprocess.run(build, env={**hosted_environment, "GITHUB_REPOSITORY_ID": repository_id},
+                                check=True, capture_output=True, text=True, timeout=300)
+        log = Path(next(line[5:] for line in result.stdout.splitlines() if line.startswith("Log: ")))
+        assert (storage / "Build").resolve() in log.parents
+        assert compilation_cache_in(log) == (cache / repository_id).resolve()
+        derived_data = log.resolve().parent / "DerivedData"
+        assert (derived_data / "Build/Products").is_dir()
+        derived_data_directories.append(derived_data)
+    assert len(set(derived_data_directories)) == 3, "Separate CLI jobs shared DerivedData"
+    assert (cache / "retained").read_text() == "cache data"
+    assert not any((cache / repository_id / "retained").exists() for repository_id in ("101", "202"))
+    cleared_cache = root / "Cleared CompilationCache"
+    cache.rename(cleared_cache)
+    result = subprocess.run(build, env=hosted_environment, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, (result.stdout, result.stderr)
     log = Path(next(line[5:] for line in result.stdout.splitlines() if line.startswith("Log: ")))
-    assert (storage / "Build").resolve() in log.parents
-    assert compilation_cache_in(log) == cache.resolve()
+    assert cache.is_dir()
+    assert compilation_cache_in(log) == (cache / "101").resolve()
+    assert (cleared_cache / "retained").read_text() == "cache data"
     saved_service_launches = service_markers[0].read_text()
     assert saved_service_launches and not service_markers[1].exists()
+    existing_builds = set((storage / "Build").iterdir())
+    for repository_id in (None, "../other-repository"):
+        invalid_environment = dict(hosted_environment)
+        if repository_id is None:
+            invalid_environment.pop("GITHUB_REPOSITORY_ID")
+        else:
+            invalid_environment["GITHUB_REPOSITORY_ID"] = repository_id
+        failure = subprocess.run(build, env=invalid_environment, capture_output=True, text=True, timeout=HANG_LIMIT)
+        assert failure.returncode != 0 and "GITHUB_REPOSITORY_ID" in failure.stderr, (failure.stdout, failure.stderr)
+        assert set((storage / "Build").iterdir()) == existing_builds
+        assert service_markers[0].read_text() == saved_service_launches
     pool_status = subprocess.run([str(executable), "pool", "status", "--pool-directory", str(host / "Pool"), "--json"],
                                  env=environment, check=True, capture_output=True, text=True)
     assert json.loads(pool_status.stdout)["configuration"]["maximumConcurrentJobs"] == 4
@@ -314,11 +344,13 @@ int main(int argc, char **argv) {
     override_pool = override / "Pool"
     subprocess.run([str(executable), "pool", "configure", "--pool-directory", str(override_pool),
                     "--maximum-concurrent-jobs", "1"], env=environment, check=True, capture_output=True)
+    override_environment = dict(hosted_environment)
+    override_environment.pop("GITHUB_REPOSITORY_ID")
     result = subprocess.run(build[:-3] + ["--output-directory", str(override_build),
                             "--compilation-cache", str(override_cache),
                             "--pool-directory", str(override_pool),
                             "--build-service-path", str(service_wrappers[1]),
-                            *build[-3:]], env=hosted_environment, check=True, capture_output=True, text=True, timeout=300)
+                            *build[-3:]], env=override_environment, check=True, capture_output=True, text=True, timeout=300)
     log = Path(next(line[5:] for line in result.stdout.splitlines() if line.startswith("Log: ")))
     assert override_build.resolve() in log.resolve().parents
     assert compilation_cache_in(log) == override_cache.resolve()

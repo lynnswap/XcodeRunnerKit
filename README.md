@@ -294,6 +294,14 @@ Add `--compilation-cache /path/to/shared-CAS`, or set
 The compiler cache is shared; each run still has separate DerivedData and build
 outputs.
 
+For jobs started by XcodeRunnerHost, the CLI defaults to
+`<Storage>/CompilationCache/<GITHUB_REPOSITORY_ID>`. Jobs from the same repository
+share a cache across runners and branches; different repository IDs use separate
+directories. The hosted default requires a valid `GITHUB_REPOSITORY_ID` and never
+falls back to an unscoped cache. Existing unscoped cache entries are retained but
+are not imported into repository caches. An explicit `--compilation-cache` or
+Swift `CompilationCache(directory:)` uses the supplied directory as given.
+
 Keep package checkout names consistent across jobs because SwiftPM includes the
 package identity in compiler inputs. For source locations outside the checkout,
 use `--prefix-mapping /physical/path=/canonical-prefix` or
@@ -307,9 +315,9 @@ cache only after its users have stopped.
 
 Each run creates a job directory under `outputDirectory` containing
 `xcodebuild.log`, `Results.xcresult`, and its default `DerivedData`. The run
-creates `outputDirectory` and the compilation cache directory when they are
-missing, but not their parent folders, so a job fails instead of writing to the
-startup volume when removable storage is not mounted.
+creates `outputDirectory`, the compilation cache, and the hosted cache root when
+they are missing. Their containing storage folders must already exist, so a job
+fails instead of writing to the startup volume when removable storage is not mounted.
 `XcodeBuildResult.jobDirectory` names it. Early failures may produce no result
 bundle.
 

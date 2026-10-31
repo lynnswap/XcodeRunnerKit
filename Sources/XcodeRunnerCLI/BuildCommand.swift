@@ -99,8 +99,19 @@ struct BuildOptions: ParsableArguments {
             outputDirectory: outputDirectory.map(Self.url) ?? host?.storage.buildDirectory ?? Self.url("XcodeRunnerOutput")
         )
         request.derivedDataDirectory = derivedData.map(Self.url)
-        if let cacheDirectory = compilationCache.map(Self.url) ?? host?.storage.compilationCacheDirectory {
-            var cache = CompilationCache(directory: cacheDirectory)
+        let cache: CompilationCache?
+        if let compilationCache {
+            cache = CompilationCache(directory: Self.url(compilationCache))
+        } else if let host {
+            guard let value = ProcessInfo.processInfo.environment["GITHUB_REPOSITORY_ID"],
+                  let identifier = Int(value), identifier > 0 else {
+                throw ValidationError("GITHUB_REPOSITORY_ID must be a positive integer to select the host's repository compilation cache.")
+            }
+            cache = CompilationCache(directory: host.storage.compilationCacheDirectory, namespace: String(identifier))
+        } else {
+            cache = nil
+        }
+        if var cache {
             cache.enablesDiagnosticRemarks = cacheDiagnostics
             cache.prefixMappings = try Self.assignments(prefixMappings).sorted(by: { $0.key < $1.key }).map {
                 CompilationCache.PrefixMapping(

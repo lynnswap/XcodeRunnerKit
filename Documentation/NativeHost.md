@@ -192,6 +192,13 @@ Use `exec` in shell wrappers so cancellation reaches `xcode-runner`.
 The host supplies the shared pool, compiler cache, and output directory;
 those flags are not needed in each workflow.
 
+The CLI uses GitHub's `GITHUB_REPOSITORY_ID` to select a repository-specific
+compiler cache. All runners and branches of that repository share the cache;
+other repository IDs use separate directories. A missing or invalid ID fails the
+operation instead of sharing an unscoped cache. An explicit `--compilation-cache`
+uses that directory as given, so choose a repository-specific path when overriding
+the default.
+
 To select a custom build service for hosted jobs, save its executable path:
 
 ```sh
@@ -237,8 +244,12 @@ The job-data folder contains:
 | Directory | Contents |
 | --- | --- |
 | `Work/<runner-name>` | Checkouts and temporary job files |
-| `CompilationCache` | Shared compiler cache |
+| `CompilationCache/<repository-ID>` | Compiler cache shared by jobs of that repository |
 | `Build/<operation-UUID>` | DerivedData, logs, and result bundles |
+
+Compiler cache entries from before repository scoping stay in `CompilationCache`
+and are not imported into repository caches. The first build for each repository
+populates its own cache.
 
 Tools and service logs stay under
 `~/Library/Application Support/XcodeRunnerKit`. Runner installations stay under
