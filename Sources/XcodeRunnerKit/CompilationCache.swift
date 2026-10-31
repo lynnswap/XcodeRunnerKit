@@ -12,14 +12,22 @@ extension URL {
 
 /// Shares compiler outputs while keeping each job's build database isolated.
 public struct CompilationCache: Sendable {
-    /// The shared CAS directory. A run creates it when it is missing, but not its ancestors.
+    /// The shared CAS directory. A run creates it when it is missing.
     public var directory: URL
     /// Extra locations, such as a SwiftPM checkout directory outside the workspace.
     public var prefixMappings: [PrefixMapping] = []
     public var enablesDiagnosticRemarks = false
+    let parentDirectory: URL?
 
+    /// Uses the supplied directory without creating missing ancestors.
     public init(directory: URL) {
         self.directory = directory
+        self.parentDirectory = nil
+    }
+
+    package init(directory: URL, namespace: String) {
+        self.directory = directory.appending(path: namespace, directoryHint: .isDirectory)
+        self.parentDirectory = directory
     }
 
     /// A physical source prefix and its stable compiler-visible replacement.

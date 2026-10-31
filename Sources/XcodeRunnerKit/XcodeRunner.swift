@@ -160,6 +160,9 @@ public struct XcodeRunner: Sendable {
             var commandSource = request.source
             var commandDerivedData = derived
             if let cache = request.compilationCache {
+                if let parent = cache.parentDirectory {
+                    try Self.createDirectory(parent, ifMissing: true)
+                }
                 try Self.createDirectory(cache.directory, ifMissing: true)
                 try FileManager.default.createDirectory(at: derived, withIntermediateDirectories: request.derivedDataDirectory != nil)
                 commandSource = try request.source.canonicalized()
