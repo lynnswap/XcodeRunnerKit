@@ -435,11 +435,7 @@ final class HostSettingsModel: HostSettingsDisplay {
             switch request {
             case .read: break
             case .configurePool(let changes): try await applyManagingHostChanges(changes)
-            case .saveStorage(let directory):
-                guard canEditStorage else {
-                    throw HostSettingsError("\(HostPane.macName) cannot save a storage folder now. Try again in a moment.")
-                }
-                _ = try await saveStorageDirectory(directory)
+            case .saveStorage(let directory): try await saveManagingHostStorage(directory)
             }
             return .settings(HostSettingsReport(self))
         } catch {
@@ -467,6 +463,14 @@ final class HostSettingsModel: HostSettingsDisplay {
             if previousCapacity != saved.maximumConcurrentJobs { await github.synchronize() }
             isSaving = false
         }
+    }
+
+    // With this guard's `throw` inline in `answer(_:)`, the Xcode 27.1 optimizer crashes while compiling it for Release.
+    private func saveManagingHostStorage(_ directory: String) async throws(HostSettingsError) {
+        guard canEditStorage else {
+            throw HostSettingsError("\(HostPane.macName) cannot save a storage folder now. Try again in a moment.")
+        }
+        _ = try await saveStorageDirectory(directory)
     }
 
     private func savePoolConfiguration(_ changes: PoolSettingsDraft.Changes) async throws -> HostExecutionPool.Configuration {
