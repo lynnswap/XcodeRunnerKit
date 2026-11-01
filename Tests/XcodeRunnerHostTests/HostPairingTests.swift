@@ -3,6 +3,7 @@ import Foundation
 import Network
 import Security
 import Testing
+import XcodeRunnerHostSupport
 @testable import XcodeRunnerHostApp
 
 @MainActor @Suite(.timeLimit(.minutes(1)))
@@ -36,10 +37,22 @@ struct HostPairingTests {
 
     private func publicKey() -> Data { Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation }
 
+    /// A Mac whose settings answer the managing host, as in the app.
+    private func managedMac(store: MemorySecretStore = MemorySecretStore(), at root: URL) -> HostSettingsModel {
+        HostSettingsModel(
+            installation: HostInstallation(homeDirectory: root.appending(path: "Home")),
+            management: HostManagement(store: store, name: "Managed", advertises: false),
+            managedMacs: ManagedMacs(store: MemorySecretStore(), name: "Managed", browses: false)
+        )
+    }
+
     @Test func pairedMacsConnectUntilTheManagingHostRemovesTheMac() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
         let managedStore = MemorySecretStore()
         let managerStore = MemorySecretStore()
-        let management = HostManagement(store: managedStore, name: "Managed", advertises: false)
+        let managed = managedMac(store: managedStore, at: root)
+        let management = managed.management
         let macs = ManagedMacs(store: managerStore, name: "Manager", browses: false)
 
         let mac = try await pair(macs, with: management)
@@ -62,6 +75,59 @@ struct HostPairingTests {
         #expect(HostManagement(store: managedStore, name: "Managed", advertises: false).manager == nil)
 
         await management.shutDown()
+        await macs.shutDown()
+    }
+
+    @Test func theManagingHostReadsAndChangesAPairedMacsSettings() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let managed = managedMac(at: root)
+        let macs = ManagedMacs(store: MemorySecretStore(), name: "Manager", browses: false)
+        let mac = try await pair(macs, with: managed.management)
+        await managed.configureDefaultPool()
+        await managed.refreshPoolStatus()
+        try await waitUntil { managed.management.managementPort != nil }
+        let endpoint = try local(managed.management.managementPort)
+
+        await macs.checkStatus(of: mac.id, at: endpoint)
+        let settings = try #require(macs.settings[mac.id])
+        #expect(macs.status(of: mac.id) == .online)
+        #expect(settings.report?.poolStatus?.configuration.maximumConcurrentJobs == HostInstallation.defaultMaximumConcurrentJobs)
+        #expect(settings.poolDraft.capacityInput == String(HostInstallation.defaultMaximumConcurrentJobs))
+
+        settings.poolDraft.capacityInput = "0"
+        await macs.applyPoolConfiguration(of: mac.id)
+        #expect(settings.saveError == "Enter a positive whole number of concurrent jobs.")
+        settings.poolDraft.capacityInput = "3"
+        settings.poolDraft.keepsSimulatorsForever = true
+        await macs.applyPoolConfiguration(of: mac.id)
+        #expect(settings.saveError == nil)
+        #expect(try managed.pool.configuration() == .init(maximumConcurrentJobs: 3, simulatorRetention: .forever))
+        #expect(settings.report?.poolStatus?.configuration.maximumConcurrentJobs == 3)
+        // The Mac's own window shows the change, as it does for any change it did not make.
+        #expect(managed.poolDraft.capacityInput == "3")
+
+        settings.storageDirectoryInput = "Storage"
+        await macs.saveStorageDirectory(of: mac.id)
+        #expect(settings.storageSaveError == "Enter an absolute folder path.")
+        let storage = root.appending(path: "Storage")
+        try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+        settings.storageDirectoryInput = storage.path(percentEncoded: false)
+        await macs.saveStorageDirectory(of: mac.id)
+        #expect(settings.storageSaveError == nil)
+        #expect(managed.savedStorageDirectory == (try managed.installation.requestedStorageDirectory()))
+        #expect(settings.report?.savedStorageDirectory == managed.savedStorageDirectory)
+
+        // A Mac that stops answering keeps only when its settings were last read.
+        let readAt = settings.readAt
+        await managed.management.shutDown()
+        await macs.checkStatus(of: mac.id, at: endpoint)
+        guard case .unreachable = macs.status(of: mac.id) else {
+            Issue.record("Expected the Mac to be unreachable, not \(macs.status(of: mac.id))")
+            return
+        }
+        #expect(settings.readAt == readAt)
+
         await macs.shutDown()
     }
 
@@ -225,7 +291,7 @@ struct HostPairingTests {
             to: try local(management.managementPort),
             using: HostLink.clientParameters(key: mac.pairing.symmetricKey, identity: mac.id.uuidString)
         )
-        try await connection.send(HostLinkRequest.status)
+        try await connection.send(HostLinkRequest.settings(.read))
         _ = try await connection.receive()
 
         // Without ECDHE, anyone who records the connections can read them once the pairing key leaks.

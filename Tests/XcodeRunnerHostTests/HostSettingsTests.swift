@@ -22,9 +22,9 @@ struct HostSettingsTests {
         #expect(settings.hasLoadedPoolStatus)
         #expect(settings.poolStatus == nil)
         #expect(settings.savedSimulatorRetention == .idleTimeout(minutes: 20))
-        #expect(settings.simulatorIdleRetentionInput == "20")
+        #expect(settings.poolDraft.simulatorIdleRetentionInput == "20")
         #expect(!FileManager.default.fileExists(atPath: settings.pool.directory.path()))
-        settings.capacityInput = "6"
+        settings.poolDraft.capacityInput = "6"
         await settings.applyPoolConfiguration()
         #expect(settings.saveError == nil)
         #expect(settings.poolStatus?.configuration.maximumConcurrentJobs == 6)
@@ -56,9 +56,9 @@ struct HostSettingsTests {
         let settings = HostSettingsModel(installation: installation)
         await settings.refreshPoolStatus()
         settings.github.selectedRepositoryIDs = []
-        settings.capacityInput = "2"
-        settings.keepsSimulatorsForever = true
-        settings.simulatorIdleRetentionInput = "not used for indefinite retention"
+        settings.poolDraft.capacityInput = "2"
+        settings.poolDraft.keepsSimulatorsForever = true
+        settings.poolDraft.simulatorIdleRetentionInput = "not used for indefinite retention"
 
         await settings.applyPoolConfiguration()
 
@@ -70,8 +70,8 @@ struct HostSettingsTests {
         #expect(try GitHubHostConfiguration.load(from: record).repositories == [repository])
         let reopened = model(at: root)
         await reopened.refreshPoolStatus()
-        #expect(reopened.keepsSimulatorsForever)
-        #expect(reopened.capacityInput == "2")
+        #expect(reopened.poolDraft.keepsSimulatorsForever)
+        #expect(reopened.poolDraft.capacityInput == "2")
     }
 
     @Test func retentionRefreshPreservesEditsAndShowsExternalChanges() async throws {
@@ -79,20 +79,20 @@ struct HostSettingsTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let settings = model(at: root)
         try await settings.pool.configure(maximumConcurrentJobs: 2, simulatorRetention: .idleTimeout(minutes: 30))
-        settings.simulatorIdleRetentionInput = "5"
+        settings.poolDraft.simulatorIdleRetentionInput = "5"
         await settings.refreshPoolStatus()
         #expect(settings.savedSimulatorRetention == .idleTimeout(minutes: 30))
-        #expect(settings.simulatorIdleRetentionInput == "5")
+        #expect(settings.poolDraft.simulatorIdleRetentionInput == "5")
         try await settings.pool.configure(simulatorRetention: .forever)
         await settings.refreshPoolStatus()
         #expect(settings.savedSimulatorRetention == .forever)
-        #expect(!settings.keepsSimulatorsForever)
-        #expect(settings.simulatorIdleRetentionInput == "5")
+        #expect(!settings.poolDraft.keepsSimulatorsForever)
+        #expect(settings.poolDraft.simulatorIdleRetentionInput == "5")
         await settings.applyPoolConfiguration()
         #expect(settings.savedSimulatorRetention == .idleTimeout(minutes: 5))
         try await settings.pool.configure(simulatorRetention: .forever)
         await settings.refreshPoolStatus()
-        #expect(settings.keepsSimulatorsForever)
+        #expect(settings.poolDraft.keepsSimulatorsForever)
     }
 
     @Test func retentionApplyPreservesUneditedCapacityChangedBeforeTheNextRefresh() async throws {
@@ -101,14 +101,14 @@ struct HostSettingsTests {
         let settings = model(at: root)
         try await settings.pool.configure(maximumConcurrentJobs: 4)
         await settings.refreshPoolStatus()
-        settings.simulatorIdleRetentionInput = "30"
+        settings.poolDraft.simulatorIdleRetentionInput = "30"
         try await settings.pool.configure(maximumConcurrentJobs: 2)
 
         await settings.applyPoolConfiguration()
 
         #expect(settings.saveError == nil)
         #expect(try settings.pool.configuration() == .init(maximumConcurrentJobs: 2, simulatorRetention: .idleTimeout(minutes: 30)))
-        #expect(settings.capacityInput == "2")
+        #expect(settings.poolDraft.capacityInput == "2")
     }
 
     @Test func invalidIdleRetentionInputDoesNotPartiallyApplyCapacity() async throws {
@@ -117,14 +117,14 @@ struct HostSettingsTests {
         let settings = model(at: root)
         try await settings.pool.configure(maximumConcurrentJobs: 2, simulatorRetention: .idleTimeout(minutes: 15))
         await settings.refreshPoolStatus()
-        settings.capacityInput = "3"
-        settings.simulatorIdleRetentionInput = "0"
+        settings.poolDraft.capacityInput = "3"
+        settings.poolDraft.simulatorIdleRetentionInput = "0"
         await settings.applyPoolConfiguration()
         #expect(settings.saveError != nil)
         #expect(try settings.pool.configuration()?.maximumConcurrentJobs == 2)
         #expect(try settings.pool.configuration()?.simulatorRetention == .idleTimeout(minutes: 15))
         #expect(!settings.isSaving)
-        settings.simulatorIdleRetentionInput = "10"
+        settings.poolDraft.simulatorIdleRetentionInput = "10"
         await settings.applyPoolConfiguration()
         #expect(settings.saveError == nil)
         #expect(settings.savedSimulatorRetention == .idleTimeout(minutes: 10))
@@ -134,18 +134,18 @@ struct HostSettingsTests {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         let settings = model(at: root)
         await settings.refreshPoolStatus()
-        settings.capacityInput = "6"
+        settings.poolDraft.capacityInput = "6"
         await settings.applyPoolConfiguration()
-        settings.capacityInput = "3"
+        settings.poolDraft.capacityInput = "3"
         try await settings.pool.configure(maximumConcurrentJobs: 4)
         await settings.refreshPoolStatus()
         #expect(settings.poolStatus?.configuration.maximumConcurrentJobs == 4)
-        #expect(settings.capacityInput == "3")
+        #expect(settings.poolDraft.capacityInput == "3")
         await settings.applyPoolConfiguration()
         #expect(settings.poolStatus?.configuration.maximumConcurrentJobs == 3)
         try await settings.pool.configure(maximumConcurrentJobs: 2)
         await settings.refreshPoolStatus()
-        #expect(settings.capacityInput == "2")
+        #expect(settings.poolDraft.capacityInput == "2")
         try FileManager.default.removeItem(at: root)
     }
 
@@ -153,12 +153,12 @@ struct HostSettingsTests {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         let settings = model(at: root)
         try await settings.pool.configure(maximumConcurrentJobs: 6)
-        settings.capacityInput = "3"
+        settings.poolDraft.capacityInput = "3"
         await settings.applyPoolConfiguration()
         #expect(!settings.hasLoadedPoolStatus)
         await settings.refreshPoolStatus()
         #expect(settings.poolStatus?.configuration.maximumConcurrentJobs == 6)
-        #expect(settings.capacityInput == "3")
+        #expect(settings.poolDraft.capacityInput == "3")
         await settings.applyPoolConfiguration()
         #expect(settings.poolStatus?.configuration.maximumConcurrentJobs == 3)
         try FileManager.default.removeItem(at: root)
@@ -170,13 +170,13 @@ struct HostSettingsTests {
         await settings.refreshPoolStatus()
         await settings.applyPoolConfiguration()
         for input in ["0", "-1", "1.5", ""] {
-            settings.capacityInput = input
+            settings.poolDraft.capacityInput = input
             await settings.applyPoolConfiguration()
             #expect(settings.saveError != nil)
             #expect(settings.poolStatus?.configuration.maximumConcurrentJobs == 4)
             #expect(!settings.isSaving)
         }
-        settings.capacityInput = "2"
+        settings.poolDraft.capacityInput = "2"
         await settings.applyPoolConfiguration()
         #expect(settings.saveError == nil)
         #expect(settings.poolStatus?.configuration.maximumConcurrentJobs == 2)
@@ -197,7 +197,7 @@ struct HostSettingsTests {
         try FileManager.default.removeItem(at: lock)
         try FileManager.default.createDirectory(at: lock, withIntermediateDirectories: false)
         settings.github.selectedRepositoryIDs = []
-        settings.capacityInput = "6"
+        settings.poolDraft.capacityInput = "6"
 
         await settings.applyPoolConfiguration()
 
@@ -222,7 +222,7 @@ struct HostSettingsTests {
         try await settings.pool.configure(maximumConcurrentJobs: 4)
         await settings.refreshPoolStatus()
         settings.github.selectedRepositoryIDs = []
-        settings.capacityInput = "6"
+        settings.poolDraft.capacityInput = "6"
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: installation.hostRoot.path(percentEncoded: false))
 
         await settings.applyPoolConfiguration()
@@ -239,7 +239,7 @@ struct HostSettingsTests {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         let settings = model(at: root)
         await settings.refreshPoolStatus()
-        settings.capacityInput = "2"
+        settings.poolDraft.capacityInput = "2"
         await settings.applyPoolConfiguration()
         let started = AsyncStream<Void>.makeStream()
         let jobs = (0..<2).map { _ in
@@ -255,7 +255,7 @@ struct HostSettingsTests {
         var events = started.stream.makeAsyncIterator()
         await events.next()
         await events.next()
-        settings.capacityInput = "1"
+        settings.poolDraft.capacityInput = "1"
         await settings.applyPoolConfiguration()
         #expect(settings.poolStatus?.activeJobCount == 2)
         #expect(settings.admissionMessage == "Existing jobs will finish. New jobs wait until the running count falls below the limit.")
@@ -270,7 +270,7 @@ struct HostSettingsTests {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         let settings = model(at: root)
         await settings.refreshPoolStatus()
-        settings.capacityInput = "1"
+        settings.poolDraft.capacityInput = "1"
         await settings.applyPoolConfiguration()
         let started = AsyncStream<Void>.makeStream()
         let finish = AsyncStream<Void>.makeStream()
@@ -295,7 +295,7 @@ struct HostSettingsTests {
         }
         #expect(settings.poolStatus?.activeJobCount == 1)
         #expect(settings.poolStatus?.waitingJobCount == 3)
-        #expect(settings.capacityInput == "1")
+        #expect(settings.poolDraft.capacityInput == "1")
 
         second.cancel()
         do {
@@ -366,7 +366,7 @@ struct HostSettingsTests {
         settings.storageDirectoryInput = alias.path(percentEncoded: false)
         await settings.saveStorageSelection()
         #expect(settings.storageSaveError == nil)
-        #expect(settings.activeStorage?.directory == active.directory)
+        #expect(settings.activeStorageDirectory == active.directory)
         #expect(try installation.storage()?.directory == active.directory)
         #expect(settings.savedStorageDirectory == (try installation.requestedStorageDirectory()))
         #expect(settings.savedStorageDirectory == physicalNext)
@@ -404,7 +404,7 @@ struct HostSettingsTests {
         #expect(settings.storageSaveError != nil)
         #expect(settings.savedStorageDirectory == saved)
         #expect(settings.storageDirectoryInput == next.path(percentEncoded: false))
-        #expect(settings.activeStorage?.directory == active.directory)
+        #expect(settings.activeStorageDirectory == active.directory)
         #expect(settings.hostState == .running)
         #expect(try Data(contentsOf: activeRecord) == malformed)
         #expect(try Data(contentsOf: pendingRecord) == originalPending)
@@ -436,7 +436,7 @@ struct HostSettingsTests {
         await settings.saveStorageSelection()
         #expect(settings.storageSaveError == nil)
         #expect(settings.storageError != nil)
-        #expect(settings.activeStorage == nil)
+        #expect(settings.activeStorageDirectory == nil)
         #expect(settings.hostState == .needsAttention)
     }
 }

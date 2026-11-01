@@ -4,7 +4,7 @@ import SwiftUI
 import XcodeRunnerHostSupport
 import XcodeRunnerKit
 
-enum HostState: String, Sendable {
+enum HostState: String, Codable, Sendable {
     case starting = "Starting"
     case preparingStorage = "Preparing storage"
     case waitingForStorage = "Waiting for storage"
@@ -13,7 +13,7 @@ enum HostState: String, Sendable {
     case stopping = "Stopping"
 }
 
-enum RunnerServiceState: String, Sendable {
+enum RunnerServiceState: String, Codable, Sendable {
     case starting = "Starting"
     case running = "Running"
     case stopped = "Stopped"
@@ -21,7 +21,7 @@ enum RunnerServiceState: String, Sendable {
     case individualService = "Individual service"
 }
 
-struct RunnerSettingsRow: Identifiable, Sendable {
+struct RunnerSettingsRow: Codable, Equatable, Identifiable, Sendable {
     let directory: URL
     let name: String
     let state: RunnerServiceState
@@ -47,8 +47,172 @@ struct RunnerSettingsRow: Identifiable, Sendable {
     }
 }
 
+/// A job limit and Simulator retention being edited, for this Mac or for a Mac that this host manages.
+struct PoolSettingsDraft: Equatable {
+    /// The edited settings. A setting that matches the saved one is `nil`, so Apply leaves its saved value as it is.
+    struct Changes: Codable, Equatable, Sendable {
+        var maximumConcurrentJobs: Int?
+        var simulatorRetention: HostExecutionPool.SimulatorRetention?
+    }
+
+    /// The saved settings that the inputs were last updated from.
+    private(set) var base = HostExecutionPool.Configuration(maximumConcurrentJobs: HostInstallation.defaultMaximumConcurrentJobs)
+    var capacityInput = String(HostInstallation.defaultMaximumConcurrentJobs)
+    var keepsSimulatorsForever = false
+    var simulatorIdleRetentionInput = "20"
+
+    /// Shows newly read settings in the inputs that were not edited.
+    mutating func update(from saved: HostExecutionPool.Configuration?) {
+        let next = saved ?? HostExecutionPool.Configuration(maximumConcurrentJobs: HostInstallation.defaultMaximumConcurrentJobs)
+        if saved != nil, capacityInput == String(base.maximumConcurrentJobs) {
+            capacityInput = String(next.maximumConcurrentJobs)
+        }
+        if shows(base.simulatorRetention) { show(next.simulatorRetention) }
+        base = next
+    }
+
+    /// Shows the settings that Apply saved in every input.
+    mutating func reset(to saved: HostExecutionPool.Configuration) {
+        capacityInput = String(saved.maximumConcurrentJobs)
+        show(saved.simulatorRetention)
+        base = saved
+    }
+
+    /// The edited settings, or the error that the settings window shows for an invalid input.
+    ///
+    /// - Parameter isNewPool: Whether every setting is included, because the pool has none saved.
+    func changes(isNewPool: Bool) throws(HostSettingsError) -> Changes {
+        guard let capacity = Int(capacityInput), capacity > 0 else {
+            throw HostSettingsError("Enter a positive whole number of concurrent jobs.")
+        }
+        let retention: HostExecutionPool.SimulatorRetention
+        if keepsSimulatorsForever {
+            retention = .forever
+        } else {
+            guard let minutes = Int(simulatorIdleRetentionInput), minutes > 0 else {
+                throw HostSettingsError("Enter a positive whole number of idle minutes.")
+            }
+            retention = .idleTimeout(minutes: minutes)
+        }
+        return Changes(
+            maximumConcurrentJobs: isNewPool || capacity != base.maximumConcurrentJobs ? capacity : nil,
+            simulatorRetention: isNewPool || retention != base.simulatorRetention ? retention : nil
+        )
+    }
+
+    private func shows(_ retention: HostExecutionPool.SimulatorRetention) -> Bool {
+        switch retention {
+        case .forever: keepsSimulatorsForever
+        case .idleTimeout(let minutes): !keepsSimulatorsForever && simulatorIdleRetentionInput == String(minutes)
+        }
+    }
+
+    private mutating func show(_ retention: HostExecutionPool.SimulatorRetention) {
+        switch retention {
+        case .forever: keepsSimulatorsForever = true
+        case .idleTimeout(let minutes):
+            keepsSimulatorsForever = false
+            simulatorIdleRetentionInput = String(minutes)
+        }
+    }
+}
+
+/// A Mac's host status and execution settings, as the settings window shows them for this Mac and for the Macs that
+/// this host manages.
+@MainActor
+protocol HostSettingsDisplay {
+    var hostState: HostState { get }
+    var runners: [RunnerSettingsRow] { get }
+    var runnerScanError: String? { get }
+    var poolStatus: HostExecutionPool.Status? { get }
+    var hasLoadedPoolStatus: Bool { get }
+    var poolError: String? { get }
+    var simulatorPoolError: String? { get }
+    var configurationCleanupError: String? { get }
+    var savedStorageDirectory: URL? { get }
+    var activeStorageDirectory: URL? { get }
+    var storageError: String? { get }
+    var canApplyPoolConfiguration: Bool { get }
+    var canEditStorage: Bool { get }
+}
+
+extension HostSettingsDisplay {
+    /// Whether Apply saves every pool setting, because the pool has none saved.
+    var isNewPool: Bool { poolStatus == nil && poolError == nil }
+
+    var jobSummary: String {
+        guard let status = poolStatus else {
+            if !hasLoadedPoolStatus { return "Checking…" }
+            return poolError == nil ? "Not configured" : "Unavailable"
+        }
+        return "\(status.activeJobCount) running · \(status.waitingJobCount) waiting · Limit \(status.configuration.maximumConcurrentJobs)"
+    }
+
+    var admissionMessage: String {
+        if !hasLoadedPoolStatus { return "Checking the execution pool…" }
+        if poolError != nil { return "The execution pool is unavailable." }
+        guard let poolStatus else { return "Set a limit to configure the shared execution pool." }
+        if poolStatus.activeJobCount > poolStatus.configuration.maximumConcurrentJobs {
+            return "Existing jobs will finish. New jobs wait until the running count falls below the limit."
+        }
+        if poolStatus.activeJobCount == poolStatus.configuration.maximumConcurrentJobs {
+            return "New jobs wait for an available slot."
+        }
+        return "New jobs can start while slots are available."
+    }
+
+    var storageMessage: String {
+        if hostState == .waitingForStorage {
+            return "Runner services start when storage becomes available. Folder changes saved now apply on the next host launch."
+        }
+        if let savedStorageDirectory, savedStorageDirectory != activeStorageDirectory {
+            if activeStorageDirectory == nil { return "Saved for the next host launch." }
+            return "Saved for the next host launch. Running jobs continue using their current storage."
+        }
+        if activeStorageDirectory != nil { return "Runner checkouts, build results, and the shared compiler cache use this folder." }
+        return "Choose one folder for runner checkouts, build results, and the shared compiler cache."
+    }
+}
+
+/// What a Mac sends the host that manages it about its status and settings.
+struct HostSettingsReport: Codable, Equatable, Sendable {
+    let hostState: HostState
+    let runners: [RunnerSettingsRow]
+    let runnerScanError: String?
+    let poolStatus: HostExecutionPool.Status?
+    let hasLoadedPoolStatus: Bool
+    let poolError: String?
+    let simulatorPoolError: String?
+    let configurationCleanupError: String?
+    let savedStorageDirectory: URL?
+    let activeStorageDirectory: URL?
+    let storageError: String?
+    let canApplyPoolConfiguration: Bool
+    let canEditStorage: Bool
+
+    @MainActor init(_ settings: some HostSettingsDisplay) {
+        hostState = settings.hostState
+        runners = settings.runners
+        runnerScanError = settings.runnerScanError
+        poolStatus = settings.poolStatus
+        hasLoadedPoolStatus = settings.hasLoadedPoolStatus
+        poolError = settings.poolError
+        simulatorPoolError = settings.simulatorPoolError
+        configurationCleanupError = settings.configurationCleanupError
+        savedStorageDirectory = settings.savedStorageDirectory
+        activeStorageDirectory = settings.activeStorageDirectory
+        storageError = settings.storageError
+        canApplyPoolConfiguration = settings.canApplyPoolConfiguration
+        canEditStorage = settings.canEditStorage
+    }
+}
+
+// Conforming in the type's declaration would isolate the report to the main actor, where network connections do not
+// encode and decode it.
+extension HostSettingsReport: HostSettingsDisplay {}
+
 @MainActor @Observable
-final class HostSettingsModel {
+final class HostSettingsModel: HostSettingsDisplay {
     let installation: HostInstallation
     let pool: HostExecutionPool
     let github: GitHubHostSettings
@@ -67,11 +231,8 @@ final class HostSettingsModel {
     private(set) var configurationCleanupError: String?
     private(set) var isSaving = false
     private(set) var hasLoadedPoolStatus = false
-    private var poolDraftBase = HostExecutionPool.Configuration(maximumConcurrentJobs: HostInstallation.defaultMaximumConcurrentJobs)
-    var capacityInput = String(HostInstallation.defaultMaximumConcurrentJobs)
-    var keepsSimulatorsForever = false
-    var simulatorIdleRetentionInput = "20"
-    private(set) var activeStorage: HostInstallation.Storage?
+    var poolDraft = PoolSettingsDraft()
+    private(set) var activeStorageDirectory: URL?
     private(set) var storageError: String?
     private(set) var storageSaveError: String?
     private(set) var savedStorageDirectory: URL?
@@ -99,22 +260,12 @@ final class HostSettingsModel {
         } catch {
             storageSaveError = "Could not read the saved storage folder: \(error.localizedDescription)"
         }
-    }
-
-    var storageMessage: String {
-        if hostState == .waitingForStorage {
-            return "Runner services start when storage becomes available. Folder changes saved now apply on the next host launch."
-        }
-        if let savedStorageDirectory, savedStorageDirectory != activeStorage?.directory {
-            if activeStorage == nil { return "Saved for the next host launch." }
-            return "Saved for the next host launch. Running jobs continue using their current storage."
-        }
-        if activeStorage != nil { return "Runner checkouts, build results, and the shared compiler cache use this folder." }
-        return "Choose one folder for runner checkouts, build results, and the shared compiler cache."
+        // The managing host reads and changes this Mac's settings through the owner of this Mac's window.
+        self.management.settings = self
     }
 
     func storageDidBecomeAvailable(_ storage: HostInstallation.Storage) {
-        activeStorage = storage
+        activeStorageDirectory = storage.directory
         github.storageIsReady = true
         storageError = nil
         if savedStorageDirectory == nil {
@@ -140,19 +291,28 @@ final class HostSettingsModel {
 
     func saveStorageSelection() async {
         guard canEditStorage else { return }
-        guard storageDirectoryInput.hasPrefix("/") else {
-            storageSaveError = "Enter an absolute folder path or choose a folder."
-            return
+        do {
+            storageDirectoryInput = try await saveStorageDirectory(storageDirectoryInput).path(percentEncoded: false)
+            storageSaveError = nil
+        } catch {
+            storageSaveError = error.localizedDescription
         }
+    }
+
+    /// Saves a storage folder from this Mac's window or from the managing host.
+    private func saveStorageDirectory(_ path: String) async throws(HostSettingsError) -> URL {
+        // The managing host's pane cannot choose a folder on this Mac, so the message offers only a path.
+        guard path.hasPrefix("/") else { throw HostSettingsError("Enter an absolute folder path.") }
+        let previous = savedStorageDirectory?.path(percentEncoded: false) ?? ""
         isSavingStorage = true
         defer { isSavingStorage = false }
         do {
-            let directory = try await settingsService.requestStorageDirectory(URL(filePath: storageDirectoryInput))
+            let directory = try await settingsService.requestStorageDirectory(URL(filePath: path))
             savedStorageDirectory = directory
-            storageDirectoryInput = directory.path(percentEncoded: false)
-            storageSaveError = nil
+            if storageDirectoryInput == previous { storageDirectoryInput = directory.path(percentEncoded: false) }
+            return directory
         } catch {
-            storageSaveError = "Could not save the storage folder: \(error.localizedDescription)"
+            throw HostSettingsError("Could not save the storage folder: \(error.localizedDescription)")
         }
     }
 
@@ -178,19 +338,6 @@ final class HostSettingsModel {
     /// A Mac either manages other Macs or is managed by one, so that one host owns each Mac's settings.
     var canAllowManagement: Bool { managedMacs.macs.isEmpty }
     var canAddMacs: Bool { management.manager == nil && management.pairingWindow == nil }
-
-    var admissionMessage: String {
-        if !hasLoadedPoolStatus { return "Checking the execution pool…" }
-        if poolError != nil { return "The execution pool is unavailable." }
-        guard let poolStatus else { return "Set a limit to configure the shared execution pool." }
-        if poolStatus.activeJobCount > poolStatus.configuration.maximumConcurrentJobs {
-            return "Existing jobs will finish. New jobs wait until the running count falls below the limit."
-        }
-        if poolStatus.activeJobCount == poolStatus.configuration.maximumConcurrentJobs {
-            return "New jobs wait for an available slot."
-        }
-        return "New jobs can start while slots are available."
-    }
 
     func trimSimulatorPool() async {
         do {
@@ -219,29 +366,12 @@ final class HostSettingsModel {
 
     func refreshPoolStatus() async {
         refreshStorageSelection()
-        let previousCapacity = String(poolDraftBase.maximumConcurrentJobs)
-        let capacityDraft = capacityInput
-        let retentionDraft = (keepsSimulatorsForever, simulatorIdleRetentionInput)
-        let previousRetention = poolDraftBase.simulatorRetention
-        let retentionWasUnedited: Bool
-        switch previousRetention {
-        case .forever: retentionWasUnedited = keepsSimulatorsForever
-        case .idleTimeout(let minutes):
-            retentionWasUnedited = !keepsSimulatorsForever && simulatorIdleRetentionInput == String(minutes)
-        }
         do {
             let status = try await pool.status()
             poolStatus = status
             poolError = nil
             hasLoadedPoolStatus = true
-            poolDraftBase = status?.configuration ?? .init(maximumConcurrentJobs: HostInstallation.defaultMaximumConcurrentJobs)
-            if capacityDraft == previousCapacity, capacityInput == capacityDraft, let status {
-                capacityInput = String(status.configuration.maximumConcurrentJobs)
-            }
-            if retentionWasUnedited,
-               keepsSimulatorsForever == retentionDraft.0, simulatorIdleRetentionInput == retentionDraft.1 {
-                updateRetentionDraft(from: savedSimulatorRetention)
-            }
+            poolDraft.update(from: status?.configuration)
         } catch is CancellationError {
             return
         } catch {
@@ -263,15 +393,6 @@ final class HostSettingsModel {
         }
     }
 
-    private func updateRetentionDraft(from retention: HostExecutionPool.SimulatorRetention) {
-        switch retention {
-        case .forever: keepsSimulatorsForever = true
-        case .idleTimeout(let minutes):
-            keepsSimulatorsForever = false
-            simulatorIdleRetentionInput = String(minutes)
-        }
-    }
-
     /// Saves the default limit on a new host, so runners can register and jobs can start before the limit is edited.
     func configureDefaultPool() async {
         do {
@@ -287,43 +408,81 @@ final class HostSettingsModel {
 
     func applyPoolConfiguration() async {
         guard canApplyPoolConfiguration else { return }
-        guard let capacity = Int(capacityInput), capacity > 0 else {
-            saveError = "Enter a positive whole number of concurrent jobs."
+        let changes: PoolSettingsDraft.Changes
+        do {
+            changes = try poolDraft.changes(isNewPool: isNewPool)
+        } catch {
+            saveError = error.localizedDescription
             return
         }
-        let retention: HostExecutionPool.SimulatorRetention
-        if keepsSimulatorsForever {
-            retention = .forever
-        } else {
-            guard let minutes = Int(simulatorIdleRetentionInput), minutes > 0 else {
-                saveError = "Enter a positive whole number of idle minutes."
-                return
-            }
-            retention = .idleTimeout(minutes: minutes)
-        }
         let previousCapacity = poolStatus?.configuration.maximumConcurrentJobs
-        let isNewPool = poolStatus == nil && poolError == nil
-        let maximumPatch = isNewPool || capacity != poolDraftBase.maximumConcurrentJobs ? capacity : nil
-        let retentionPatch = isNewPool || retention != poolDraftBase.simulatorRetention ? retention : nil
         isSaving = true
         defer { isSaving = false }
         do {
-            let saved: HostExecutionPool.Configuration
-            do {
-                saved = try await settingsService.configurePool(maximumConcurrentJobs: maximumPatch, simulatorRetention: retentionPatch)
-                configurationCleanupError = nil
-            } catch let failure as HostExecutionPool.ConfigurationCleanupFailure {
-                saved = failure.savedConfiguration
-                configurationCleanupError = failure.localizedDescription
-            }
+            let saved = try await savePoolConfiguration(changes)
             saveError = nil
-            capacityInput = String(saved.maximumConcurrentJobs)
-            updateRetentionDraft(from: saved.simulatorRetention)
-            poolDraftBase = saved
+            poolDraft.reset(to: saved)
             await refreshPoolStatus()
             if previousCapacity != saved.maximumConcurrentJobs { await github.synchronize() }
         } catch {
             saveError = "Could not save the execution pool settings: \(error.localizedDescription)"
+        }
+    }
+
+    /// Answers the managing host's request to read or change this Mac's settings, the way this Mac's window does.
+    func answer(_ request: HostSettingsRequest) async -> HostLinkReply {
+        do {
+            switch request {
+            case .read: break
+            case .configurePool(let changes): try await applyManagingHostChanges(changes)
+            case .saveStorage(let directory): try await saveManagingHostStorage(directory)
+            }
+            return .settings(HostSettingsReport(self))
+        } catch {
+            return .refused(error.localizedDescription)
+        }
+    }
+
+    /// Applies the managing host's changes. Returns once they are saved, and registers runners for a changed limit
+    /// afterwards, because registration can outlast the managing host's request.
+    private func applyManagingHostChanges(_ changes: PoolSettingsDraft.Changes) async throws(HostSettingsError) {
+        guard canApplyPoolConfiguration else {
+            throw HostSettingsError("\(HostPane.macName) cannot apply these settings now. Try again in a moment.")
+        }
+        let previousCapacity = poolStatus?.configuration.maximumConcurrentJobs
+        isSaving = true
+        let saved: HostExecutionPool.Configuration
+        do {
+            saved = try await savePoolConfiguration(changes)
+        } catch {
+            isSaving = false
+            throw HostSettingsError("Could not save the execution pool settings: \(error.localizedDescription)")
+        }
+        await refreshPoolStatus()
+        Task {
+            if previousCapacity != saved.maximumConcurrentJobs { await github.synchronize() }
+            isSaving = false
+        }
+    }
+
+    // With this guard's `throw` inline in `answer(_:)`, the Xcode 27.1 optimizer crashes while compiling it for Release.
+    private func saveManagingHostStorage(_ directory: String) async throws(HostSettingsError) {
+        guard canEditStorage else {
+            throw HostSettingsError("\(HostPane.macName) cannot save a storage folder now. Try again in a moment.")
+        }
+        _ = try await saveStorageDirectory(directory)
+    }
+
+    private func savePoolConfiguration(_ changes: PoolSettingsDraft.Changes) async throws -> HostExecutionPool.Configuration {
+        do {
+            let saved = try await settingsService.configurePool(
+                maximumConcurrentJobs: changes.maximumConcurrentJobs, simulatorRetention: changes.simulatorRetention
+            )
+            configurationCleanupError = nil
+            return saved
+        } catch let failure as HostExecutionPool.ConfigurationCleanupFailure {
+            configurationCleanupError = failure.localizedDescription
+            return failure.savedConfiguration
         }
     }
 }
@@ -336,79 +495,135 @@ struct HostMacSettingsView: View {
         Form {
             // A managing host's changes to this Mac's settings appear below, so who manages the Mac comes first.
             HostManagementSection(model: model)
-            Section {
-                if model.runners.isEmpty {
-                    Text(model.storageError == nil ? "No runners have opted in to this host." : "Runner services have not started because storage needs attention.")
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(model.runners) { runner in
-                    VStack(alignment: .leading, spacing: 4) {
-                        LabeledContent(runner.name, value: runner.state.rawValue)
-                        if runner.state == .individualService {
-                            Text("This runner uses its individual service. The host does not start another service for it.")
-                                .font(.callout).foregroundStyle(.secondary)
-                        }
-                        if let error = runner.configurationError { ErrorText(error) }
-                    }
-                }
-                if let error = model.runnerScanError { ErrorText(error) }
-            } header: {
-                Text("Runner Services")
-            } footer: {
+            RunnerServicesSection(settings: model) {
                 Text("Processes on this Mac. Overview shows each repository's connection and job counts from GitHub.")
             }
-            Section {
-                TextField("Maximum concurrent jobs", text: $model.capacityInput)
-                    .disabled(model.isSaving)
-                    .accessibilityIdentifier("execution-limit")
-                Picker("Idle Simulators", selection: $model.keepsSimulatorsForever) {
-                    Text("Remove after an idle period").tag(false)
-                    Text("Keep indefinitely").tag(true)
-                }
-                .disabled(model.isSaving)
-                .accessibilityIdentifier("simulator-retention-mode")
-                if !model.keepsSimulatorsForever {
-                    TextField("Idle retention (minutes)", text: $model.simulatorIdleRetentionInput)
-                        .disabled(model.isSaving)
-                        .accessibilityIdentifier("simulator-idle-retention")
-                }
-                HStack {
-                    Spacer()
-                    Button(model.isSaving ? "Applying…" : "Apply") {
-                        Task { await model.applyPoolConfiguration() }
-                    }
-                    .disabled(!model.canApplyPoolConfiguration)
-                    .accessibilityIdentifier("apply-pool-configuration")
-                }
-                if let error = model.poolError { ErrorText(error) }
-                if let error = model.saveError { ErrorText(error) }
-                if let error = model.configurationCleanupError { ErrorText(error) }
-                if let error = model.simulatorPoolError { ErrorText(error) }
-            } header: {
-                Text("Xcode Execution")
-            } footer: {
-                Text("The limit is shared by all repositories, and each repository registers that many runners. Running jobs finish before a lower limit applies. Idle Simulators stay booted for reuse until their retention ends.")
+            XcodeExecutionSection(
+                settings: model, draft: $model.poolDraft, isSaving: model.isSaving, canApply: model.canApplyPoolConfiguration,
+                saveError: model.saveError
+            ) {
+                Task { await model.applyPoolConfiguration() }
             }
-            Section {
-                TextField("Storage folder", text: $model.storageDirectoryInput, prompt: Text("Not chosen"))
-                    .accessibilityIdentifier("storage-folder")
-                    .disabled(!model.canEditStorage)
-                HStack {
-                    Spacer()
-                    Button("Choose…") { Task { await model.chooseStorageDirectory() } }
-                        .accessibilityIdentifier("choose-storage-folder")
-                    Button(model.isSavingStorage ? "Saving…" : "Save") { Task { await model.saveStorageSelection() } }
-                        .accessibilityIdentifier("save-storage-folder")
-                }
-                .disabled(!model.canEditStorage)
-                Text(model.storageMessage).foregroundStyle(.secondary)
-                if let error = model.storageError { ErrorText(error) }
-                if let error = model.storageSaveError { ErrorText(error) }
-            } header: {
-                Text("Storage")
-            } footer: {
-                Text("A changed folder is applied before runners start on the next launch. Existing data is copied and its original files are kept. Stop other tools that use these files before restarting the host.")
+            StorageSection(
+                settings: model, directory: $model.storageDirectoryInput, isSaving: model.isSavingStorage,
+                saveError: model.storageSaveError, choose: { Task { await model.chooseStorageDirectory() } }
+            ) {
+                Task { await model.saveStorageSelection() }
             }
         }
     }
+}
+
+/// A Mac's runner services, in its own window or in the managing host's pane for it.
+@MainActor
+struct RunnerServicesSection<Settings: HostSettingsDisplay, Footer: View>: View {
+    let settings: Settings
+    @ViewBuilder let footer: Footer
+
+    var body: some View {
+        Section {
+            if settings.runners.isEmpty {
+                Text(settings.storageError == nil ? "No runners have opted in to this host." : "Runner services have not started because storage needs attention.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(settings.runners) { runner in
+                VStack(alignment: .leading, spacing: 4) {
+                    LabeledContent(runner.name, value: runner.state.rawValue)
+                    if runner.state == .individualService {
+                        Text("This runner uses its individual service. The host does not start another service for it.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                    if let error = runner.configurationError { ErrorText(error) }
+                }
+            }
+            if let error = settings.runnerScanError { ErrorText(error) }
+        } header: {
+            Text("Runner Services")
+        } footer: {
+            footer
+        }
+    }
+}
+
+/// A Mac's job limit and Simulator retention, in its own window or in the managing host's pane for it.
+@MainActor
+struct XcodeExecutionSection<Settings: HostSettingsDisplay>: View {
+    let settings: Settings
+    @Binding var draft: PoolSettingsDraft
+    let isSaving: Bool
+    let canApply: Bool
+    let saveError: String?
+    let apply: () -> Void
+
+    var body: some View {
+        Section {
+            TextField("Maximum concurrent jobs", text: $draft.capacityInput)
+                .disabled(isSaving)
+                .accessibilityIdentifier("execution-limit")
+            Picker("Idle Simulators", selection: $draft.keepsSimulatorsForever) {
+                Text("Remove after an idle period").tag(false)
+                Text("Keep indefinitely").tag(true)
+            }
+            .disabled(isSaving)
+            .accessibilityIdentifier("simulator-retention-mode")
+            if !draft.keepsSimulatorsForever {
+                TextField("Idle retention (minutes)", text: $draft.simulatorIdleRetentionInput)
+                    .disabled(isSaving)
+                    .accessibilityIdentifier("simulator-idle-retention")
+            }
+            HStack {
+                Spacer()
+                Button(isSaving ? "Applying…" : "Apply", action: apply)
+                    .disabled(!canApply)
+                    .accessibilityIdentifier("apply-pool-configuration")
+            }
+            if let error = settings.poolError { ErrorText(error) }
+            if let saveError { ErrorText(saveError) }
+            if let error = settings.configurationCleanupError { ErrorText(error) }
+            if let error = settings.simulatorPoolError { ErrorText(error) }
+        } header: {
+            Text("Xcode Execution")
+        } footer: {
+            Text("The limit is shared by all repositories, and each repository registers that many runners. Running jobs finish before a lower limit applies. Idle Simulators stay booted for reuse until their retention ends.")
+        }
+    }
+}
+
+/// A Mac's storage folder, in its own window or in the managing host's pane for it.
+@MainActor
+struct StorageSection<Settings: HostSettingsDisplay>: View {
+    let settings: Settings
+    @Binding var directory: String
+    let isSaving: Bool
+    let saveError: String?
+    /// Chooses a folder on this Mac. The managing host's pane has no folder panel for another Mac.
+    let choose: (() -> Void)?
+    let save: () -> Void
+
+    var body: some View {
+        Section {
+            TextField("Storage folder", text: $directory, prompt: Text("Not chosen"))
+                .accessibilityIdentifier("storage-folder")
+                .disabled(!canEdit)
+            HStack {
+                Spacer()
+                if let choose {
+                    Button("Choose…", action: choose)
+                        .accessibilityIdentifier("choose-storage-folder")
+                }
+                Button(isSaving ? "Saving…" : "Save", action: save)
+                    .accessibilityIdentifier("save-storage-folder")
+            }
+            .disabled(!canEdit)
+            Text(settings.storageMessage).foregroundStyle(.secondary)
+            if let error = settings.storageError { ErrorText(error) }
+            if let saveError { ErrorText(saveError) }
+        } header: {
+            Text("Storage")
+        } footer: {
+            Text("A changed folder is applied before runners start on the next launch. Existing data is copied and its original files are kept. Stop other tools that use these files before restarting the host.")
+        }
+    }
+
+    private var canEdit: Bool { settings.canEditStorage && !isSaving }
 }

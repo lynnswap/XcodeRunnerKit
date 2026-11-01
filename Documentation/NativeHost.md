@@ -165,10 +165,16 @@ If you declined, allow XcodeHomeRunner in **System Settings > Privacy &
 Security > Local Network**.
 
 A Mac either manages other Macs or is managed by one. Each paired Mac's pane
-shows whether the managing Mac can connect to it. **Remove Mac…** ends the
-pairing on both Macs. **Stop Management…** on a managed Mac ends it there; the
-managing Mac then shows that Mac as not found until you remove it. Each Mac
-still keeps its own GitHub sign-in, runner services, and execution settings.
+shows whether the managing Mac can connect to it and, while that Mac answers,
+its host status, runner services, Xcode job counts, job limit, Simulator
+retention, and storage folder. **Apply** and **Save** there change that Mac's
+settings with the same checks as its own window; type the storage folder's path,
+because the managing Mac cannot browse the other Mac's folders. When the Mac
+does not answer, its pane hides these values and shows when they were last
+read. **Remove Mac…** ends the pairing on both Macs. **Stop Management…** on a
+managed Mac ends it there; the managing Mac then shows that Mac as not found
+until you remove it. Each Mac still keeps its own GitHub sign-in and runner
+registrations.
 
 ## Settings from CLI and MCP
 
