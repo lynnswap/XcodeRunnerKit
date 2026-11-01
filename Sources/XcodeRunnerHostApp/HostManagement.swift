@@ -106,7 +106,9 @@ final class HostManagement {
 
     /// Waits for a managing host to ask to pair.
     func allowManagement() {
-        guard pairingWindow == nil, pairingTask == nil else { return }
+        guard pairingWindow == nil else { return }
+        // A window that closed when the Macs paired or the person refused may still be sending its last reply.
+        pairingTask?.task.cancel()
         let window = PairingWindow(expiresAt: .now.addingTimeInterval(Self.pairingDuration))
         pairingWindow = window
         pairingMessage = nil
