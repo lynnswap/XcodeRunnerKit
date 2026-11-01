@@ -13,10 +13,10 @@ derived_data="$output/DerivedData"
 app="$output/XcodeHomeRunner.app"
 mkdir -p "$output"
 if [[ "$team" == "-" ]]; then
-    # The Associated Domains entitlement needs a provisioning profile, so ad-hoc builds omit entitlements.
+    # Xcode adds a debugging entitlement in plain builds; installed hosts do not need it.
     xcodebuild build -quiet -workspace "$workspace" -scheme XcodeHomeRunner \
         -configuration Release -destination 'generic/platform=macOS' -derivedDataPath "$derived_data" \
-        CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- CODE_SIGN_ENTITLEMENTS= CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO
+        CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO
     built="$derived_data/Build/Products/Release/XcodeHomeRunner.app"
 else
     archive="$output/XcodeHomeRunner.xcarchive"

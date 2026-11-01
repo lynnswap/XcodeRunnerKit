@@ -39,12 +39,10 @@ bash Scripts/install-runner-host.sh .build/RunnerHost/XcodeHomeRunner.app
 ```
 
 The build script archives `XcodeRunnerKit.xcworkspace` and exports it for
-Developer ID distribution with Xcode-managed signing. The app has an Associated
-Domains entitlement for its sign-in callback, so the first build lets Xcode
-register the `lynnpd.xcodehomerunner` App ID and create its provisioning
-profile. That App ID belongs to one team. The app, CLI, and installers use the
-fixed `lynnpd.xcodehomerunner` identifiers for the bundle, LaunchAgent, and
-settings service, so a build for another team must change all of them.
+Developer ID distribution with Xcode-managed signing. The app, CLI, and
+installers use the fixed `lynnpd.xcodehomerunner` identifiers for the bundle,
+LaunchAgent, and settings service, so a build with another bundle identifier
+must change all of them.
 
 The installer places the app in `~/Applications` and starts it through a user
 LaunchAgent. An ad-hoc signature (`-`) is not accepted. Use the same team for
@@ -53,10 +51,15 @@ updates so macOS can retain the app's access permissions.
 Hosts installed before the app was renamed from XcodeRunnerHost are migrated by
 the same installer: it stops the `dev.lynnswap.XcodeRunnerHost` service, removes
 its LaunchAgent, and keeps the old app as `XcodeRunnerHost.previous.app`. Runner
-registrations and job data stay in place. GitHub login tokens and the GitHub
-App's client secret are not carried over, because they belong to the old app's
-Keychain items. If the host was connected to GitHub, choose **Create GitHub App…**
-again in settings and sign in; you can then delete the old app on GitHub.
+registrations and job data stay in place. GitHub login tokens are not carried
+over, because they belong to the old app's Keychain items.
+
+Hosts that signed in through a GitHub App created for that host, including
+hosts migrated from XcodeRunnerHost, keep their repository selection but must
+sign in again through the shared app. Follow [Connect GitHub](#connect-github)
+and install the shared app on the same repositories. You can then delete the
+app created for the host on GitHub; this also invalidates the client secret
+that earlier versions saved in Keychain.
 
 Complete Xcode's license acceptance and first-launch setup before starting jobs.
 Xcode installation and setup that requires administrator access remain manual.
@@ -69,25 +72,32 @@ failed download stops the job.
 
 ## Connect GitHub
 
-Click the hammer icon in the menu bar and open **Settings…**.
+Hosts sign in through the shared
+[XcodeHomeRunner GitHub App](https://github.com/apps/xcodehomerunner), so you
+do not create a GitHub App. Click the hammer icon in the menu bar and open
+**Settings…**.
 
-1. Leave **Organization** blank for personal repositories, or enter the
-   organization name for organization repositories. Choose **Create GitHub App…**,
-   then name the app and confirm its creation in the browser. Permissions are
-   filled in automatically.
-2. The installation page opens. Select the repositories this Mac will run.
-3. Return to settings, choose **Sign In…**, and approve access in the browser.
-4. Enter **Maximum concurrent Xcode jobs**, choose the Simulator retention
-   policy, and select **Apply** in the execution settings.
-5. Select the repositories to manage and choose **Apply Repository Selection**.
+1. Choose **Connect GitHub…**. GitHub's device page opens, and settings show a
+   code. Enter the code on that page and authorize the app.
+2. Choose **Add Repositories on GitHub…**, install the app, and select the
+   repositories this Mac will run.
+3. Return to settings and choose **Reload**.
+4. Select the repositories to manage and choose **Apply Repository Selection**.
 
-The app saves its client secret and login tokens in Keychain. It refreshes
-expiring tokens automatically. To change repository access later, choose
-**Install App…**, then **Reload Repositories**.
+Enter only codes shown in these settings. Entering a code that someone else
+sent you gives them access to your repositories as you.
 
-For organization repositories, you need permission to create and install the
-GitHub App in that organization. The signed-in user also needs repository
-administration access to manage runners.
+A new host starts with **Maximum concurrent Xcode jobs** set to 4, so runners
+register without editing the execution settings first. Change the limit and the
+Simulator retention policy there, then select **Apply**.
+
+The app saves login tokens in Keychain and refreshes expiring tokens
+automatically; it stores no client secret. To change repository access later,
+choose **Add Repositories on GitHub…**, then **Reload**.
+
+Installing the app for organization repositories may need approval from an
+organization owner. The signed-in user also needs repository administration
+access to manage runners.
 
 ### What the limit controls
 
@@ -316,12 +326,12 @@ After a Mac reboot, log into the CI account to start its LaunchAgent.
 
 ## Existing GitHub Apps and runners
 
-To use an existing GitHub App, enable **Device Flow** and grant repository
-**Administration: Read and write** and **Metadata: Read-only**. Disable its
-webhook and keep user token expiration enabled. Install it for the repositories,
-then enter its Client ID and app slug under **Existing GitHub App**. Choose
-**Sign In…** and enter the displayed code on GitHub. The slug is the name after
-`github.com/apps/`.
+To sign in through another GitHub App, set its Client ID and slug in
+`GitHubApp.xcodeHomeRunner` (`Sources/XcodeRunnerHostApp/GitHubApp.swift`) and
+build the app. The slug is the name after `github.com/apps/`. The app must
+enable **Device Flow** and grant repository **Administration: Read and write**
+and **Metadata: Read-only**. Disable its webhook and keep user token expiration
+enabled. It needs no client secret or private key.
 
 For manual registration, download the official
 [macOS ARM64 runner v2.338.0](https://github.com/actions/runner/releases/tag/v2.338.0)

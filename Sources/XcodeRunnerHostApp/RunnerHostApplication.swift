@@ -220,6 +220,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             }
         }
         poolMonitoring = Task {
+            // Pool reads and writes can wait for another process's pool lock, so they stay out of runner startup.
+            await settings.configureDefaultPool()
             while !Task.isCancelled {
                 await settings.trimSimulatorPool()
                 await settings.refreshPoolStatus()

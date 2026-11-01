@@ -6,22 +6,9 @@ struct GitHubSettingsView: View {
 
     var body: some View {
         Section("GitHub") {
-            if model.hasPendingApp {
-                Button("Retry Saving App") { model.retrySavingApp() }
-                    .disabled(model.isBusy)
-                    .accessibilityIdentifier("create-github-app")
-            }
             if let account = model.account {
                 LabeledContent("Connected account", value: account.login)
-                HStack {
-                    Button("Reload Repositories") { Task { await model.reloadRepositories() } }
-                        .disabled(!model.canReloadRepositories)
-                    Button("Install App…") { model.installApp() }
-                        .disabled(model.isBusy)
-                    Button("Disconnect") { Task { await model.signOut() } }
-                        .disabled(!model.canDisconnect)
-                }
-                Text("Choose the repositories this Mac should accept jobs from, then apply the selection to register their runners.")
+                Text("Choose the repositories this Mac runs jobs for, then apply the selection to register their runners.")
                     .font(.callout).foregroundStyle(.secondary)
                 ForEach(model.selectableRepositories) { repository in
                     Toggle(repository.fullName, isOn: Binding(
@@ -33,62 +20,50 @@ struct GitHubSettingsView: View {
                     ))
                     .disabled(model.isBusy)
                 }
+                if model.isLoadingRepositories {
+                    ProgressView("Loading repositories…")
+                } else if model.repositories.isEmpty {
+                    Text("To list a repository here, choose Add Repositories on GitHub…, install the app on it, then choose Reload.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
                 if model.selectedRepositoryIDs != model.savedRepositoryIDs {
                     Text("Repository selection has unapplied changes.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
-                Button(model.isSavingSelection ? "Saving…" : "Apply Repository Selection") {
-                    Task { await model.applyRepositorySelection() }
-                }
-                .disabled(model.isBusy || model.isLoadingRepositories)
-                .accessibilityIdentifier("apply-repository-selection")
-                if model.isLoadingRepositories {
-                    ProgressView("Loading repositories…")
-                } else if model.repositories.isEmpty {
-                    Text("Install the app on your account and grant it access to the repositories, then reload this list.")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-                Text("Disconnecting pauses runner management. Existing runner services and jobs continue.")
-                    .font(.callout).foregroundStyle(.secondary)
-            } else {
-                TextField("Organization (optional)", text: $model.organizationInput)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(model.isBusy)
-                Text("Leave blank to create the app on your personal account. For organization repositories, enter the organization that will own the app.")
-                    .font(.callout).foregroundStyle(.secondary)
-                if !model.hasPendingApp {
-                    Button(model.isConnecting ? "Waiting for GitHub…" : "Create GitHub App…") { model.createApp() }
-                        .disabled(model.isBusy)
-                        .accessibilityIdentifier("create-github-app")
-                }
-                Text("Create the GitHub App from your browser. Permissions are filled in automatically, and its credentials are saved in Keychain. Install it on your account, then sign in.")
-                    .font(.callout).foregroundStyle(.secondary)
-                if !model.clientIDInput.isEmpty {
-                    HStack {
-                        Button("Install App…") { model.installApp() }
-                        Button("Sign In…") { model.signIn() }
-                            .accessibilityIdentifier("github-sign-in")
+                HStack {
+                    Button(model.isSavingSelection ? "Saving…" : "Apply Repository Selection") {
+                        Task { await model.applyRepositorySelection() }
                     }
-                    .disabled(model.isBusy)
+                    .disabled(model.isBusy || model.isLoadingRepositories)
+                    .accessibilityIdentifier("apply-repository-selection")
+                    Button("Add Repositories on GitHub…") { model.installApp() }
+                        .disabled(model.isBusy)
+                    Button("Reload") { Task { await model.reloadRepositories() } }
+                        .disabled(!model.canReloadRepositories)
                 }
-            }
-            if model.isConnecting {
+                Button("Disconnect") { Task { await model.signOut() } }
+                    .disabled(!model.canDisconnect)
+                Text("Disconnecting removes this Mac's GitHub sign-in and pauses runner management. Existing runner services and jobs continue.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else if model.isConnecting {
                 if let authorization = model.deviceAuthorization {
-                    LabeledContent("Enter this code on GitHub", value: authorization.userCode)
+                    LabeledContent("Code", value: authorization.userCode)
+                        .font(.title3.monospaced())
                         .textSelection(.enabled)
+                    Text("Enter this code on the GitHub page that opened, then authorize the app. Enter it only on a page you opened from these settings.")
+                        .font(.callout).foregroundStyle(.secondary)
                     Link("Open GitHub", destination: authorization.verificationURI)
+                } else {
+                    ProgressView("Contacting GitHub…")
                 }
                 Button("Cancel") { model.cancelConnection() }
-            }
-            DisclosureGroup("Existing GitHub App") {
-                TextField("Client ID", text: $model.clientIDInput)
-                    .textFieldStyle(.roundedBorder)
-                TextField("App slug", text: $model.appSlugInput)
-                    .textFieldStyle(.roundedBorder)
-                Text("For an app created elsewhere, enable Device Flow in its GitHub settings. Apps created here need no manual configuration.")
+            } else {
+                Text("Connect GitHub to register runners for your repositories. The sign-in is saved in this Mac's Keychain.")
                     .font(.callout).foregroundStyle(.secondary)
+                Button("Connect GitHub…") { model.signIn() }
+                    .disabled(model.isBusy)
+                    .accessibilityIdentifier("github-sign-in")
             }
-            .disabled(model.isBusy || model.account != nil)
             if model.isSynchronizing { ProgressView("Synchronizing runner registrations…") }
             ForEach(model.runnerStatuses) { status in
                 VStack(alignment: .leading, spacing: 4) {

@@ -173,20 +173,10 @@ struct GitHubClient: Sendable {
         ])
     }
 
-    func refreshToken(clientID: String, clientSecret: String? = nil, refreshToken: String) async throws -> GitHubTokenResponse {
-        var values = [
-            "client_id": clientID, "refresh_token": refreshToken, "grant_type": "refresh_token",
-        ]
-        values["client_secret"] = clientSecret
-        return try await oauth(path: "login/oauth/access_token", values: values)
-    }
-
-    func exchangeAuthorizationCode(
-        clientID: String, clientSecret: String, code: String, redirectURI: URL, codeVerifier: String
-    ) async throws -> GitHubTokenResponse {
+    /// Device-flow tokens refresh without a client secret, so the host never stores one.
+    func refreshToken(clientID: String, refreshToken: String) async throws -> GitHubTokenResponse {
         try await oauth(path: "login/oauth/access_token", values: [
-            "client_id": clientID, "client_secret": clientSecret, "code": code,
-            "redirect_uri": redirectURI.absoluteString, "code_verifier": codeVerifier,
+            "client_id": clientID, "refresh_token": refreshToken, "grant_type": "refresh_token",
         ])
     }
 
