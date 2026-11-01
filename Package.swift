@@ -7,7 +7,7 @@ let package = Package(
     products: [
         .library(name: "XcodeRunnerKit", targets: ["XcodeRunnerKit"]),
         .executable(name: "xcode-runner", targets: ["XcodeRunnerCLI"]),
-        // The host app's implementation, linked by App/XcodeRunnerHost.xcodeproj. Not a supported library API.
+        // The host app's implementation, linked by App/XcodeHomeRunner.xcodeproj. Not a supported library API.
         .library(name: "XcodeRunnerHostApp", targets: ["XcodeRunnerHostApp"]),
     ],
     dependencies: [

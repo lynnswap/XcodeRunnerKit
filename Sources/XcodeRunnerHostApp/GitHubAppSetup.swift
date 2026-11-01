@@ -315,7 +315,7 @@ final class GitHubBrowserCallback {
             let succeeded = (try? outcome.get()) != nil
             send(connection, status: succeeded ? "200 OK" : "400 Bad Request",
                  body: succeeded ? "GitHub authorization received. You can return to XcodeRunnerHost."
-                    : "GitHub authorization failed. Return to XcodeRunnerHost and try again.") {
+                    : "GitHub authorization failed. Return to XcodeHomeRunner and try again.") {
                 self.finish(outcome)
             }
         } else {

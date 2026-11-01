@@ -41,8 +41,8 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "xcode-runner-host"
-               BuildableName = "xcode-runner-host"
+               BlueprintIdentifier = "XcodeRunnerHostApp"
+               BuildableName = "XcodeRunnerHostApp"
                ReferencedContainer = "container:">
             </BuildableReference>
          </BuildActionEntry>

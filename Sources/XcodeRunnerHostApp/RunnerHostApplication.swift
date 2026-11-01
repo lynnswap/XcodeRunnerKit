@@ -9,7 +9,7 @@ import XcodeRunnerKit
 
 struct HostOptions: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "xcode-runner-host",
+        commandName: "XcodeHomeRunner",
         abstract: "Host opted-in GitHub Actions runners in a macOS menu bar app."
     )
 
@@ -258,10 +258,10 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
 
     private func installStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        let image = NSImage(systemSymbolName: "hammer.circle", accessibilityDescription: "XcodeRunnerHost")
+        let image = NSImage(systemSymbolName: "hammer.circle", accessibilityDescription: "XcodeHomeRunner")
         image?.isTemplate = true
         item.button?.image = image
-        item.button?.toolTip = "XcodeRunnerHost"
+        item.button?.toolTip = "XcodeHomeRunner"
         let menu = NSMenu()
         let poolItem = NSMenuItem(title: "Checking execution pool…", action: nil, keyEquivalent: "")
         menu.addItem(poolItem)
@@ -270,7 +270,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         settingsItem.target = self
         menu.addItem(settingsItem)
         menu.addItem(.separator())
-        let quitItem = NSMenuItem(title: "Quit XcodeRunnerHost", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "Quit XcodeHomeRunner", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quitItem.target = NSApplication.shared
         menu.addItem(quitItem)
         item.menu = menu
@@ -293,11 +293,11 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered, defer: false
             )
-            window.title = "XcodeRunnerHost Settings"
+            window.title = "XcodeHomeRunner Settings"
             window.isReleasedWhenClosed = false
             window.contentMinSize = NSSize(width: 540, height: 420)
             window.contentView = NSHostingView(rootView: HostSettingsView(model: settings))
-            window.setFrameAutosaveName("XcodeRunnerHostSettings")
+            window.setFrameAutosaveName("XcodeHomeRunnerSettings")
             window.center()
             settingsWindow = window
         }
