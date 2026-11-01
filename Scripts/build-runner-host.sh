@@ -8,7 +8,7 @@ if [[ $# -gt 2 ]]; then echo "$usage" >&2; exit 2; fi
 output=${2:-"$PWD/.build/RunnerHost"}
 output="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).expanduser().absolute())' "$output")"
 script_directory="$(cd "$(dirname "$0")" && pwd)"
-workspace="$script_directory/../App/XcodeHomeRunner.xcworkspace"
+workspace="$script_directory/../XcodeRunnerKit.xcworkspace"
 derived_data="$output/DerivedData"
 app="$output/XcodeHomeRunner.app"
 mkdir -p "$output"

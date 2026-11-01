@@ -361,9 +361,13 @@ xcodebuild test -scheme XcodeRunnerKit-Package \
   -destination 'platform=macOS,arch=arm64'
 ```
 
-The host app's project is `App/XcodeHomeRunner.xcworkspace`. The app target only
-starts the package's `XcodeRunnerHostApp` target, which holds the host code and
-its tests; that product exists for the app and is not a supported library API.
+Open `XcodeRunnerKit.xcworkspace` to work on the package and the host app
+together. Because the workspace sits next to `Package.swift`, `xcodebuild` and
+`xcode-runner --package` run in this checkout use the workspace, which still
+provides the `XcodeRunnerKit-Package` scheme; keep its `Package.resolved` in step
+with the package's. The app project is `App/XcodeHomeRunner.xcodeproj`. Its target
+only starts the package's `XcodeRunnerHostApp` target, which holds the host code
+and its tests; that product exists for the app and is not a supported library API.
 To sign builds from Xcode, set `DEVELOPMENT_TEAM` in
 `App/Configurations/Signing.local.xcconfig`, which Git ignores.
 
