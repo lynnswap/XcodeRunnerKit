@@ -334,7 +334,9 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private func reconcile() async throws {
         let scan = try RunnerDirectory.scan(root)
         if let unreadable = scan.unreadable.first { throw unreadable.error }
-        let requested = try scan.directories.filter { try $0.isHosted() && $0.hasRegistration() }
+        // A runner marked while the services below stop keeps running until the next scan stops it.
+        let removed = try scan.directories.filter { try $0.isRemoved() }
+        let requested = try scan.directories.filter { try $0.isHosted() && $0.hasRegistration() && !removed.contains($0) }
         let requestedURLs = Set(requested.map(\.url))
         for directory in runners.keys.filter({ !requestedURLs.contains($0) }) {
             let task = runners.removeValue(forKey: directory)?.task
@@ -342,6 +344,11 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             await task?.value
         }
         try Task.checkCancellation()
+        // The service of a removed runner stopped above, so its folder is no longer in use.
+        for directory in removed {
+            try FileManager.default.removeItem(at: directory.url)
+            print("Removed \(directory.name).")
+        }
         for runner in requested where runners[runner.url] == nil {
             if try runner.hasIndividualService() {
                 print("Skipped \(runner.name): uninstall its individual service before opting in.")

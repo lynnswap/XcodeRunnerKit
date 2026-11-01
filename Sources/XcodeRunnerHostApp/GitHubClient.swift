@@ -98,6 +98,15 @@ struct GitHubClient: Sendable {
         }
     }
 
+    func removeRunner(_ id: Int, from repository: GitHubRepository, accessToken: String) async throws {
+        var request = apiRequest(
+            url: URL(string: "https://api.github.com/")!.appending(path: "repos/\(repository.fullName)/actions/runners/\(id)"),
+            accessToken: accessToken
+        )
+        request.httpMethod = "DELETE"
+        _ = try await self.request(request)
+    }
+
     func repository(fullName: String, accessToken: String) async throws -> GitHubRepository {
         try await api(path: "repos/\(fullName)", accessToken: accessToken)
     }

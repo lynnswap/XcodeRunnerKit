@@ -111,8 +111,14 @@ GitHub's in-progress count also includes checkout, uploads, and jobs waiting
 for an Xcode slot.
 
 Lowering the limit lets running operations finish. Extra runner registrations
-stay in place. Deselecting a repository leaves its existing runners running;
-it stops the app from managing their count.
+stay in place. Deselecting a repository and choosing **Apply** unregisters this
+Mac's runners for it from GitHub and deletes them. A busy runner is removed at a
+later synchronization, after its current job finishes, and Overview lists the
+repository until then. While the app is signed out or cannot access the
+repository, the removal waits. Other runners stay in place, such as those of a
+selected repository that the app can no longer access, those registered manually
+for a repository that was never selected, and those that GitHub no longer lists
+for the deselected repository.
 
 The same limit caps the total managed Simulators across Xcode versions,
 runtimes, and device types. The host removes idle devices above the limit.

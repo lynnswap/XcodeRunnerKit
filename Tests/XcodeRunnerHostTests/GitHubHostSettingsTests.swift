@@ -216,6 +216,56 @@ struct GitHubHostSettingsTests {
         #expect(model.runnerStatuses.first?.errorMessage?.contains("Bad credentials") == true)
     }
 
+    @Test func deselectingARepositoryRemovesItsRunnersOnceSignedIn() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root)
+        let record = installation.hostRoot.appending(path: "github-host.json")
+        let repository = GitHubRepository(id: 1, fullName: "owner/Unlinked")
+        try GitHubHostConfiguration(repositories: [repository]).save(to: record)
+        let directory = installation.runnersRoot.appending(path: "existing")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data(#"{"agentId":7,"agentName":"existing","gitHubUrl":"https://github.com/owner/Unlinked"}"#.utf8)
+            .write(to: directory.appending(path: ".runner"))
+        try Data().write(to: directory.appending(path: ".xcode-runner-host"))
+        let store = MemorySecretStore()
+        try store.write(JSONEncoder().encode(GitHubCredentials(
+            clientID: "app", account: GitHubAccount(id: 1, login: "owner"), accessToken: "token",
+            refreshToken: nil, expiresAt: nil, refreshExpiresAt: nil
+        )))
+        let listing: [GitHubTestTransport.Reply] = [
+            .init(path: "/user/installations", body: #"{"installations":[{"id":10}]}"#),
+            .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Unlinked"}]}"#),
+        ]
+        let runners = GitHubTestTransport.Reply(
+            path: "/repos/owner/Unlinked/actions/runners",
+            body: #"{"runners":[{"id":7,"name":"existing","status":"online","busy":false,"labels":[]}]}"#
+        )
+        let transport = GitHubTestTransport(listing + listing + [
+            runners, runners, .init(path: "/repos/owner/Unlinked/actions/runners/7", body: "", status: 204),
+        ])
+        let client = await transport.client
+        let pool = HostExecutionPool(directory: installation.poolDirectory)
+        try await pool.configure(maximumConcurrentJobs: 1)
+        let model = GitHubHostSettings(
+            installation: installation, pool: pool, client: client,
+            authentication: GitHubAuthentication(clientID: "app", client: client, store: store)
+        )
+        model.storageIsReady = true
+
+        // Before the credentials are restored, removing the runners waits for sign-in.
+        #expect(try await model.updateRepositorySelection([])?.contains("Sign in") == true)
+        #expect(try !RunnerDirectory(url: directory).isRemoved())
+        #expect(try GitHubHostConfiguration.load(from: record).unlinkedRepositories == [repository])
+
+        await model.restore()
+        await model.synchronize()
+        #expect(await transport.requests.last?.httpMethod == "DELETE")
+        #expect(try RunnerDirectory(url: directory).isRemoved())
+        #expect(model.runnerStatuses.isEmpty)
+        #expect(try GitHubHostConfiguration.load(from: record).unlinkedRepositories.isEmpty)
+    }
+
     @Test(arguments: [true, false])
     func expirationOrRevocationMakesSignInAvailableAgain(expired: Bool) async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
