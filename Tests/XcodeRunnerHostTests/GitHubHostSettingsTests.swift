@@ -283,7 +283,7 @@ struct GitHubHostSettingsTests {
         let model = HostSettingsModel(installation: installation)
         model.github.storageIsReady = true
         await model.refreshPoolStatus()
-        model.capacityInput = "24"
+        model.poolDraft.capacityInput = "24"
         await model.applyPoolConfiguration()
         #expect(model.saveError == nil)
         #expect(model.poolStatus?.configuration.maximumConcurrentJobs == 24)

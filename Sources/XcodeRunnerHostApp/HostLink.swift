@@ -16,13 +16,20 @@ struct HostPairing: Codable, Equatable, Identifiable, Sendable {
 
 /// A request from a managing host to a Mac it manages.
 enum HostLinkRequest: Codable, Sendable {
-    case status
+    case settings(HostSettingsRequest)
     /// Asks the Mac to forget this pairing.
     case unpair
 }
 
+/// Reads or changes a managed Mac's settings. The Mac answers with its settings afterwards.
+enum HostSettingsRequest: Codable, Sendable {
+    case read
+    case configurePool(PoolSettingsDraft.Changes)
+    case saveStorage(directory: String)
+}
+
 enum HostLinkReply: Codable, Sendable {
-    case status(name: String)
+    case settings(HostSettingsReport)
     case unpaired
     case refused(String)
 }
@@ -171,10 +178,15 @@ enum HostLink {
     }
 
     /// Sends one request and returns the reply, failing promptly when the Mac rejects the key or cannot be reached.
-    static func send(_ request: HostLinkRequest, to endpoint: NWEndpoint, key: SymmetricKey, identity: String) async throws -> HostLinkReply {
+    ///
+    /// - Parameter timeout: How long the Mac has to reply.
+    static func send(
+        _ request: HostLinkRequest, to endpoint: NWEndpoint, key: SymmetricKey, identity: String,
+        timeout: Duration = requestTimeout
+    ) async throws -> HostLinkReply {
         let connection = NetworkConnection(to: endpoint, using: clientParameters(key: key, identity: identity))
         return try await whileConnected(connection) { connection in
-            try await within(requestTimeout) {
+            try await within(timeout) {
                 try await connection.send(request)
                 return try await connection.receive().content
             }

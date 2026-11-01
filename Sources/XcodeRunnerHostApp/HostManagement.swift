@@ -45,6 +45,8 @@ final class HostManagement {
     /// Why the last pairing window closed without pairing.
     private(set) var pairingMessage: String?
     private(set) var errorMessage: String?
+    /// Answers the managing host's requests to read and change this Mac's settings.
+    @ObservationIgnored weak var settings: HostSettingsModel?
     /// Outlives a window that closed when the Macs paired, until the managing host gets the reply.
     private var pairingTask: (window: UUID, task: Task<Void, Never>)?
     private var decision: (request: UUID, continuation: CheckedContinuation<Void, any Error>)?
@@ -77,7 +79,12 @@ final class HostManagement {
                     ready: { port in await self.managementListenerIsReady(port, for: manager.id) }
                 ) { request, reply in
                     switch request {
-                    case .status: try await reply(.status(name: self.name))
+                    case .settings(let request):
+                        guard let settings = await self.settings else {
+                            try await reply(.refused("\(self.name) cannot share its settings."))
+                            return
+                        }
+                        try await reply(await settings.answer(request))
                     case .unpair:
                         // Replying after the pairing is removed keeps the host from forgetting a Mac that still accepts it.
                         if case .failure(let error) = await self.forget(manager.id) {

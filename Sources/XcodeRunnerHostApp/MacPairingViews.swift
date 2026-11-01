@@ -146,9 +146,12 @@ struct ManagedMacView: View {
 
     var body: some View {
         let status = macs.status(of: mac.id)
+        let settings = macs.settings[mac.id]
+        // Settings from an earlier read may have changed since, so they appear only while the Mac answers.
+        let report = status == .online ? settings?.report : nil
         Form {
             Section {
-                LabeledContent("Status") {
+                LabeledContent("Connection") {
                     Label {
                         Text(status.title)
                     } icon: {
@@ -165,7 +168,14 @@ struct ManagedMacView: View {
                 case .unreachable(let message): ErrorText(message)
                 case .checking, .online: EmptyView()
                 }
+                if report == nil, let readAt = settings?.readAt {
+                    LabeledContent("Settings last read") { Text(readAt, format: .dateTime) }
+                }
+                if let report { HostStatusRows(settings: report) }
                 if let message = macs.message { ErrorText(message) }
+            }
+            if let settings, let report {
+                ManagedMacSettingsSections(macs: macs, mac: mac, settings: settings, report: report)
             }
             Section {
                 HStack {
@@ -189,6 +199,32 @@ struct ManagedMacView: View {
             }
         } message: {
             Text("\(mac.name) stops accepting this Mac as its managing host. To manage it again, pair the Macs again.")
+        }
+        .task(id: mac.id) { await macs.watchSettings(of: mac.id) }
+    }
+}
+
+/// A managed Mac's runner services and execution settings, with the controls of the Mac's own window.
+@MainActor
+private struct ManagedMacSettingsSections: View {
+    let macs: ManagedMacs
+    let mac: ManagedMac
+    @Bindable var settings: ManagedMacSettings
+    let report: HostSettingsReport
+
+    var body: some View {
+        RunnerServicesSection(settings: report) { Text("Processes on \(mac.name).") }
+        XcodeExecutionSection(
+            settings: report, draft: $settings.poolDraft, isSaving: settings.isSaving,
+            canApply: settings.canApplyPoolConfiguration, saveError: settings.saveError
+        ) {
+            Task { await macs.applyPoolConfiguration(of: mac.id) }
+        }
+        StorageSection(
+            settings: report, directory: $settings.storageDirectoryInput, isSaving: settings.isSavingStorage,
+            saveError: settings.storageSaveError, choose: nil
+        ) {
+            Task { await macs.saveStorageDirectory(of: mac.id) }
         }
     }
 }
