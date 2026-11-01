@@ -52,8 +52,12 @@ jobs:
             --compilation-cache "$RUNNER_TEMP/CompilationCache" \
             --output-directory "$RUNNER_TEMP/XcodeRunnerKit-macos" \
             -- -parallel-testing-enabled NO -jobs 3
+      - name: Build the host app
+        run: bash Scripts/build-runner-host.sh - "$RUNNER_TEMP/RunnerHost"
       - name: Check common runner host processes
-        run: python3 Scripts/check-runner-host.py "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner-host"
+        run: |
+          python3 Scripts/check-runner-host.py "$RUNNER_TEMP/RunnerHost/XcodeRunnerHost.app" \
+            "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner"
       - name: Check separate-process capacity
         run: python3 Scripts/check-execution-pool.py
       - name: Check pool administration and Xcode CLI commands

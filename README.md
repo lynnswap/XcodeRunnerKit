@@ -361,9 +361,17 @@ xcodebuild test -scheme XcodeRunnerKit-Package \
   -destination 'platform=macOS,arch=arm64'
 ```
 
+The host app's project is `App/XcodeRunnerHost.xcworkspace`. The app target only
+starts the package's `XcodeRunnerHostApp` target, which holds the host code and
+its tests; that product exists for the app and is not a supported library API.
+To sign builds from Xcode, set `DEVELOPMENT_TEAM` in
+`App/Configurations/Signing.local.xcconfig`, which Git ignores.
+
 The `Scripts/check-*.py` scripts cover process cancellation, shared pools,
 compilation caching, Simulators, and host setup. Checks that take an executable
-path should use a CLI built from the same checkout. CI runs only macOS
+path should use a CLI built from the same checkout. `check-runner-host.py` also
+takes an app built with `Scripts/build-runner-host.sh -`, because it confirms that
+the installer rejects ad-hoc signatures. CI runs only macOS
 operations, because booting a Simulator on the CI runner takes minutes and slows
 the other checks. `check-simulators.py` runs iOS tests on real Simulators
 through pooled, fresh, failed, and cancelled operations and takes a few minutes

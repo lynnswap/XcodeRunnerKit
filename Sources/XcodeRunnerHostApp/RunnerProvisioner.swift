@@ -116,20 +116,22 @@ actor RunnerProvisioner {
     private let client: any RunnerProvisioningClient
     private let prepareArchive: @Sendable (GitHubRunnerDownload) async throws -> URL
     private let installRunner: @Sendable (InstallationRequest) async throws -> Void
-    private let hostName: String
+    // Resolving the host name can wait on network name lookups, so host startup must not evaluate it.
+    private let resolveHostName: @Sendable () -> String
+    private var resolvedHostName: String?
     private var isReconciling = false
 
     init(
         installation: HostInstallation,
         installerURL: URL,
         client: any RunnerProvisioningClient = GitHubClient(),
-        hostName: String = ProcessInfo.processInfo.hostName,
+        hostName: @autoclosure @escaping @Sendable () -> String = ProcessInfo.processInfo.hostName,
         prepareArchive: (@Sendable (GitHubRunnerDownload) async throws -> URL)? = nil,
         installRunner: (@Sendable (InstallationRequest) async throws -> Void)? = nil
     ) {
         self.installation = installation
         self.client = client
-        self.hostName = hostName
+        self.resolveHostName = hostName
         self.prepareArchive = prepareArchive ?? { download in
             try await Self.downloadArchive(download, installation: installation)
         }
@@ -142,6 +144,13 @@ actor RunnerProvisioner {
     ///
     /// Other failures are reported per repository. Throws
     /// RunnerProvisioningAuthenticationFailure when GitHub rejects the token.
+    private func hostName() -> String {
+        if let resolvedHostName { return resolvedHostName }
+        let name = resolveHostName()
+        resolvedHostName = name
+        return name
+    }
+
     func reconcile(
         repositories: [GitHubRepository], capacity: Int, token: String
     ) async throws -> [RepositoryRunnerStatus] {
@@ -256,7 +265,7 @@ actor RunnerProvisioner {
                             let name: String
                             var replaceRegistration = false
                             while true {
-                                let candidate = Self.runnerName(hostName: hostName, repository: repository, slot: nextSlot)
+                                let candidate = Self.runnerName(hostName: hostName(), repository: repository, slot: nextSlot)
                                 nextSlot += 1
                                 let directory = RunnerDirectory(url: installation.runnersRoot.appending(path: candidate))
                                 if try canResumeInstallation(at: directory, repository: repository, remote: remote) {

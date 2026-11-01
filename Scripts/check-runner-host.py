@@ -13,8 +13,12 @@ import sys
 import tempfile
 import time
 
-executable = str(Path(sys.argv[1]).resolve())
-cli = Path(executable).with_name('xcode-runner')
+# Pass an ad-hoc signed app from build-runner-host.sh; the installer must reject it.
+if len(sys.argv) != 3:
+    sys.exit('Usage: check-runner-host.py XCODE_RUNNER_HOST_APP XCODE_RUNNER_CLI')
+app = Path(sys.argv[1]).resolve()
+executable = str(app/'Contents/MacOS/xcode-runner-host')
+cli = Path(sys.argv[2]).resolve()
 scripts = Path(__file__).resolve().parent
 
 
@@ -233,7 +237,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     wait_for(lambda:not alive(restarted['pid']), 'Runner survived service removal')
     assert not (host_root/'Pool').exists(), 'Host status reads configured an unused pool'
 
-    subprocess.run(['bash',str(scripts/'build-runner-host.sh'),'-',str(root/'packaging'),executable],check=True,capture_output=True)
+    shutil.copytree(app, root/'packaging/XcodeRunnerHost.app', symlinks=True)
     setup = root/'packaging/XcodeRunnerHost.app/Contents/Resources/HostSetup'
     for name in ('install-github-runner.sh', 'enable-hosted-runner.sh', 'lock-host-storage.py',
                  'stop-runner-service.py', 'cleanup-runner-temp.sh', 'cleanup-runner-temp.py'):

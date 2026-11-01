@@ -1,44 +1,21 @@
 #!/bin/bash
 set -euo pipefail
 
-identity=${1:?Usage: build-runner-host.sh SIGNING_IDENTITY [OUTPUT_DIRECTORY] [EXECUTABLE]}
+identity=${1:?Usage: build-runner-host.sh SIGNING_IDENTITY [OUTPUT_DIRECTORY]}
+if [[ $# -gt 2 ]]; then echo "Usage: build-runner-host.sh SIGNING_IDENTITY [OUTPUT_DIRECTORY]" >&2; exit 2; fi
 output=${2:-"$PWD/.build/RunnerHost"}
 output="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).expanduser().absolute())' "$output")"
 script_directory="$(cd "$(dirname "$0")" && pwd)"
-if [[ $# -ge 3 ]]; then
-    executable=$3
-else
-    cd "$script_directory/.."
-    swift build -c release --product xcode-runner-host
-    executable="$(swift build -c release --show-bin-path)/xcode-runner-host"
-fi
+derived_data="$output/DerivedData"
+# Xcode adds a debugging entitlement and omits the secure timestamp in plain builds; installed hosts need neither difference.
+signing=(CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$identity" CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO)
+if [[ "$identity" != "-" ]]; then signing+=(OTHER_CODE_SIGN_FLAGS=--timestamp); fi
+xcodebuild build -quiet \
+    -workspace "$script_directory/../App/XcodeRunnerHost.xcworkspace" -scheme XcodeRunnerHost \
+    -configuration Release -destination 'generic/platform=macOS' -derivedDataPath "$derived_data" \
+    "${signing[@]}"
 app="$output/XcodeRunnerHost.app"
-setup="$app/Contents/Resources/HostSetup"
-mkdir -p "$app/Contents/MacOS" "$setup"
-install -m 755 "$executable" "$app/Contents/MacOS/xcode-runner-host"
-for name in install-github-runner.sh enable-hosted-runner.sh cleanup-runner-temp.sh; do
-    install -m 755 "$script_directory/$name" "$setup/$name"
-done
-for name in lock-host-storage.py stop-runner-service.py cleanup-runner-temp.py; do
-    install -m 644 "$script_directory/$name" "$setup/$name"
-done
-python3 - "$app/Contents/Info.plist" <<'PY'
-from pathlib import Path
-import plistlib, sys
-Path(sys.argv[1]).write_bytes(plistlib.dumps({
-    "CFBundleIdentifier": "dev.lynnswap.XcodeRunnerHost",
-    "CFBundleExecutable": "xcode-runner-host",
-    "CFBundleName": "XcodeRunnerHost",
-    "CFBundleDisplayName": "XcodeRunnerHost",
-    "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "0.0.0",
-    "CFBundleVersion": "1",
-    "LSMinimumSystemVersion": "26.0",
-    "LSUIElement": True,
-    "NSPrincipalClass": "NSApplication",
-    "NSRemovableVolumesUsageDescription": "Runs your build and test jobs from storage you selected.",
-}))
-PY
-codesign --force --options runtime --sign "$identity" "$app"
+rm -rf "$app"
+ditto "$derived_data/Build/Products/Release/XcodeRunnerHost.app" "$app"
 codesign --verify --strict "$app"
 printf 'Built %s\n' "$app"

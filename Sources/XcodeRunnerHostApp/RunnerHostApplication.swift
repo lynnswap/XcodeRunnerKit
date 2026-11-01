@@ -25,9 +25,10 @@ struct HostOptions: ParsableCommand {
     }
 }
 
-@main
-private enum RunnerHostApplication {
-    @MainActor static func main() {
+/// The host app's entry point. The app target calls `main()` from its `main.swift`.
+public enum RunnerHostApplication {
+    /// Runs the menu bar host, or a runner service helper when launched with `--service-directory`.
+    @MainActor public static func main() {
         do {
             let options = try HostOptions.parse()
             if let directory = options.serviceDirectory {

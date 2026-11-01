@@ -2,7 +2,7 @@ import Foundation
 import Testing
 import XcodeRunnerHostSupport
 import XcodeRunnerKit
-@testable import XcodeRunnerHost
+@testable import XcodeRunnerHostApp
 
 private struct RejectingGitHubCredentialWrites: GitHubCredentialStore {
     let store: MemoryGitHubCredentialStore
