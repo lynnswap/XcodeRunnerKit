@@ -29,7 +29,8 @@ the CLI and app together. `install-host-tools.sh` replaces the CLI;
 replacing the app.
 
 Build and install the app with a certificate from
-`security find-identity -v -p codesigning`:
+`security find-identity -v -p codesigning`. The build script uses Xcode to
+build `App/XcodeRunnerHost.xcworkspace` and signs the app with that identity:
 
 ```sh
 bash Scripts/build-runner-host.sh "SIGNING_IDENTITY" .build/RunnerHost

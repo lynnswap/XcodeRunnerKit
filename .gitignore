@@ -8,3 +8,4 @@ DerivedData/
 .netrc
 
 *.profraw
+/App/Configurations/Signing.local.xcconfig

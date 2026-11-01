@@ -1,7 +1,7 @@
 import Foundation
 import Synchronization
 import Testing
-@testable import XcodeRunnerHost
+@testable import XcodeRunnerHostApp
 
 final class MemoryGitHubCredentialStore: GitHubCredentialStore, Sendable {
     private let value = Mutex<(data: Data?, writes: Int)>((nil, 0))

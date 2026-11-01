@@ -1,0 +1,3 @@
+// Local signing. Put your team in Signing.local.xcconfig next to this file; Git ignores it.
+//   DEVELOPMENT_TEAM = <your Team ID>
+#include? "Signing.local.xcconfig"

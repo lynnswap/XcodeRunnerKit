@@ -1,0 +1,3 @@
+import XcodeRunnerHostApp
+
+RunnerHostApplication.main()

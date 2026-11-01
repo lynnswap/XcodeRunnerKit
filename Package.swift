@@ -7,7 +7,8 @@ let package = Package(
     products: [
         .library(name: "XcodeRunnerKit", targets: ["XcodeRunnerKit"]),
         .executable(name: "xcode-runner", targets: ["XcodeRunnerCLI"]),
-        .executable(name: "xcode-runner-host", targets: ["XcodeRunnerHost"]),
+        // The host app's implementation, linked by App/XcodeRunnerHost.xcodeproj. Not a supported library API.
+        .library(name: "XcodeRunnerHostApp", targets: ["XcodeRunnerHostApp"]),
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-subprocess.git", from: "1.0.1"),
@@ -35,8 +36,8 @@ let package = Package(
             ],
             swiftSettings: [.swiftLanguageMode(.v6), .defaultIsolation(nil)]
         ),
-        .executableTarget(
-            name: "XcodeRunnerHost",
+        .target(
+            name: "XcodeRunnerHostApp",
             dependencies: [
                 "XcodeRunnerKit", "XcodeRunnerHostSupport",
                 .product(name: "Subprocess", package: "swift-subprocess"),
@@ -51,7 +52,7 @@ let package = Package(
         ),
         .testTarget(
             name: "XcodeRunnerHostTests",
-            dependencies: ["XcodeRunnerHost", "XcodeRunnerHostSupport"],
+            dependencies: ["XcodeRunnerHostApp", "XcodeRunnerHostSupport"],
             swiftSettings: [.swiftLanguageMode(.v6), .defaultIsolation(nil)]
         ),
     ]

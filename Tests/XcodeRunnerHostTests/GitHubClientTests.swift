@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import XcodeRunnerHost
+@testable import XcodeRunnerHostApp
 
 actor GitHubTestTransport {
     struct Reply: Sendable {

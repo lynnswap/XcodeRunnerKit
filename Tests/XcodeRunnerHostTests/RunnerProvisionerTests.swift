@@ -3,7 +3,7 @@ import Foundation
 import Testing
 import XcodeRunnerHostSupport
 import XcodeRunnerKit
-@testable import XcodeRunnerHost
+@testable import XcodeRunnerHostApp
 
 @Suite(.timeLimit(.minutes(1)))
 struct RunnerProvisionerTests {
