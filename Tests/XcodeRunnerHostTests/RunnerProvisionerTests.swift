@@ -518,6 +518,27 @@ struct RunnerProvisionerTests {
         ])
     }
 
+    @Test func anOnlineRunnerWithAnIncompleteInstallationsNameStaysWithItsOwner() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = HostInstallation(homeDirectory: root).runnersRoot
+            .appending(path: RunnerProvisioner.runnerName(hostName: "CI Mac", repository: secondRepository, slot: 1))
+        // Another Mac with the same name registered the runner that this Mac's installation stopped before registering.
+        await client.addRemoteRunner(repository: secondRepository, identifier: 12, name: directory.lastPathComponent, online: true, busy: false)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try String(secondRepository.id).write(
+            to: directory.appending(path: ".xcode-runner-installation"), atomically: true, encoding: .utf8
+        )
+
+        let statuses = try await provisioner.reconcile(
+            repositories: [], unlinked: [secondRepository], capacity: 1, token: "access-token"
+        )
+        #expect(await client.removals.isEmpty)
+        #expect(try !RunnerDirectory(url: directory).isRemoved())
+        #expect(statuses.first?.hasFinishedRemoval == false)
+        #expect(statuses.first?.errorMessage?.contains("must be offline and idle") == true)
+    }
+
     @Test func aSelectedRepositorysRunnerStaysWhenAnUnlinkedRepositoryTookItsOldName() async throws {
         let (root, client, provisioner) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

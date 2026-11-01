@@ -346,9 +346,17 @@ actor RunnerProvisioner {
                         let registration = try directory.registration(as: Registration.self)
                         let name = registration.agentName ?? directory.name
                         candidates.append((directory, name, remote.first { $0.id == registration.agentId && $0.name == name }))
+                    } else if let registered = remote.first(where: { $0.name == directory.name }) {
+                        // The official runner registers remotely before saving its local .runner settings, so this
+                        // installation's registration cannot be online. Another Mac with the same name can own one that is.
+                        guard registered.status == "offline", !registered.busy else {
+                            remaining += 1
+                            problems.append(.failed("The incomplete runner \(registered.name) must be offline and idle before it can be removed. It was left unchanged."))
+                            continue
+                        }
+                        candidates.append((directory, directory.name, registered))
                     } else {
-                        // The official runner registers remotely before saving its local .runner settings.
-                        candidates.append((directory, directory.name, remote.first { $0.name == directory.name }))
+                        candidates.append((directory, directory.name, nil))
                     }
                 }
                 for candidate in candidates {
