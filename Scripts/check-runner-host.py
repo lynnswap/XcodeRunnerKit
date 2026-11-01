@@ -240,9 +240,11 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
 
     shutil.copytree(app, root/'packaging/XcodeHomeRunner.app', symlinks=True)
     setup = root/'packaging/XcodeHomeRunner.app/Contents/Resources/HostSetup'
-    for name in ('install-github-runner.sh', 'enable-hosted-runner.sh', 'lock-host-storage.py',
+    for name in ('install-runner-host.sh', 'install-github-runner.sh', 'enable-hosted-runner.sh', 'lock-host-storage.py',
                  'stop-runner-service.py', 'cleanup-runner-temp.sh', 'cleanup-runner-temp.py'):
         assert (setup/name).read_bytes() == (scripts/name).read_bytes(), f'Missing or outdated bundled setup script: {name}'
+    bundled_cli = subprocess.run([str(app/'Contents/Helpers/xcode-runner'), '--help'], capture_output=True, text=True)
+    assert bundled_cli.returncode == 0 and 'xcode-runner' in bundled_cli.stdout, 'The app has no working bundled CLI'
     tools = root/'tools'
     tools.mkdir()
     fake_launchctl = tools/'launchctl'

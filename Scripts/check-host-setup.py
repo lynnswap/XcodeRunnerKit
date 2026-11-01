@@ -4,6 +4,7 @@ import json
 import fcntl
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import signal
 import stat
@@ -51,6 +52,20 @@ def install_cli(home):
     installed = home / "Library/Application Support/XcodeRunnerKit/bin/xcode-runner"
     installed.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(executable, installed)
+
+
+def host_app(directory):
+    """An XcodeHomeRunner bundle whose embedded CLI is the CLI under test."""
+    app = directory / "XcodeHomeRunner.app"
+    (app / "Contents/MacOS").mkdir(parents=True)
+    (app / "Contents/MacOS/XcodeHomeRunner").write_text("first executable")
+    (app / "Contents/Helpers").mkdir()
+    shutil.copy2(executable, app / "Contents/Helpers/xcode-runner")
+    (app / "Contents/Info.plist").write_bytes(plistlib.dumps({
+        "CFBundleIdentifier": "lynnpd.xcodehomerunner",
+        "CFBundleExecutable": "XcodeHomeRunner",
+    }))
+    return app
 
 
 def compilation_cache_in(log):
@@ -197,9 +212,10 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit host setup ") as tempora
     home.mkdir()
     tools = root / "tools"
     tools.mkdir()
-    launchctl = tools / "launchctl"
-    launchctl.write_text('#!/bin/bash\n[[ "$1" != print ]]\n')
-    launchctl.chmod(0o755)
+    for name, body in {"codesign": "exit 0", "launchctl": '[[ "$1" != print ]]'}.items():
+        tool = tools / name
+        tool.write_text("#!/bin/bash\n" + body + "\n")
+        tool.chmod(0o755)
     environment = {**os.environ, "HOME": str(home), "PATH": str(tools) + os.pathsep + os.environ["PATH"]}
     host = home / "Library/Application Support/XcodeRunnerKit"
     storage = root / "External disk" / "Job data"
@@ -212,7 +228,7 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit host setup ") as tempora
     work.mkdir(parents=True)
     (work / "retained").write_text("work data")
     existing_modes = {path: stat.S_IMODE(path.stat().st_mode) for path in (storage, cache, work.parent)}
-    command = ["bash", str(scripts / "install-host-tools.sh"), str(executable), "test-source", str(storage)]
+    command = ["bash", str(scripts / "install-runner-host.sh"), str(host_app(root / "input")), str(storage)]
     subprocess.run(command, env=environment, check=True, capture_output=True)
     assert (host / "CompilationCache").is_symlink()
     assert (host / "CompilationCache").resolve() == cache.resolve()
@@ -758,7 +774,6 @@ exec /bin/bash "$XRK_FIXTURE_ENABLE_SCRIPT" "$@"
         readonly.chmod(0o755)
 
 with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
-    import plistlib
     root = Path(temporary)
     home = root / "home"
     home.mkdir()
@@ -771,21 +786,18 @@ with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
         tool = tools / name
         tool.write_text("#!/bin/bash\n" + body + "\n")
         tool.chmod(0o755)
-    app = root / "input" / "XcodeHomeRunner.app"
-    (app / "Contents/MacOS").mkdir(parents=True)
-    (app / "Contents/MacOS/XcodeHomeRunner").write_text("first executable")
+    app = host_app(root / "input")
     setup = app / "Contents/Resources/HostSetup"
     setup.mkdir(parents=True)
     (setup / "install-github-runner.sh").write_text("first setup script")
-    (app / "Contents/Info.plist").write_bytes(plistlib.dumps({
-        "CFBundleIdentifier": "lynnpd.xcodehomerunner",
-        "CFBundleExecutable": "XcodeHomeRunner",
-    }))
     env = {**os.environ, "HOME": str(home), "PATH": str(tools) + os.pathsep + os.environ["PATH"],
            "LAUNCHCTL_LOG": str(launchctl_log)}
-    install_cli(home)
     runners = home / "Library/XcodeRunnerKit/runners"
     host = home / "Library/Application Support/XcodeRunnerKit"
+    # A host set up by an earlier version has a separately installed CLI.
+    (host / "bin").mkdir(parents=True)
+    (host / "bin/xcode-runner").write_text("separate CLI")
+    (host / "bin/xcode-runner.commit").write_text("earlier source\n")
     applications = home / "Applications"
     legacy_plist = home / "Library/LaunchAgents/dev.lynnswap.XcodeRunnerHost.plist"
     legacy_plist.parent.mkdir(parents=True)
@@ -802,6 +814,13 @@ with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
     assert plist["ProgramArguments"] == [str(applications.resolve() / "XcodeHomeRunner.app/Contents/MacOS/XcodeHomeRunner"), "--settings-service"]
     assert plist["MachServices"] == {"lynnpd.xcodehomerunner.settings": True}
     assert (applications / "XcodeHomeRunner.app/Contents/Resources/HostSetup/install-github-runner.sh").read_text() == "first setup script"
+    installed_cli = applications.resolve() / "XcodeHomeRunner.app/Contents/Helpers/xcode-runner"
+    assert (host / "bin/xcode-runner").resolve() == installed_cli
+    assert (host / "bin/xcode-runner.previous").read_text() == "separate CLI"
+    assert (host / "bin/xcode-runner.commit.previous").read_text() == "earlier source\n"
+    assert not (host / "bin/xcode-runner.commit").exists()
+    awake = plistlib.loads((home / "Library/LaunchAgents/dev.lynnswap.XcodeRunnerKit.awake.plist").read_bytes())
+    assert awake["ProgramArguments"] == ["/usr/bin/caffeinate", "-i", "-s"]
     (app / "Contents/MacOS/XcodeHomeRunner").write_text("updated executable")
     (setup / "install-github-runner.sh").write_text("updated setup script")
     subprocess.run(command, env=env, check=True, capture_output=True)
@@ -809,9 +828,11 @@ with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
     assert (applications / "XcodeHomeRunner.app/Contents/MacOS/XcodeHomeRunner").read_text() == "updated executable"
     assert (applications / "XcodeHomeRunner.previous.app/Contents/Resources/HostSetup/install-github-runner.sh").read_text() == "first setup script"
     assert (applications / "XcodeHomeRunner.app/Contents/Resources/HostSetup/install-github-runner.sh").read_text() == "updated setup script"
+    assert (host / "bin/xcode-runner").resolve() == installed_cli
+    assert (host / "bin/xcode-runner.previous").read_text() == "separate CLI"
     (tools / "codesign").write_text("#!/bin/bash\nif [[ \"$1\" == -dv ]]; then echo Signature=adhoc >&2; fi\n")
     failure = subprocess.run(command, env=env, capture_output=True)
     assert failure.returncode != 0 and b"certificate signing identity" in failure.stderr
     assert (applications / "XcodeHomeRunner.app/Contents/MacOS/XcodeHomeRunner").read_text() == "updated executable"
 
-print("PASS: unified storage, serialized initial selection and runner registration/startup migration, unavailable parent rejection at setup and admitted execution, saved and per-operation build service selection, explicit overrides, managed directory recovery and permissions, existing data preservation, cleanup, physical runner work paths, common-host opt-in, app installation and migration from the previous host name, and signature requirements")
+print("PASS: unified storage, serialized initial selection and runner registration/startup migration, unavailable parent rejection at setup and admitted execution, saved and per-operation build service selection, explicit overrides, managed directory recovery and permissions, existing data preservation, cleanup, physical runner work paths, common-host opt-in, app and bundled CLI installation, migration from the previous host name and a separate CLI, and signature requirements")

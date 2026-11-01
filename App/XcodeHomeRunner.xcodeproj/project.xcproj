@@ -34,12 +34,16 @@
         { "path": "lock-host-storage.py", "target-membership": [ "XcodeHomeRunner/copy/Copy Host Setup" ] },
         { "path": "stop-runner-service.py", "target-membership": [ "XcodeHomeRunner/copy/Copy Host Setup" ] },
         { "path": "cleanup-runner-temp.py", "target-membership": [ "XcodeHomeRunner/copy/Copy Host Setup" ] },
+        { "path": "install-runner-host.sh", "target-membership": [ "XcodeHomeRunner/copy/Copy Host Setup" ] },
       ],
-    }, {
+    },
+    { "kind": "folder", "path": "xcode-runner", "target-membership": [ "xcode-runner" ] },
+    {
       "kind": "group",
       "name": "Products",
       "children": [
         { "path": "<PRODUCTS>/XcodeHomeRunner.app", "id": "AB15079E3097162D00B300A6", "type": "wrapper.application", "index": false },
+        { "path": "<PRODUCTS>/xcode-runner", "id": "AB150B1430976A8A00B300A6", "type": "compiled.mach-o.executable", "index": false, "target-membership": [ { "build-phase": "XcodeHomeRunner/copy/Embed Command Line Tool", "code-sign-on-copy": true } ] },
       ],
     },
   ],
@@ -49,6 +53,9 @@
       "id": "AB15079D3097162D00B300A6",
       "product": "Products/XcodeHomeRunner.app",
       "product-type": "application",
+      "dependencies": [
+        "xcode-runner",
+      ],
       "build-phases": [
         "compile-sources",
         "frameworks",
@@ -58,6 +65,11 @@
           "name": "Copy Host Setup",
           "bundle-base-path": "resources-directory",
           "relative-path": "HostSetup",
+        }, {
+          "kind": "copy",
+          "name": "Embed Command Line Tool",
+          "bundle-base-path": "contents-directory",
+          "relative-path": "Helpers",
         },
       ],
       "package-product-members": [
@@ -88,6 +100,36 @@
         "SUPPORTED_PLATFORMS": "macosx",
         "SWIFT_APPROACHABLE_CONCURRENCY": "YES",
         "SWIFT_DEFAULT_ACTOR_ISOLATION": "MainActor",
+        "SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY": "YES",
+        "SWIFT_VERSION": "6.0",
+      },
+    }, {
+      "name": "xcode-runner",
+      "id": "AB150B1330976A8A00B300A6",
+      "product": "Products/xcode-runner",
+      "product-type": "tool",
+      "build-phases": [
+        "compile-sources",
+        "frameworks",
+      ],
+      "package-product-members": [
+        {
+          "package": "..",
+          "product-name": "XcodeRunnerCLI",
+          "build-phase": { "build-phase": "frameworks" },
+        },
+      ],
+      "build-settings": {
+        "ARCHS": "arm64",
+        "CODE_SIGN_STYLE": "Automatic",
+        "ENABLE_HARDENED_RUNTIME": "YES",
+        "MACOSX_DEPLOYMENT_TARGET": "26.0",
+        "PRODUCT_BUNDLE_IDENTIFIER": "lynnpd.xcodehomerunner.xcode-runner",
+        "PRODUCT_NAME": "$(TARGET_NAME)",
+        "SDKROOT": "macosx",
+        "SKIP_INSTALL": "YES",
+        "SUPPORTED_PLATFORMS": "macosx",
+        "SWIFT_APPROACHABLE_CONCURRENCY": "YES",
         "SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY": "YES",
         "SWIFT_VERSION": "6.0",
       },

@@ -9,34 +9,35 @@ Jobs share this user's files and credentials.
 
 ## Install
 
-From a checkout on the CI Mac, build and install the CLI:
+Build the app from a checkout on a Mac whose Xcode is signed in to your Apple
+Developer account (**Xcode > Settings > Accounts**) and has your Developer ID
+Application certificate. Replace `TEAM_ID` with your team identifier:
 
 ```sh
-export DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer
+bash Scripts/build-runner-host.sh TEAM_ID .build/RunnerHost
+```
 
-swift build -c release --product xcode-runner
-bash Scripts/install-host-tools.sh .build/release/xcode-runner \
-  "$(git rev-parse HEAD)" /path/to/JobData
+Copy `.build/RunnerHost/XcodeHomeRunner.app` to the CI Mac and run the installer
+inside it there. The CI Mac needs no checkout:
+
+```sh
+bash XcodeHomeRunner.app/Contents/Resources/HostSetup/install-runner-host.sh \
+  XcodeHomeRunner.app /path/to/JobData
 ```
 
 Replace `/path/to/JobData` with the folder for checkouts, build output, and the
 compiler cache. Omit that argument to use
 `~/Library/Application Support/XcodeRunnerKit/Storage`.
 
-For an update, wait for running and queued CI jobs to finish before replacing
-the CLI and app together. `install-host-tools.sh` replaces the CLI;
-`install-runner-host.sh` stops the current host and its runner services before
-replacing the app.
+The app contains the `xcode-runner` CLI. The installer links
+`~/Library/Application Support/XcodeRunnerKit/bin/xcode-runner` to the CLI in
+the installed app, so jobs, runner setup, and SSH sessions always use the CLI
+from the same build as the app. It also keeps the Mac awake with a `caffeinate`
+LaunchAgent while you are logged in.
 
-Build the app on a Mac whose Xcode is signed in to your Apple Developer
-account (**Xcode > Settings > Accounts**) and has your Developer ID Application
-certificate, then install it on the CI Mac. Replace `TEAM_ID` with your team
-identifier:
-
-```sh
-bash Scripts/build-runner-host.sh TEAM_ID .build/RunnerHost
-bash Scripts/install-runner-host.sh .build/RunnerHost/XcodeHomeRunner.app
-```
+For an update, wait for running and queued CI jobs to finish, then run the new
+app's installer. It stops the current host and its runner services before
+replacing the app and its CLI.
 
 The build script archives `XcodeRunnerKit.xcworkspace` and exports it for
 Developer ID distribution with Xcode-managed signing. The app, CLI, and
@@ -304,9 +305,11 @@ update them for the new physical work path before restarting.
 
 ## Updates and troubleshooting
 
-To update, repeat [the installation steps](#install). The installers keep the
-previous app as
-`XcodeHomeRunner.previous.app` and the previous CLI as `bin/xcode-runner.previous`.
+To update, repeat [the installation steps](#install). The installer keeps the
+previous app, including its CLI, as `XcodeHomeRunner.previous.app`. Earlier
+versions installed the CLI separately with `install-host-tools.sh`; the first
+installation of an app that contains the CLI keeps that copy as
+`bin/xcode-runner.previous`.
 
 Inspect or restart the host with:
 
