@@ -1,6 +1,4 @@
-import CryptoKit
 import Foundation
-import Security
 
 struct GitHubDeviceAuthorization: Sendable {
     let deviceCode: String
@@ -19,78 +17,21 @@ struct GitHubCredentials: Codable, Sendable {
     let refreshExpiresAt: Date?
 }
 
-protocol GitHubCredentialStore: Sendable {
-    func read() throws -> Data?
-    func write(_ data: Data) throws
-    func remove() throws
-}
-
-struct GitHubKeychainStore: GitHubCredentialStore {
-    private let account: String
-    private let service = "lynnpd.xcodehomerunner.github"
-
-    init(hostRoot: URL) {
-        account = SHA256.hash(data: Data(hostRoot.standardizedFileURL.path(percentEncoded: false).utf8))
-            .map { String(format: "%02x", $0) }.joined() + ".credentials"
-    }
-
-    func read() throws -> Data? {
-        var query = baseQuery
-        query[kSecReturnData] = true
-        query[kSecMatchLimit] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound { return nil }
-        try check(status)
-        guard let data = result as? Data else { throw GitHubError.invalidResponse }
-        return data
-    }
-
-    func write(_ data: Data) throws {
-        let attributes: [CFString: Any] = [kSecValueData: data]
-        let status = SecItemUpdate(baseQuery as CFDictionary, attributes as CFDictionary)
-        if status == errSecItemNotFound {
-            var item = baseQuery
-            item[kSecValueData] = data
-            try check(SecItemAdd(item as CFDictionary, nil))
-        } else {
-            try check(status)
-        }
-    }
-
-    func remove() throws {
-        let status = SecItemDelete(baseQuery as CFDictionary)
-        if status != errSecItemNotFound { try check(status) }
-    }
-
-    private var baseQuery: [CFString: Any] {
-        // The host ships without a provisioning profile for data-protection keychain access groups.
-        [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: account]
-    }
-
-    private func check(_ status: OSStatus) throws {
-        guard status == errSecSuccess else {
-            let message = SecCopyErrorMessageString(status, nil) as String? ?? "Unknown Keychain error"
-            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: message])
-        }
-    }
-}
-
 actor GitHubAuthentication {
     private let clientID: String
     private let client: GitHubClient
-    private let store: any GitHubCredentialStore
+    private let store: any SecretStore
     private let sleep: @Sendable (TimeInterval) async throws -> Void
     private let now: @Sendable () -> Date
     private var generation = 0
     private var refresh: (id: UUID, task: Task<String, any Error>)?
 
     init(hostRoot: URL, clientID: String, client: GitHubClient = .init()) {
-        self.init(clientID: clientID, client: client, store: GitHubKeychainStore(hostRoot: hostRoot))
+        self.init(clientID: clientID, client: client, store: KeychainSecretStore.githubCredentials(hostRoot: hostRoot))
     }
 
     init(
-        clientID: String, client: GitHubClient, store: any GitHubCredentialStore,
+        clientID: String, client: GitHubClient, store: any SecretStore,
         sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
         now: @escaping @Sendable () -> Date = { Date() }
     ) {

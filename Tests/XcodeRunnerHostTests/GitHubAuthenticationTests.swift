@@ -3,19 +3,25 @@ import Synchronization
 import Testing
 @testable import XcodeRunnerHostApp
 
-final class MemoryGitHubCredentialStore: GitHubCredentialStore, Sendable {
+final class MemorySecretStore: SecretStore, Sendable {
     private let value = Mutex<(data: Data?, writes: Int)>((nil, 0))
+    private let writeError = Mutex<(any Error)?>(nil)
     private let onRead: (@Sendable () -> Void)?
 
     init(onRead: (@Sendable () -> Void)? = nil) { self.onRead = onRead }
 
     var writeCount: Int { value.withLock { $0.writes } }
+    /// Makes later writes fail, as they do while the Keychain is locked.
+    func failWrites(with error: any Error) { writeError.withLock { $0 = error } }
     func read() -> Data? {
         let data = value.withLock { $0.data }
         onRead?()
         return data
     }
-    func write(_ data: Data) { value.withLock { $0.data = data; $0.writes += 1 } }
+    func write(_ data: Data) throws {
+        if let error = writeError.withLock({ $0 }) { throw error }
+        value.withLock { $0.data = data; $0.writes += 1 }
+    }
     func remove() { value.withLock { $0.data = nil } }
 }
 
@@ -32,7 +38,7 @@ struct GitHubAuthenticationTests {
             .init(path: "/login/oauth/access_token", body: #"{"access_token":"access","refresh_token":"refresh","expires_in":28800,"refresh_token_expires_in":15897600}"#),
             .init(path: "/user", body: #"{"id":1,"login":"owner"}"#),
         ])
-        let store = MemoryGitHubCredentialStore()
+        let store = MemorySecretStore()
         let sleeps = GitHubPollSleeps()
         let now = Date()
         let authentication = GitHubAuthentication(
@@ -55,8 +61,8 @@ struct GitHubAuthenticationTests {
 
     @Test func refreshSendsOnlyTheClientIDAndRefreshToken() async throws {
         let now = Date()
-        let store = MemoryGitHubCredentialStore()
-        store.write(try JSONEncoder().encode(GitHubCredentials(
+        let store = MemorySecretStore()
+        try store.write(JSONEncoder().encode(GitHubCredentials(
             clientID: "app", account: GitHubAccount(id: 1, login: "owner"), accessToken: "expired",
             refreshToken: "refresh+&value", expiresAt: now.addingTimeInterval(-1), refreshExpiresAt: now.addingTimeInterval(3600)
         )))
@@ -81,8 +87,8 @@ struct GitHubAuthenticationTests {
 
     @Test func expiredRefreshTokenRequiresSignInWithoutMakingARequest() async throws {
         let now = Date()
-        let store = MemoryGitHubCredentialStore()
-        store.write(try JSONEncoder().encode(GitHubCredentials(
+        let store = MemorySecretStore()
+        try store.write(JSONEncoder().encode(GitHubCredentials(
             clientID: "app", account: GitHubAccount(id: 1, login: "owner"), accessToken: "expired",
             refreshToken: "expired-refresh", expiresAt: now.addingTimeInterval(-3600), refreshExpiresAt: now.addingTimeInterval(-1)
         )))
@@ -93,8 +99,8 @@ struct GitHubAuthenticationTests {
     }
 
     @Test func credentialsSavedForAnotherAppDoNotSignIn() async throws {
-        let store = MemoryGitHubCredentialStore()
-        store.write(try JSONEncoder().encode(GitHubCredentials(
+        let store = MemorySecretStore()
+        try store.write(JSONEncoder().encode(GitHubCredentials(
             clientID: "previous-app", account: GitHubAccount(id: 1, login: "owner"), accessToken: "access",
             refreshToken: nil, expiresAt: nil, refreshExpiresAt: nil
         )))
@@ -107,8 +113,8 @@ struct GitHubAuthenticationTests {
 
     @Test func delayedRejectionReusesTheTokenAlreadyRefreshedByAnotherCaller() async throws {
         let now = Date()
-        let store = MemoryGitHubCredentialStore()
-        store.write(try JSONEncoder().encode(GitHubCredentials(
+        let store = MemorySecretStore()
+        try store.write(JSONEncoder().encode(GitHubCredentials(
             clientID: "app", account: GitHubAccount(id: 1, login: "owner"), accessToken: "original",
             refreshToken: "refresh", expiresAt: now.addingTimeInterval(3600), refreshExpiresAt: now.addingTimeInterval(7200)
         )))
@@ -139,8 +145,8 @@ struct GitHubAuthenticationTests {
     @Test func sharedRefreshCommitsTheRotatedCredentialsOnce() async throws {
         let now = Date()
         let reads = AsyncStream<Void>.makeStream()
-        let store = MemoryGitHubCredentialStore(onRead: { reads.continuation.yield() })
-        store.write(try JSONEncoder().encode(GitHubCredentials(
+        let store = MemorySecretStore(onRead: { reads.continuation.yield() })
+        try store.write(JSONEncoder().encode(GitHubCredentials(
             clientID: "app", account: GitHubAccount(id: 1, login: "owner"), accessToken: "original",
             refreshToken: "refresh", expiresAt: now.addingTimeInterval(3600), refreshExpiresAt: now.addingTimeInterval(7200)
         )))
@@ -192,7 +198,7 @@ struct GitHubAuthenticationTests {
             return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
         })
         let authentication = GitHubAuthentication(
-            clientID: "app", client: client, store: MemoryGitHubCredentialStore(), sleep: { _ in }
+            clientID: "app", client: client, store: MemorySecretStore(), sleep: { _ in }
         )
         let signingIn = Task {
             try await authentication.finish(GitHubDeviceAuthorization(
@@ -212,9 +218,9 @@ struct GitHubAuthenticationTests {
     @Test func cancelledRefreshStillKeepsTheRotatedCredentials() async throws {
         let started = AsyncStream<Void>.makeStream()
         let release = AsyncStream<Void>.makeStream()
-        let store = MemoryGitHubCredentialStore()
+        let store = MemorySecretStore()
         let now = Date()
-        store.write(try JSONEncoder().encode(GitHubCredentials(
+        try store.write(JSONEncoder().encode(GitHubCredentials(
             clientID: "app", account: GitHubAccount(id: 1, login: "owner"), accessToken: "expired",
             refreshToken: "refresh", expiresAt: now.addingTimeInterval(-1), refreshExpiresAt: now.addingTimeInterval(3600)
         )))
@@ -240,8 +246,8 @@ struct GitHubAuthenticationTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["XCODERUNNER_KEYCHAIN_TESTS"] == "1"))
     func keychainRecordsAreScopedToEachInstallation() throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
-        let session = GitHubKeychainStore(hostRoot: root)
-        let other = GitHubKeychainStore(hostRoot: root.appending(path: "other"))
+        let session = KeychainSecretStore.githubCredentials(hostRoot: root)
+        let other = KeychainSecretStore.githubCredentials(hostRoot: root.appending(path: "other"))
         defer { try? session.remove(); try? other.remove() }
         try session.write(Data("session".utf8))
         #expect(try session.read() == Data("session".utf8))
