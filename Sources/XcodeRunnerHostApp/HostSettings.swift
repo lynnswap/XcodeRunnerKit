@@ -52,6 +52,10 @@ final class HostSettingsModel {
     let installation: HostInstallation
     let pool: HostExecutionPool
     let github: GitHubHostSettings
+    /// This Mac's pairing with the host that manages it.
+    let management: HostManagement
+    /// The Macs that this host manages.
+    let managedMacs: ManagedMacs
     let settingsService: HostSettingsService
     var hostState = HostState.starting
     var runners: [RunnerSettingsRow] = []
@@ -74,12 +78,21 @@ final class HostSettingsModel {
     private(set) var isSavingStorage = false
     var storageDirectoryInput = ""
 
-    init(installation: HostInstallation, github: GitHubHostSettings? = nil) {
+    init(
+        installation: HostInstallation, github: GitHubHostSettings? = nil,
+        management: HostManagement? = nil, managedMacs: ManagedMacs? = nil
+    ) {
         self.installation = installation
         // Reading status leaves an unconfigured pool unchanged.
         self.pool = HostExecutionPool(directory: installation.poolDirectory)
         self.settingsService = HostSettingsService(installation: installation, pool: pool)
         self.github = github ?? GitHubHostSettings(installation: installation, pool: pool)
+        self.management = management ?? HostManagement(
+            store: KeychainSecretStore.managingHost(hostRoot: installation.hostRoot), name: HostPane.macName
+        )
+        self.managedMacs = managedMacs ?? ManagedMacs(
+            store: KeychainSecretStore.managedMacs(hostRoot: installation.hostRoot), name: HostPane.macName
+        )
         do {
             savedStorageDirectory = try installation.requestedStorageDirectory() ?? installation.storage()?.directory
             storageDirectoryInput = savedStorageDirectory?.path(percentEncoded: false) ?? ""
@@ -161,6 +174,10 @@ final class HostSettingsModel {
             storageDirectoryInput = directory.path(percentEncoded: false)
         }
     }
+
+    /// A Mac either manages other Macs or is managed by one, so that one host owns each Mac's settings.
+    var canAllowManagement: Bool { managedMacs.macs.isEmpty }
+    var canAddMacs: Bool { management.manager == nil && management.pairingWindow == nil }
 
     var admissionMessage: String {
         if !hasLoadedPoolStatus { return "Checking the execution pool…" }
@@ -317,6 +334,8 @@ struct HostMacSettingsView: View {
 
     var body: some View {
         Form {
+            // A managing host's changes to this Mac's settings appear below, so who manages the Mac comes first.
+            HostManagementSection(model: model)
             Section {
                 if model.runners.isEmpty {
                     Text(model.storageError == nil ? "No runners have opted in to this host." : "Runner services have not started because storage needs attention.")

@@ -27,7 +27,7 @@ struct GitHubHostSettingsTests {
         })
         let model = GitHubHostSettings(
             installation: installation, pool: HostExecutionPool(directory: installation.poolDirectory),
-            client: client, authentication: GitHubAuthentication(clientID: "app", client: client, store: MemoryGitHubCredentialStore()),
+            client: client, authentication: GitHubAuthentication(clientID: "app", client: client, store: MemorySecretStore()),
             openURL: { _ in Issue.record("Authorization should fail before opening a browser."); return false }
         )
         model.signIn()
@@ -54,7 +54,7 @@ struct GitHubHostSettingsTests {
             .init(path: "/user/installations", body: #"{"installations":[]}"#),
         ])
         let client = await transport.client
-        let authentication = GitHubAuthentication(clientID: "app", client: client, store: MemoryGitHubCredentialStore(), sleep: { _ in })
+        let authentication = GitHubAuthentication(clientID: "app", client: client, store: MemorySecretStore(), sleep: { _ in })
         var opened: [URL] = []
         let model = GitHubHostSettings(
             installation: installation, pool: HostExecutionPool(directory: installation.poolDirectory),
@@ -92,8 +92,8 @@ struct GitHubHostSettingsTests {
         try Data(#"{"agentId":1,"agentName":"existing","gitHubUrl":"https://github.com/owner/Renamed"}"#.utf8)
             .write(to: directory.appending(path: ".runner"))
         try Data().write(to: directory.appending(path: ".xcode-runner-host"))
-        let store = MemoryGitHubCredentialStore()
-        store.write(try JSONEncoder().encode(GitHubCredentials(
+        let store = MemorySecretStore()
+        try store.write(JSONEncoder().encode(GitHubCredentials(
             clientID: "app", account: GitHubAccount(id: 1, login: "owner"), accessToken: "token",
             refreshToken: nil, expiresAt: nil, refreshExpiresAt: nil
         )))
@@ -137,8 +137,8 @@ struct GitHubHostSettingsTests {
         try Data(#"{"agentId":1,"agentName":"existing","gitHubUrl":"https://github.com/owner/Project"}"#.utf8)
             .write(to: directory.appending(path: ".runner"))
         try Data().write(to: directory.appending(path: ".xcode-runner-host"))
-        let store = MemoryGitHubCredentialStore()
-        store.write(try JSONEncoder().encode(GitHubCredentials(
+        let store = MemorySecretStore()
+        try store.write(JSONEncoder().encode(GitHubCredentials(
             clientID: "app", account: GitHubAccount(id: 1, login: "owner"), accessToken: "expiring",
             refreshToken: "refresh", expiresAt: Date.distantFuture, refreshExpiresAt: Date.distantFuture
         )))
@@ -179,8 +179,8 @@ struct GitHubHostSettingsTests {
         let repository = GitHubRepository(id: 1, fullName: "owner/Project")
         try GitHubHostConfiguration(repositories: [repository])
             .save(to: installation.hostRoot.appending(path: "github-host.json"))
-        let store = MemoryGitHubCredentialStore()
-        store.write(try JSONEncoder().encode(GitHubCredentials(
+        let store = MemorySecretStore()
+        try store.write(JSONEncoder().encode(GitHubCredentials(
             clientID: "app", account: GitHubAccount(id: 1, login: "owner"), accessToken: "revoked",
             refreshToken: nil, expiresAt: nil, refreshExpiresAt: nil
         )))
@@ -222,8 +222,8 @@ struct GitHubHostSettingsTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let installation = HostInstallation(homeDirectory: root)
         try GitHubHostConfiguration().save(to: installation.hostRoot.appending(path: "github-host.json"))
-        let store = MemoryGitHubCredentialStore()
-        store.write(try JSONEncoder().encode(GitHubCredentials(
+        let store = MemorySecretStore()
+        try store.write(JSONEncoder().encode(GitHubCredentials(
             clientID: "app", account: GitHubAccount(id: 1, login: "owner"), accessToken: "expired",
             refreshToken: "refresh", expiresAt: expired ? Date.distantPast : Date.distantFuture,
             refreshExpiresAt: expired ? Date.distantPast : Date.distantFuture
@@ -250,8 +250,8 @@ struct GitHubHostSettingsTests {
         try FileManager.default.createDirectory(at: installation.hostRoot, withIntermediateDirectories: true)
         try Data(#"{"clientID":"previous-app","appSlug":"previous-host","repositories":[{"id":1,"full_name":"owner/Project"}]}"#.utf8)
             .write(to: record)
-        let store = MemoryGitHubCredentialStore()
-        store.write(try JSONEncoder().encode(GitHubCredentials(
+        let store = MemorySecretStore()
+        try store.write(JSONEncoder().encode(GitHubCredentials(
             clientID: "app", account: GitHubAccount(id: 1, login: "owner"), accessToken: "token",
             refreshToken: nil, expiresAt: nil, refreshExpiresAt: nil
         )))

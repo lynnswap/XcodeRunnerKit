@@ -17,8 +17,21 @@
     },
   ],
   "files": [
-    { "kind": "folder", "path": "XcodeHomeRunner", "target-membership": [ "XcodeHomeRunner" ] },
     {
+      "kind": "folder",
+      "path": "XcodeHomeRunner",
+      "target-membership": [
+        "XcodeHomeRunner",
+      ],
+      "membership-exceptions": [
+        {
+          "target": "XcodeHomeRunner",
+          "exclusions": [
+            "Info.plist",
+          ],
+        },
+      ],
+    }, {
       "kind": "group",
       "path": "Configurations",
       "children": [
@@ -86,9 +99,11 @@
         "ENABLE_APP_SANDBOX": "NO",
         "ENABLE_HARDENED_RUNTIME": "YES",
         "GENERATE_INFOPLIST_FILE": "YES",
+        "INFOPLIST_FILE": "XcodeHomeRunner/Info.plist",
         "INFOPLIST_KEY_CFBundleDisplayName": "XcodeHomeRunner",
         "INFOPLIST_KEY_LSApplicationCategoryType": "public.app-category.developer-tools",
         "INFOPLIST_KEY_LSUIElement": "YES",
+        "INFOPLIST_KEY_NSLocalNetworkUsageDescription": "Pairs this Mac with your other Macs on the local network so that one of them can manage their runners.",
         "INFOPLIST_KEY_NSPrincipalClass": "NSApplication",
         "INFOPLIST_KEY_NSRemovableVolumesUsageDescription": "Runs your build and test jobs from storage you selected.",
         "LD_RUNPATH_SEARCH_PATHS": "@executable_path/../Frameworks",
