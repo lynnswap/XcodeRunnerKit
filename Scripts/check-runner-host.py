@@ -222,23 +222,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
         wait_for(lambda:(launched/'stopping').exists(), 'Old service did not start shutdown')
         # The old helper still owns the lock during this delayed shutdown.
         assert alive(process['pid'])
-        # DIAGNOSTIC (temporary): show host processes and the second host's output if it does not exit.
-        print('DIAG before second start:', subprocess.run(['ps','-axo','pid,ppid,pgid,stat,command'],capture_output=True,text=True).stdout.count('xcode-runner-host'), flush=True)
-        print(subprocess.run(['/bin/bash','-c','ps -axo pid,ppid,pgid,stat,command | grep -e xcode-runner-host -e runsvc | grep -v grep'],capture_output=True,text=True).stdout, flush=True)
-        second = subprocess.Popen(arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        try:
-            second_out, second_err = second.communicate(timeout=20)
-        except subprocess.TimeoutExpired:
-            print('DIAG second host pid', second.pid, 'still running', flush=True)
-            sampled = subprocess.run(['/usr/bin/sample', str(second.pid), '3'], capture_output=True, text=True).stdout
-            graph = sampled[sampled.find('Call graph:'):sampled.find('Binary Images:')]
-            print('DIAG call graph:\n' + '\n'.join(line[:220] for line in graph.splitlines()[:160]), flush=True)
-            print(subprocess.run(['/bin/bash','-c',f'lsof -p {second.pid} | grep -i -e lock -e runners; lsof 2>/dev/null | grep xcode-runner-host.lock'],capture_output=True,text=True).stdout, flush=True)
-            second.kill()
-            second_out, second_err = second.communicate()
-            print('DIAG second host stdout:', second_out, 'stderr:', second_err, flush=True)
-            raise
-        failed_start = subprocess.CompletedProcess(arguments, second.returncode, second_out, second_err)
+        failed_start = subprocess.run(arguments, capture_output=True, timeout=HANG_LIMIT)
         assert failed_start.returncode != 0 and b'Another runner host' in failed_start.stderr
         assert json.loads((launched/'pid.json').read_text())['pid'] == process['pid']
         subprocess.run(['launchctl','kickstart',target],check=True)
