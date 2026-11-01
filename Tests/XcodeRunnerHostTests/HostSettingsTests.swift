@@ -29,7 +29,7 @@ struct HostSettingsTests {
         #expect(settings.saveError == nil)
         #expect(settings.poolStatus?.configuration.maximumConcurrentJobs == 6)
         #expect(settings.poolStatus?.activeJobCount == 0)
-        #expect(settings.poolStatus?.waitingJobCounts.total == 0)
+        #expect(settings.poolStatus?.waitingJobCount == 0)
         #expect(settings.pool.directory == settings.installation.poolDirectory)
         try FileManager.default.removeItem(at: root)
     }
@@ -254,7 +254,7 @@ struct HostSettingsTests {
         try FileManager.default.removeItem(at: root)
     }
 
-    @Test func refreshShowsSharedWaitingCountsByPriority() async throws {
+    @Test func refreshShowsSharedWaitingJobCount() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         let settings = model(at: root)
         await settings.refreshPoolStatus()
@@ -270,38 +270,34 @@ struct HostSettingsTests {
         }
         var events = started.stream.makeAsyncIterator()
         await events.next()
-        let high = Task { try await settings.pool.withSlot(priority: .high) {} }
-        let medium = Task { try await settings.pool.withSlot(priority: .medium) {} }
-        let low = Task { try await settings.pool.withSlot(priority: .low) {} }
+        let first = Task { try await settings.pool.withSlot {} }
+        let second = Task { try await settings.pool.withSlot {} }
+        let third = Task { try await settings.pool.withSlot {} }
         defer {
             finish.continuation.finish()
-            for job in [active, high, medium, low] { job.cancel() }
+            for job in [active, first, second, third] { job.cancel() }
         }
         try await waitUntil {
             await settings.refreshPoolStatus()
-            return settings.poolStatus?.waitingJobCounts.total == 3
+            return settings.poolStatus?.waitingJobCount == 3
         }
         #expect(settings.poolStatus?.activeJobCount == 1)
-        #expect(settings.poolStatus?.waitingJobCounts.high == 1)
-        #expect(settings.poolStatus?.waitingJobCounts.medium == 1)
-        #expect(settings.poolStatus?.waitingJobCounts.low == 1)
+        #expect(settings.poolStatus?.waitingJobCount == 3)
         #expect(settings.capacityInput == "1")
 
-        medium.cancel()
+        second.cancel()
         do {
-            try await medium.value
+            try await second.value
             Issue.record("The cancelled waiting job completed without cancellation.")
         } catch is CancellationError {}
         await settings.refreshPoolStatus()
-        #expect(settings.poolStatus?.waitingJobCounts.high == 1)
-        #expect(settings.poolStatus?.waitingJobCounts.medium == 0)
-        #expect(settings.poolStatus?.waitingJobCounts.low == 1)
+        #expect(settings.poolStatus?.waitingJobCount == 2)
 
         finish.continuation.finish()
-        for job in [active, high, low] { try await job.value }
+        for job in [active, first, third] { try await job.value }
         await settings.refreshPoolStatus()
         #expect(settings.poolStatus?.activeJobCount == 0)
-        #expect(settings.poolStatus?.waitingJobCounts.total == 0)
+        #expect(settings.poolStatus?.waitingJobCount == 0)
         try FileManager.default.removeItem(at: root)
     }
 

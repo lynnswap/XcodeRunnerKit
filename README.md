@@ -265,10 +265,9 @@ try await pool.configure(maximumConcurrentJobs: 8)
 
 `configuration()` and `status()` return `nil` for an unconfigured pool without
 creating it. `status.configuration` contains `maximumConcurrentJobs` and
-`simulatorRetention`; the remaining status fields report active and waiting jobs.
-`--priority high|medium|low`, or `runner.run(..., priority: .high)` in Swift,
-sets the queue priority. Higher priorities start first; equal priorities start
-in arrival order. Running operations are not interrupted.
+`simulatorRetention`; `activeJobCount` and `waitingJobCount` report running and
+waiting operations. Waiting operations start in arrival order, as registered
+under the pool lock. Running operations keep their slot through cleanup.
 
 For a native GitHub Actions host, use **Apply** in the app's execution settings.
 The app synchronizes runner registrations to the saved job limit.
@@ -277,9 +276,10 @@ the app or a GitHub connection. GitHub assigns jobs to runners before they enter
 the local Xcode queue. See the [host guide](Documentation/NativeHost.md#settings-from-cli-and-mcp)
 for the settings catalog and MCP updates.
 
-When upgrading, stop all clients and update them together. The first explicit
-configuration update migrates the previous capacity and retention files into
-`configuration.json`, preserving unspecified values. Remove
+When upgrading, stop all clients and update them together. Waiting-record names
+have changed, so clients from different versions cannot share an active queue.
+The first explicit configuration update migrates the previous capacity and
+retention files into `configuration.json`, preserving unspecified values. Remove
 `--maximum-concurrent-jobs` from build and test commands; it is now a
 `pool configure` option only. Swift callers must replace
 `initialMaximumConcurrentJobs` and the individual update methods with

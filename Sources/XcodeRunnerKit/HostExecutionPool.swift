@@ -58,43 +58,11 @@ public struct HostExecutionPool: Sendable {
         }
     }
 
-    /// The admission order for waiting operations. Running operations are never preempted.
-    public enum Priority: String, Sendable, CaseIterable, Codable {
-        case high
-        case medium
-        case low
-
-        fileprivate var rank: Int {
-            switch self {
-            case .high: 2
-            case .medium: 1
-            case .low: 0
-            }
-        }
-    }
-
-    /// The number of waiting operations at each priority.
-    public struct WaitingJobCounts: Sendable, Equatable, Codable {
-        public let high: Int
-        public let medium: Int
-        public let low: Int
-
-        public var total: Int { high + medium + low }
-
-        public subscript(_ priority: Priority) -> Int {
-            switch priority {
-            case .high: high
-            case .medium: medium
-            case .low: low
-            }
-        }
-    }
-
-    /// The configured limit, slots observed in use, and waiting operation counts.
+    /// The configured limit, slots observed in use, and waiting operation count.
     public struct Status: Sendable, Equatable, Codable {
         public let configuration: Configuration
         public let activeJobCount: Int
-        public let waitingJobCounts: WaitingJobCounts
+        public let waitingJobCount: Int
     }
 
     /// Reads the pool without initializing an unconfigured directory.
@@ -113,11 +81,7 @@ public struct HostExecutionPool: Sendable {
             let waiters = try inspectWaiters()
             return try Status(
                 configuration: configuration, activeJobCount: inspectSlots().activeJobCount,
-                waitingJobCounts: WaitingJobCounts(
-                    high: waiters.count(where: { $0.priority == .high }),
-                    medium: waiters.count(where: { $0.priority == .medium }),
-                    low: waiters.count(where: { $0.priority == .low })
-                )
+                waitingJobCount: waiters.count
             )
         }
     }
@@ -226,14 +190,12 @@ public struct HostExecutionPool: Sendable {
     ///
     /// Waiting is cancellable. Lock or configuration failures never bypass
     /// the limit. Processes use kernel locks, so no stale PID files are needed.
-    /// Higher priorities start first; equal priorities start in their local
-    /// registration order. Continuous higher-priority work can postpone lower priorities.
+    /// Waiting operations start in their local registration order.
     /// Failing to release the slot or its waiting record throws HostExecutionCleanupFailure.
     public func withSlot<Result: Sendable>(
-        priority: Priority = .medium,
         operation: @Sendable () async throws -> Result
     ) async throws -> Result {
-        let outcome = await slotOutcome(priority: priority) { () async -> Swift.Result<Result, any Error> in
+        let outcome = await slotOutcome { () async -> Swift.Result<Result, any Error> in
             do { return .success(try await operation()) }
             catch { return .failure(error) }
         }
@@ -248,7 +210,6 @@ public struct HostExecutionPool: Sendable {
     ///
     /// The value is a failure only when the operation did not start.
     func slotOutcome<Value: Sendable>(
-        priority: Priority,
         operation: @Sendable () async -> Value
     ) async -> CleanupOutcome<Value> {
         let waiter: Waiter
@@ -256,7 +217,7 @@ public struct HostExecutionPool: Sendable {
         do {
             try Task.checkCancellation()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let registration = try await registerWaiter(priority: priority)
+            let registration = try await registerWaiter()
             waiter = registration.waiter
             ownership = registration.ownership
         } catch {
@@ -315,11 +276,10 @@ public struct HostExecutionPool: Sendable {
 
     private struct Waiter: Sendable {
         let sequence: Int
-        let priority: Priority
         let url: URL
     }
 
-    private func registerWaiter(priority: Priority) async throws -> (waiter: Waiter, ownership: FileHandle) {
+    private func registerWaiter() async throws -> (waiter: Waiter, ownership: FileHandle) {
         let coordinator = try Self.open(directory.appending(path: "pool.lock"))
         return try await Self.withHandle(coordinator) {
             try await Self.lock(coordinator)
@@ -327,13 +287,13 @@ public struct HostExecutionPool: Sendable {
             let previousSequence = try inspectWaiters().map(\.sequence).max() ?? -1
             let (sequence, overflow) = previousSequence.addingReportingOverflow(1)
             guard !overflow else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(EOVERFLOW)) }
-            let url = directory.appending(path: "waiter-\(sequence)-\(priority.rawValue)-\(UUID().uuidString).lock")
+            let url = directory.appending(path: "waiter-\(sequence)-\(UUID().uuidString).lock")
             let handle = try Self.open(url)
             do {
                 guard try Self.tryLock(handle) else {
                     throw NSError(domain: NSPOSIXErrorDomain, code: Int(EAGAIN))
                 }
-                return (Waiter(sequence: sequence, priority: priority, url: url), handle)
+                return (Waiter(sequence: sequence, url: url), handle)
             } catch {
                 return try Self.withHandle(handle) { throw error }
             }
@@ -346,11 +306,6 @@ public struct HostExecutionPool: Sendable {
         for entry in entries {
             let name = entry.lastPathComponent
             guard name.hasPrefix("waiter-"), name.hasSuffix(".lock") else { continue }
-            let parts = name.dropFirst(7).dropLast(5).split(separator: "-", maxSplits: 2)
-            guard parts.count == 3, let sequence = Int(parts[0]), sequence >= 0,
-                  let priority = Priority(rawValue: String(parts[1])), UUID(uuidString: String(parts[2])) != nil else {
-                throw ConfigurationError.invalidStoredWaiter(entry)
-            }
             let handle: FileHandle
             do { handle = try Self.open(entry, create: false) }
             catch let error as NSError where error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT) {
@@ -361,14 +316,16 @@ public struct HostExecutionPool: Sendable {
                 if try Self.tryLock(handle) {
                     try Self.removeWaiter(entry)
                 } else {
-                    waiters.append(Waiter(sequence: sequence, priority: priority, url: entry))
+                    let parts = name.dropFirst(7).dropLast(5).split(separator: "-", maxSplits: 1)
+                    guard parts.count == 2, let sequence = Int(parts[0]), sequence >= 0,
+                          UUID(uuidString: String(parts[1])) != nil else {
+                        throw ConfigurationError.invalidStoredWaiter(entry)
+                    }
+                    waiters.append(Waiter(sequence: sequence, url: entry))
                 }
             }
         }
-        return waiters.sorted {
-            if $0.priority != $1.priority { return $0.priority.rank > $1.priority.rank }
-            return $0.sequence < $1.sequence
-        }
+        return waiters.sorted { $0.sequence < $1.sequence }
     }
 
     private static func removeWaiter(_ url: URL) throws {
@@ -446,7 +403,7 @@ public struct HostExecutionPool: Sendable {
             case .invalidStoredConfiguration(let directory):
                 return "The pool at \(directory.path(percentEncoded: false)) has invalid saved settings."
             case .invalidStoredWaiter(let url):
-                return "The waiting record at \(url.path(percentEncoded: false)) has an invalid sequence or priority."
+                return "The waiting record at \(url.path(percentEncoded: false)) has an invalid sequence or identifier."
             }
         }
     }

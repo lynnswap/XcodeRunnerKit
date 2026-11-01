@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify pool administration, admission priorities, and Xcode commands."""
+"""Verify pool administration, arrival-order admission, and Xcode commands."""
 import argparse
 import json
 import os
@@ -17,10 +17,10 @@ ACTIONS = ("build", "build-for-testing", "test", "test-without-building")
 HANG_LIMIT = 120
 
 
-def expected_status(capacity, active, high=0, medium=0, low=0, retention=None):
+def expected_status(capacity, active, waiting=0, retention=None):
     return {"configuration": {"maximumConcurrentJobs": capacity,
                               "simulatorRetention": retention or {"mode": "idleTimeout", "minutes": 20}},
-            "activeJobCount": active, "waitingJobCounts": {"high": high, "medium": medium, "low": low}}
+            "activeJobCount": active, "waitingJobCount": waiting}
 
 
 def wait_for(predicate, timeout=HANG_LIMIT):
@@ -77,7 +77,7 @@ def main():
         assert "not configured" in command("pool", "status", "--pool-directory", pool).stdout
         configure(6)
         assert status() == expected_status(6, 0)
-        assert "Waiting jobs: 0 (high: 0, medium: 0, low: 0)" in command(
+        assert "Waiting jobs: 0" in command(
             "pool", "status", "--pool-directory", pool).stdout
 
         probe = root / "pool-probe"
@@ -106,17 +106,17 @@ def main():
             wait_for(lambda: all(started(f"active-{index}") for index in range(6)))
             assert status() == expected_status(6, 6)
             start("waiter")
-            wait_for(lambda: status() == expected_status(6, 6, medium=1))
+            wait_for(lambda: status() == expected_status(6, 6, waiting=1))
             configured = configure(4)
             assert "Maximum concurrent jobs: 4" in configured.stdout
             assert "Active jobs: 6" in configured.stdout
-            assert "Waiting jobs: 1 (high: 0, medium: 1, low: 0)" in configured.stdout
-            assert status() == expected_status(4, 6, medium=1)
+            assert "Waiting jobs: 1" in configured.stdout
+            assert status() == expected_status(4, 6, waiting=1)
             assert all(jobs[f"active-{index}"].poll() is None for index in range(6))
             assert not started("waiter"), "Shrinking the pool started a queued job"
             release("active-0")
             release("active-1")
-            assert status() == expected_status(4, 4, medium=1)
+            assert status() == expected_status(4, 4, waiting=1)
             assert not started("waiter"), "A queued job bypassed the reduced capacity"
             release("active-2")
             wait_for(lambda: started("waiter"))
@@ -136,41 +136,38 @@ def main():
             compiler = root / "gated-clang"
             compiler.write_text('''#!/bin/bash
 set -euo pipefail
-touch "$CLI_PRIORITY_GATE.started"
-while [[ ! -e "$CLI_PRIORITY_GATE.release" ]]; do sleep 0.02; done
+touch "$CLI_QUEUE_GATE.started"
+while [[ ! -e "$CLI_QUEUE_GATE.release" ]]; do sleep 0.02; done
 exec "$(xcrun --find clang)" "$@"
 ''')
             compiler.chmod(0o755)
             configure(1)
-            start("priority-blocker")
-            wait_for(lambda: started("priority-blocker"))
-            waiting_counts = {"high": 0, "medium": 0, "low": 0}
-            for priority in ("low", "medium", "high"):
-                output = open(root / (priority + ".log"), "wb")
+            start("queue-blocker")
+            wait_for(lambda: started("queue-blocker"))
+            execution_order = ("first", "second", "third")
+            for index, name in enumerate(execution_order):
+                output = open(root / (name + ".log"), "wb")
                 logs.append(output)
-                # Omit the medium flag to verify the default through actual admission.
-                priority_arguments = [] if priority == "medium" else ["--priority", priority]
-                jobs[priority] = subprocess.Popen([
+                jobs[name] = subprocess.Popen([
                     executable, "build", "--package", str(package), "--scheme", "BuildProbe",
                     "--destination", "platform=macOS,arch=arm64",
-                    "--output-directory", str(root / (priority + "-output")),
+                    "--output-directory", str(root / (name + "-output")),
                     "--pool-directory", str(pool),
                     "--setting", f"CC={compiler}",
-                    "--environment", f"CLI_PRIORITY_GATE={root / priority}",
-                    *priority_arguments, "--", "-jobs", "2",
+                    "--environment", f"CLI_QUEUE_GATE={root / name}",
+                    "--", "-jobs", "2",
                 ], stdout=output, stderr=subprocess.STDOUT)
-                waiting_counts[priority] += 1
-                wait_for(lambda: status() == expected_status(1, 1, **waiting_counts))
-                assert jobs[priority].poll() is None, (root / (priority + ".log")).read_text()
+                wait_for(lambda: status() == expected_status(1, 1, waiting=index + 1))
+                assert jobs[name].poll() is None, (root / (name + ".log")).read_text()
             waiting_text = command("pool", "status", "--pool-directory", pool).stdout
-            assert "Waiting jobs: 3 (high: 1, medium: 1, low: 1)" in waiting_text
-            assert all(not (root / (value + "-output")).exists() for value in ("high", "medium", "low"))
-            release("priority-blocker")
-            for priority, later in (("high", ("medium", "low")), ("medium", ("low",)), ("low", ())):
-                wait_for(lambda: (root / (priority + ".started")).exists(), timeout=300)
-                assert all(not (root / (value + "-output")).exists() for value in later), "Wrong CLI admission order"
-                (root / (priority + ".release")).touch()
-                assert jobs[priority].wait(timeout=300) == 0, (root / (priority + ".log")).read_text()
+            assert "Waiting jobs: 3\n" in waiting_text
+            assert all(not (root / (value + "-output")).exists() for value in execution_order)
+            release("queue-blocker")
+            for index, name in enumerate(execution_order):
+                wait_for(lambda: (root / (name + ".started")).exists(), timeout=300)
+                assert all(not (root / (value + "-output")).exists() for value in execution_order[index + 1:]), "Wrong CLI admission order"
+                (root / (name + ".release")).touch()
+                assert jobs[name].wait(timeout=300) == 0, (root / (name + ".log")).read_text()
             assert status() == expected_status(1, 0)
         finally:
             for job in jobs.values():
@@ -212,14 +209,8 @@ exec "$(xcrun --find clang)" "$@"
             command(action, "--help")
         # All actions share BuildOptions and run for real below, so one action checks the shared help and rejections.
         help_text = command("build", "--help").stdout
-        assert all(option in help_text for option in ("--scheme", "--compilation-cache", "--priority"))
+        assert all(option in help_text for option in ("--scheme", "--compilation-cache"))
         assert "--maximum-concurrent-jobs" not in help_text
-        assert "GitHub dispatch is unaffected" in " ".join(help_text.split())
-        # Priorities are case-sensitive, and an explicit empty value does not fall back to medium.
-        for invalid in ("HIGH", ""):
-            result = command("build", "--package", root / "Missing", "--scheme", "Fixture",
-                             "--priority", invalid, success=False)
-            assert "Expected high, medium, or low for --priority" in result.stderr
         result = command("build", "--package", root / "Missing", "--scheme", "Fixture",
                          "--simulator-runtime", "runtime", success=False)
         assert "Specify both --simulator-runtime and --simulator-device-type." in result.stderr
@@ -233,9 +224,7 @@ exec "$(xcrun --find clang)" "$@"
             result = command("test", source_option, package, "--package", package,
                              "--scheme", "BuildProbe", success=False)
             assert "Specify exactly one" in result.stderr
-        for action, priority in (("build-for-testing", "high"), ("test-without-building", "low"),
-                                 ("build", "medium"), ("test", None)):
-            priority_arguments = ["--priority", priority] if priority else []
+        for action in ("build-for-testing", "test-without-building", "build", "test"):
             pool_arguments = [] if action == "build" else ["--pool-directory", pool]
             result = command(action, "--package", package, "--scheme", "BuildProbe",
                              "--destination", "platform=macOS,arch=arm64",
@@ -244,7 +233,6 @@ exec "$(xcrun --find clang)" "$@"
                              *pool_arguments,
                              "--setting", "CLI_PROBE_SETTING=accepted",
                              "--environment", "TEST_RUNNER_PROBE_MODE=success",
-                             *priority_arguments,
                              "--", "-parallel-testing-enabled", "NO", "-jobs", "2",
                              timeout=300)
             assert "Log: " in result.stdout and "Result bundle: " in result.stdout
@@ -278,7 +266,7 @@ esac''',
                          "--output-directory", root / "CleanupFailureOutput", success=False)
         assert result.returncode == 65, (result.returncode, result.stdout, result.stderr)
         assert "Log: " in result.stderr and "fake-deletion-failed" in result.stderr, result.stderr
-        print("PASS: CLI status/configure and partial retention updates, live shrink, priority admission and counts, invalid input, existing Xcode actions, explicit pool setup, cleanup failure exit status")
+        print("PASS: CLI status/configure and partial retention updates, live shrink, arrival-order admission and waiting count, invalid input, existing Xcode actions, explicit pool setup, cleanup failure exit status")
 
 
 if __name__ == "__main__":
