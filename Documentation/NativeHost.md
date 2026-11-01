@@ -38,7 +38,7 @@ bash Scripts/build-runner-host.sh TEAM_ID .build/RunnerHost
 bash Scripts/install-runner-host.sh .build/RunnerHost/XcodeHomeRunner.app
 ```
 
-The build script archives `App/XcodeHomeRunner.xcworkspace` and exports it for
+The build script archives `XcodeRunnerKit.xcworkspace` and exports it for
 Developer ID distribution with Xcode-managed signing. The app has an Associated
 Domains entitlement for its sign-in callback, so the first build lets Xcode
 register the `lynnpd.xcodehomerunner` App ID and create its provisioning
