@@ -6,7 +6,9 @@ let package = Package(
     platforms: [.macOS(.v26)],
     products: [
         .library(name: "XcodeRunnerKit", targets: ["XcodeRunnerKit"]),
-        .executable(name: "xcode-runner", targets: ["XcodeRunnerCLI"]),
+        .executable(name: "xcode-runner", targets: ["XcodeRunnerTool"]),
+        // The CLI's implementation, linked by the xcode-runner tool that the host app embeds. Not a supported library API.
+        .library(name: "XcodeRunnerCLI", targets: ["XcodeRunnerCLI"]),
         // The host app's implementation, linked by App/XcodeHomeRunner.xcodeproj. Not a supported library API.
         .library(name: "XcodeRunnerHostApp", targets: ["XcodeRunnerHostApp"]),
     ],
@@ -27,13 +29,18 @@ let package = Package(
             dependencies: ["XcodeRunnerKit"],
             swiftSettings: [.swiftLanguageMode(.v6), .defaultIsolation(nil)]
         ),
-        .executableTarget(
+        .target(
             name: "XcodeRunnerCLI",
             dependencies: [
                 "XcodeRunnerKit", "XcodeRunnerHostSupport",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "MCP", package: "swift-sdk"),
             ],
+            swiftSettings: [.swiftLanguageMode(.v6), .defaultIsolation(nil)]
+        ),
+        .executableTarget(
+            name: "XcodeRunnerTool",
+            dependencies: ["XcodeRunnerCLI"],
             swiftSettings: [.swiftLanguageMode(.v6), .defaultIsolation(nil)]
         ),
         .target(

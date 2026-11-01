@@ -1,6 +1,10 @@
 import ArgumentParser
 
-@main
+/// The CLI's entry point. Each `xcode-runner` executable calls `main()` from its `main.swift`.
+public enum RunnerCommandLine {
+    public static func main() async { await RunnerCommand.main() }
+}
+
 struct RunnerCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "xcode-runner",
