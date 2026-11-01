@@ -23,6 +23,22 @@ struct HostExecutionPoolTests {
         #expect(try await pool.status()?.configuration == configured)
     }
 
+    @Test func abandonedWaiterFromAnOlderClientDoesNotBlockAdmission() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pool = HostExecutionPool(directory: root)
+        try await pool.configure(maximumConcurrentJobs: 1)
+        let abandoned = root.appending(path: "waiter-0-medium-\(UUID().uuidString).lock")
+        try Data().write(to: abandoned)
+
+        try await pool.withSlot {}
+
+        #expect(!FileManager.default.fileExists(atPath: abandoned.path))
+        let status = try #require(try await pool.status())
+        #expect(status.activeJobCount == 0)
+        #expect(status.waitingJobCount == 0)
+    }
+
     @Test func concurrentPartialUpdatesPreserveBothSettings() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

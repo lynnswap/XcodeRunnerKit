@@ -66,17 +66,6 @@ struct BuildOptions: ParsableArguments {
     var freshSimulator = false
     @Option(help: "Local directory shared by every repository runner on this Mac.")
     var poolDirectory: String?
-    @Option(
-        help: "Local admission priority with --pool-directory: high, medium, or low (default: medium). Running jobs continue; GitHub dispatch is unaffected.",
-        completion: .list(HostExecutionPool.Priority.allCases.map(\.rawValue)),
-        transform: { value in
-            guard let priority = HostExecutionPool.Priority(rawValue: value) else {
-                throw ValidationError("Expected high, medium, or low for --priority: " + value)
-            }
-            return priority
-        }
-    )
-    var priority: HostExecutionPool.Priority = .medium
     @Option(name: .customLong("setting"), help: "A build setting in NAME=VALUE form. May be repeated.")
     var settings: [String] = []
     @Option(name: .customLong("environment"), help: "A child environment value in NAME=VALUE form. May be repeated.")
@@ -134,9 +123,8 @@ struct BuildOptions: ParsableArguments {
             runner.executionPool = HostExecutionPool(directory: host.poolDirectory)
         }
         let configuredRunner = runner
-        let executionPriority = priority
         let task = Task {
-            try await configuredRunner.run(action, request: request, priority: executionPriority) { data in
+            try await configuredRunner.run(action, request: request) { data in
                 try FileHandle.standardOutput.write(contentsOf: data)
             }
         }

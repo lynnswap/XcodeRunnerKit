@@ -29,12 +29,12 @@ def main():
         roots = {}
         logs = []
 
-        def start(name, job_root=root, priority="medium"):
+        def start(name, job_root=root):
             roots[name] = job_root
             log = open(root / (name + ".log"), "wb")
             logs.append(log)
             jobs[name] = subprocess.Popen(
-                [str(executable), str(job_root), name, priority], stdout=log, stderr=subprocess.STDOUT
+                [str(executable), str(job_root), name], stdout=log, stderr=subprocess.STDOUT
             )
             wait_for(lambda: (job_root / (name + ".ready")).exists() or jobs[name].poll() is not None)
             return jobs[name]
@@ -61,12 +61,12 @@ def main():
             )
             return json.loads(result.stdout)
 
-        def expected_status(capacity, active, high=0, medium=0, low=0):
+        def expected_status(capacity, active, waiting=0):
             return {
                 "configuration": {"maximumConcurrentJobs": capacity,
                                   "simulatorRetention": {"mode": "idleTimeout", "minutes": 20}},
                 "activeJobCount": active,
-                "waitingJobCounts": {"high": high, "medium": medium, "low": low},
+                "waitingJobCount": waiting,
             }
 
         def assert_waiting(name, job_root, expected):
@@ -83,12 +83,12 @@ def main():
             start("b")
             wait_for(lambda: started("a") and started("b"))
             start("c")
-            assert_waiting("c", root, expected_status(2, 2, medium=1))
+            assert_waiting("c", root, expected_status(2, 2, waiting=1))
             cancel("c")
             assert not started("c"), "Cancelled waiter executed its payload"
 
             start("d")
-            assert_waiting("d", root, expected_status(2, 2, medium=1))
+            assert_waiting("d", root, expected_status(2, 2, waiting=1))
             cancel("a")
             wait_for(lambda: started("d"))
             assert jobs["b"].poll() is None
@@ -107,15 +107,15 @@ def main():
                 start(name, shrink)
                 wait_for(lambda name=name: started(name))
             start("shrink-waiter", shrink)
-            assert_waiting("shrink-waiter", shrink, expected_status(6, 6, medium=1))
+            assert_waiting("shrink-waiter", shrink, expected_status(6, 6, waiting=1))
             coordinator_inode = (shrink / "pool/pool.lock").stat().st_ino
-            assert update(4, shrink) == expected_status(4, 6, medium=1)
+            assert update(4, shrink) == expected_status(4, 6, waiting=1)
             assert (shrink / "pool/pool.lock").stat().st_ino == coordinator_inode
             assert all(jobs[f"shrink-{index}"].poll() is None for index in range(6))
             release("shrink-0")
-            assert_waiting("shrink-waiter", shrink, expected_status(4, 5, medium=1))
+            assert_waiting("shrink-waiter", shrink, expected_status(4, 5, waiting=1))
             release("shrink-1")
-            assert_waiting("shrink-waiter", shrink, expected_status(4, 4, medium=1))
+            assert_waiting("shrink-waiter", shrink, expected_status(4, 4, waiting=1))
             release("shrink-2")
             wait_for(lambda: started("shrink-waiter"))
             assert status(shrink) == expected_status(4, 4)
@@ -130,14 +130,14 @@ def main():
                 start(name, grow)
                 wait_for(lambda name=name: started(name))
             start("grow-c", grow)
-            assert_waiting("grow-c", grow, expected_status(2, 2, medium=1))
+            assert_waiting("grow-c", grow, expected_status(2, 2, waiting=1))
             assert update(4, grow)["configuration"]["maximumConcurrentJobs"] == 4
             wait_for(lambda: started("grow-c"))
             start("grow-d", grow)
             wait_for(lambda: started("grow-d"))
             assert status(grow) == expected_status(4, 4)
             start("grow-after-exit", grow)
-            assert_waiting("grow-after-exit", grow, expected_status(4, 4, medium=1))
+            assert_waiting("grow-after-exit", grow, expected_status(4, 4, waiting=1))
             jobs["grow-a"].kill()
             assert jobs["grow-a"].wait(timeout=HANG_LIMIT) == -signal.SIGKILL
             wait_for(lambda: started("grow-after-exit"))
@@ -148,25 +148,18 @@ def main():
             ordered = root / "ordered"
             ordered.mkdir()
             update(1, ordered)
-            start("priority-running", ordered, priority="low")
-            wait_for(lambda: started("priority-running"))
-            priorities = (
-                ("low-first", "low"), ("medium-first", "medium"), ("low-second", "low"),
-                ("high-first", "high"), ("high-second", "high"),
-            )
-            counts = {"high": 0, "medium": 0, "low": 0}
-            for name, priority in priorities:
-                start(name, ordered, priority=priority)
-                counts[priority] += 1
-                wait_for(lambda: status(ordered)["waitingJobCounts"] == counts)
-                assert not started(name)
-            assert status(ordered) == expected_status(1, 1, high=2, medium=1, low=2)
-            assert jobs["priority-running"].poll() is None, "A high priority preempted an active operation"
-            previous = "priority-running"
-            execution_order = ("high-first", "high-second", "medium-first", "low-first", "low-second")
+            start("ordered-running", ordered)
+            wait_for(lambda: started("ordered-running"))
+            execution_order = ("first", "second", "third")
+            for index, name in enumerate(execution_order):
+                start(name, ordered)
+                assert_waiting(name, ordered, expected_status(1, 1, waiting=index + 1))
+            assert jobs["ordered-running"].poll() is None, "A waiting job interrupted an active operation"
+            previous = "ordered-running"
             for index, name in enumerate(execution_order):
                 release(previous)
                 wait_for(lambda name=name: started(name))
+                assert status(ordered) == expected_status(1, 1, waiting=len(execution_order) - index - 1)
                 assert all(not started(pending) for pending in execution_order[index + 1:])
                 previous = name
             release(previous)
@@ -178,43 +171,40 @@ def main():
             update(1, abandoned)
             start("abandoned-running", abandoned)
             wait_for(lambda: started("abandoned-running"))
-            start("surviving-low", abandoned, priority="low")
-            wait_for(lambda: status(abandoned)["waitingJobCounts"]["low"] == 1)
-            start("cancelled-high", abandoned, priority="high")
-            wait_for(lambda: status(abandoned)["waitingJobCounts"]["high"] == 1)
-            cancel("cancelled-high")
-            assert status(abandoned) == expected_status(1, 1, low=1)
-            start("killed-high", abandoned, priority="high")
-            wait_for(lambda: status(abandoned)["waitingJobCounts"]["high"] == 1)
-            jobs["killed-high"].kill()
-            assert jobs["killed-high"].wait(timeout=HANG_LIMIT) == -signal.SIGKILL
-            assert status(abandoned) == expected_status(1, 1, low=1)
-            assert not started("cancelled-high") and not started("killed-high")
+            for index, name in enumerate(("cancelled-waiter", "killed-waiter", "surviving-waiter")):
+                start(name, abandoned)
+                assert_waiting(name, abandoned, expected_status(1, 1, waiting=index + 1))
+            cancel("cancelled-waiter")
+            assert_waiting("surviving-waiter", abandoned, expected_status(1, 1, waiting=2))
+            jobs["killed-waiter"].kill()
+            assert jobs["killed-waiter"].wait(timeout=HANG_LIMIT) == -signal.SIGKILL
+            assert_waiting("surviving-waiter", abandoned, expected_status(1, 1, waiting=1))
+            assert not started("cancelled-waiter") and not started("killed-waiter")
             release("abandoned-running")
-            wait_for(lambda: started("surviving-low"))
-            release("surviving-low")
+            wait_for(lambda: started("surviving-waiter"))
+            release("surviving-waiter")
             assert not list((abandoned / "pool").glob("waiter-*.lock")), "Dead queue records blocked cleanup"
 
-            resized_priority = root / "resized-priority"
-            resized_priority.mkdir()
-            update(2, resized_priority)
+            resized = root / "resized"
+            resized.mkdir()
+            update(2, resized)
             for name in ("resize-running-a", "resize-running-b"):
-                start(name, resized_priority, priority="low")
+                start(name, resized)
                 wait_for(lambda name=name: started(name))
-            start("resize-low", resized_priority, priority="low")
-            wait_for(lambda: status(resized_priority)["waitingJobCounts"]["low"] == 1)
-            start("resize-high", resized_priority, priority="high")
-            wait_for(lambda: status(resized_priority)["waitingJobCounts"]["high"] == 1)
-            assert update(1, resized_priority) == expected_status(1, 2, high=1, low=1)
+            start("resize-first", resized)
+            assert_waiting("resize-first", resized, expected_status(2, 2, waiting=1))
+            start("resize-second", resized)
+            assert_waiting("resize-second", resized, expected_status(2, 2, waiting=2))
+            assert update(1, resized) == expected_status(1, 2, waiting=2)
             release("resize-running-a")
-            assert_waiting("resize-high", resized_priority, expected_status(1, 1, high=1, low=1))
+            assert_waiting("resize-first", resized, expected_status(1, 1, waiting=2))
             release("resize-running-b")
-            wait_for(lambda: started("resize-high"))
-            assert_waiting("resize-low", resized_priority, expected_status(1, 1, low=1))
-            update(2, resized_priority)
-            wait_for(lambda: started("resize-low"))
-            assert status(resized_priority) == expected_status(2, 2)
-            for name in ("resize-high", "resize-low"):
+            wait_for(lambda: started("resize-first"))
+            assert_waiting("resize-second", resized, expected_status(1, 1, waiting=1))
+            update(2, resized)
+            wait_for(lambda: started("resize-second"))
+            assert status(resized) == expected_status(2, 2)
+            for name in ("resize-first", "resize-second"):
                 release(name)
 
             physical = root / "physical"
@@ -231,10 +221,10 @@ def main():
             start("physical-b", physical)
             wait_for(lambda: started("physical-b"))
             start("alias-waiter", alias)
-            assert_waiting("alias-waiter", alias, expected_status(2, 2, medium=1))
-            assert update(1, alias) == expected_status(1, 2, medium=1)
+            assert_waiting("alias-waiter", alias, expected_status(2, 2, waiting=1))
+            assert update(1, alias) == expected_status(1, 2, waiting=1)
             release("alias-a")
-            assert_waiting("alias-waiter", alias, expected_status(1, 1, medium=1))
+            assert_waiting("alias-waiter", alias, expected_status(1, 1, waiting=1))
             release("physical-b")
             wait_for(lambda: started("alias-waiter"))
             assert status(alias) == status(physical) == expected_status(1, 1)
@@ -274,7 +264,7 @@ def main():
             try:
                 result = subprocess.run([str(executable), str(unconfigured), "update", "5"], capture_output=True)
                 assert result.returncode != 0, "A configuration write failure returned success"
-                job = start("unwritable-queue", unconfigured, priority="high")
+                job = start("unwritable-queue", unconfigured)
                 assert job.wait(timeout=HANG_LIMIT) != 0
                 assert not started("unwritable-queue"), "A waiting-record write failure executed a payload"
             finally:
@@ -308,7 +298,7 @@ def main():
                 assert not started(name), "Invalid saved settings executed a payload"
                 assert json.loads(saved.read_text()) == value, "A job replaced invalid settings"
 
-            print("PASS: explicit configuration, live shrink/grow, priorities, same-priority FIFO, queued counts, cancellation, process exit, invalid settings, I/O failures")
+            print("PASS: explicit configuration, live shrink/grow, arrival-order admission, waiting count, cancellation, process exit, invalid settings, I/O failures")
         finally:
             for job in jobs.values():
                 if job.poll() is None:

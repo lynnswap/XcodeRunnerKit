@@ -11,7 +11,7 @@ struct Pool: AsyncParsableCommand {
 
     struct Status: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Show the maximum concurrent jobs, active jobs, and waiting jobs by priority without initializing the pool."
+            abstract: "Show the maximum concurrent jobs, active jobs, and waiting jobs without initializing the pool."
         )
 
         @OptionGroup private var options: PoolOptions
@@ -108,6 +108,5 @@ private func report(_ status: HostExecutionPool.Status?, json: Bool) throws {
     case .idleTimeout(let minutes): print("Simulator retention: \(minutes) idle minutes")
     }
     print("Active jobs: \(status.activeJobCount)")
-    let waiting = status.waitingJobCounts
-    print("Waiting jobs: \(waiting.total) (high: \(waiting.high), medium: \(waiting.medium), low: \(waiting.low))")
+    print("Waiting jobs: \(status.waitingJobCount)")
 }

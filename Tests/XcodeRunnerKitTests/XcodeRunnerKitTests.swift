@@ -5,7 +5,7 @@ import Testing
 
 @Suite(.timeLimit(.minutes(1)))
 struct XcodeRunnerKitTests {
-    @Test func runnerPassesOperationPriorityToTheSharedPool() async throws {
+    @Test func runnerStartsWaitingOperationsInArrivalOrder() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -14,18 +14,18 @@ struct XcodeRunnerKitTests {
         var configuredRunner = XcodeRunner(executableURL: executable)
         configuredRunner.executionPool = pool
         let runner = configuredRunner
-        var configuredLow = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "low-output"))
-        configuredLow.environment = [
-            "STARTED_PATH": root.appending(path: "low-started").path,
-            "RELEASE_PATH": root.appending(path: "low-release").path,
+        var configuredFirst = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "first-output"))
+        configuredFirst.environment = [
+            "STARTED_PATH": root.appending(path: "first-started").path,
+            "RELEASE_PATH": root.appending(path: "first-release").path,
         ]
-        let low = configuredLow
-        var configuredHigh = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "high-output"))
-        configuredHigh.environment = [
-            "STARTED_PATH": root.appending(path: "high-started").path,
-            "RELEASE_PATH": root.appending(path: "high-release").path,
+        let first = configuredFirst
+        var configuredSecond = XcodeBuildRequest(source: .package(root), scheme: "Probe", outputDirectory: root.appending(path: "second-output"))
+        configuredSecond.environment = [
+            "STARTED_PATH": root.appending(path: "second-started").path,
+            "RELEASE_PATH": root.appending(path: "second-release").path,
         ]
-        let high = configuredHigh
+        let second = configuredSecond
         try await withThrowingTaskGroup(of: Void.self) { group in
             defer { group.cancelAll() }
             group.addTask {
@@ -37,21 +37,21 @@ struct XcodeRunnerKitTests {
                 }
             }
             try await waitForFile(root.appending(path: "blocker-started"))
-            group.addTask { _ = try await runner.run(.build, request: low, priority: .low) }
-            try await waitForWaitingCount(1, at: .low, in: pool)
-            group.addTask { _ = try await runner.run(.build, request: high, priority: .high) }
-            try await waitForWaitingCount(1, at: .high, in: pool)
+            group.addTask { _ = try await runner.run(.build, request: first) }
+            try await waitForWaitingCount(1, in: pool)
+            group.addTask { _ = try await runner.run(.build, request: second) }
+            try await waitForWaitingCount(2, in: pool)
             try Data().write(to: root.appending(path: "blocker-release"))
-            try await waitForFile(root.appending(path: "high-started"))
-            #expect(!FileManager.default.fileExists(atPath: root.appending(path: "low-started").path))
-            try Data().write(to: root.appending(path: "high-release"))
-            try await waitForFile(root.appending(path: "low-started"))
-            try Data().write(to: root.appending(path: "low-release"))
+            try await waitForFile(root.appending(path: "first-started"))
+            #expect(!FileManager.default.fileExists(atPath: root.appending(path: "second-started").path))
+            try Data().write(to: root.appending(path: "first-release"))
+            try await waitForFile(root.appending(path: "second-started"))
+            try Data().write(to: root.appending(path: "second-release"))
             try await group.waitForAll()
         }
         let status = try #require(try await pool.status())
         #expect(status.activeJobCount == 0)
-        #expect(status.waitingJobCounts.total == 0)
+        #expect(status.waitingJobCount == 0)
     }
 
     @Test func capturesOutputAndPreservesArgumentsWithSpaces() async throws {
@@ -438,7 +438,7 @@ struct XcodeRunnerKitTests {
         try await waitUntil { FileManager.default.fileExists(atPath: url.path) }
     }
 
-    private func waitForWaitingCount(_ count: Int, at priority: HostExecutionPool.Priority, in pool: HostExecutionPool) async throws {
-        try await waitUntil { try await pool.status()?.waitingJobCounts[priority] == count }
+    private func waitForWaitingCount(_ count: Int, in pool: HostExecutionPool) async throws {
+        try await waitUntil { try await pool.status()?.waitingJobCount == count }
     }
 }

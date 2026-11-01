@@ -34,7 +34,7 @@ public struct XcodeRunner: Sendable {
     /// cancellation, failures before xcodebuild starts, and cleanup failures.
     /// Cancellation terminates the operation's process group. Failures retain
     /// the job's artifact locations once its directory exists, including
-    /// incomplete output. Priority orders waiting operations when an
+    /// incomplete output. Waiting operations start in arrival order when an
     /// executionPool is configured.
     /// Missing managed Simulator runtimes are downloaded before device creation.
     /// If compilation fails because the Metal Toolchain is missing, downloads
@@ -43,13 +43,12 @@ public struct XcodeRunner: Sendable {
     public func run(
         _ action: XcodeBuildAction,
         request: XcodeBuildRequest,
-        priority: HostExecutionPool.Priority = .medium,
         onOutput: (@Sendable (Data) throws -> Void)? = nil
     ) async throws -> XcodeBuildResult {
         guard let executionPool else {
             return try await runManaged(action, request: request, onOutput: onOutput).get()
         }
-        let slot = await executionPool.slotOutcome(priority: priority) {
+        let slot = await executionPool.slotOutcome {
             await runManaged(action, request: request, onOutput: onOutput)
         }
         let outcome: XcodeBuildOutcome

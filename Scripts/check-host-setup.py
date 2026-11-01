@@ -156,7 +156,7 @@ with tempfile.TemporaryDirectory(prefix="Hosted CLI unavailable storage ") as te
         wait_for(lambda: (admission / "blocker.started").exists(), "Pool blocker did not acquire its slot")
         queued = subprocess.Popen(build[:-3] + pool_arguments + build[-3:], env=environment,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        wait_for(lambda: pool_status()["waitingJobCounts"]["medium"] == 1,
+        wait_for(lambda: pool_status()["waitingJobCount"] == 1,
                  "Hosted operation did not wait for the pool")
         assert queued.poll() is None
         assert not list((storage / "Build").iterdir())
@@ -169,7 +169,7 @@ with tempfile.TemporaryDirectory(prefix="Hosted CLI unavailable storage ") as te
         assert not storage.exists(), "A queued operation recreated its unavailable storage parent"
         assert not list((offline / "Build").iterdir())
         status = pool_status()
-        assert status["activeJobCount"] == 0 and not any(status["waitingJobCounts"].values())
+        assert status["activeJobCount"] == 0 and status["waitingJobCount"] == 0
     finally:
         for process in (queued, blocker):
             if process is not None and process.poll() is None:
