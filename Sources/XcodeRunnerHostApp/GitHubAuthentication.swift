@@ -19,16 +19,6 @@ struct GitHubCredentials: Codable, Sendable {
     let refreshExpiresAt: Date?
 }
 
-struct GitHubApplicationCredentials: Codable, Sendable {
-    let clientID: String
-    let clientSecret: String
-}
-
-private struct GitHubApplicationState: Codable {
-    var current: GitHubApplicationCredentials?
-    var pending: CreatedGitHubApp?
-}
-
 protocol GitHubCredentialStore: Sendable {
     func read() throws -> Data?
     func write(_ data: Data) throws
@@ -39,9 +29,9 @@ struct GitHubKeychainStore: GitHubCredentialStore {
     private let account: String
     private let service = "lynnpd.xcodehomerunner.github"
 
-    init(hostRoot: URL, accountSuffix: String = "credentials") {
+    init(hostRoot: URL) {
         account = SHA256.hash(data: Data(hostRoot.standardizedFileURL.path(percentEncoded: false).utf8))
-            .map { String(format: "%02x", $0) }.joined() + "." + accountSuffix
+            .map { String(format: "%02x", $0) }.joined() + ".credentials"
     }
 
     func read() throws -> Data? {
@@ -87,73 +77,35 @@ struct GitHubKeychainStore: GitHubCredentialStore {
 }
 
 actor GitHubAuthentication {
+    private let clientID: String
     private let client: GitHubClient
     private let store: any GitHubCredentialStore
-    private let appStore: (any GitHubCredentialStore)?
     private let sleep: @Sendable (TimeInterval) async throws -> Void
     private let now: @Sendable () -> Date
     private var generation = 0
     private var refresh: (id: UUID, task: Task<String, any Error>)?
 
-    init(hostRoot: URL, client: GitHubClient = .init()) {
-        self.init(
-            client: client, store: GitHubKeychainStore(hostRoot: hostRoot),
-            appStore: GitHubKeychainStore(hostRoot: hostRoot, accountSuffix: "application")
-        )
+    init(hostRoot: URL, clientID: String, client: GitHubClient = .init()) {
+        self.init(clientID: clientID, client: client, store: GitHubKeychainStore(hostRoot: hostRoot))
     }
 
     init(
-        client: GitHubClient, store: any GitHubCredentialStore, appStore: (any GitHubCredentialStore)? = nil,
+        clientID: String, client: GitHubClient, store: any GitHubCredentialStore,
         sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
+        self.clientID = clientID
         self.client = client
         self.store = store
-        self.appStore = appStore
         self.sleep = sleep
         self.now = now
     }
 
-    func begin(clientID: String) async throws -> GitHubDeviceAuthorization {
+    func begin() async throws -> GitHubDeviceAuthorization {
         try await client.beginDeviceAuthorization(clientID: clientID)
     }
 
-    func stageCreatedApp(_ app: CreatedGitHubApp) throws {
-        var applications = try applications()
-        applications.pending = app
-        try saveApplications(applications)
-    }
-
-    func pendingCreatedApp() throws -> CreatedGitHubApp? {
-        try applications().pending
-    }
-
-    func activatePendingApp(clientID: String) throws {
-        var applications = try applications()
-        guard let pending = applications.pending, pending.clientID == clientID else { throw GitHubError.authenticationChanged }
-        applications.current = GitHubApplicationCredentials(clientID: pending.clientID, clientSecret: pending.clientSecret)
-        applications.pending = nil
-        try saveApplications(applications)
-    }
-
-    func completeWebAuthorization(
-        clientID: String, code: String, redirectURI: URL, codeVerifier: String
-    ) async throws -> GitHubAccount {
-        guard let app = try applicationCredentials(clientID: clientID) else { throw GitHubError.notSignedIn }
-        let originalGeneration = generation
-        let response = try await client.exchangeAuthorizationCode(
-            clientID: clientID, clientSecret: app.clientSecret, code: code, redirectURI: redirectURI, codeVerifier: codeVerifier
-        )
-        let token = try response.validatedAccessToken()
-        let account = try await client.currentAccount(accessToken: token)
-        try Task.checkCancellation()
-        guard generation == originalGeneration else { throw GitHubError.authenticationChanged }
-        try save(response: response, account: account, clientID: clientID)
-        generation += 1
-        return account
-    }
-
-    func finish(clientID: String, authorization: GitHubDeviceAuthorization) async throws -> GitHubAccount {
+    func finish(_ authorization: GitHubDeviceAuthorization) async throws -> GitHubAccount {
         let originalGeneration = generation
         var interval = authorization.interval
         while now() < authorization.expiresAt {
@@ -173,20 +125,20 @@ actor GitHubAuthentication {
             let account = try await client.currentAccount(accessToken: token)
             try Task.checkCancellation()
             guard generation == originalGeneration else { throw GitHubError.authenticationChanged }
-            try save(response: response, account: account, clientID: clientID)
+            try save(response: response, account: account)
             generation += 1
             return account
         }
         throw GitHubError.deviceAuthorizationExpired
     }
 
-    func account(clientID: String? = nil) throws -> GitHubAccount? {
-        guard let credentials = try credentials(), clientID == nil || credentials.clientID == clientID else { return nil }
-        return credentials.account
+    /// The signed-in account. Credentials saved for another app's Client ID do not count.
+    func account() throws -> GitHubAccount? {
+        try credentials()?.account
     }
 
-    func accessToken(clientID: String, rejecting rejectedToken: String? = nil) async throws -> String {
-        guard let credentials = try credentials(), credentials.clientID == clientID else { throw GitHubError.notSignedIn }
+    func accessToken(rejecting rejectedToken: String? = nil) async throws -> String {
+        guard let credentials = try credentials() else { throw GitHubError.notSignedIn }
         if rejectedToken != credentials.accessToken,
            credentials.expiresAt == nil || credentials.expiresAt! > now().addingTimeInterval(60) {
             return credentials.accessToken
@@ -200,16 +152,13 @@ actor GitHubAuthentication {
         if let refresh {
             pending = refresh.task
         } else {
-            let clientSecret = try applicationCredentials(clientID: clientID)?.clientSecret
             let id = UUID()
             pending = Task {
                 defer { if refresh?.id == id { refresh = nil } }
-                let response = try await client.refreshToken(
-                    clientID: clientID, clientSecret: clientSecret, refreshToken: refreshToken
-                )
+                let response = try await client.refreshToken(clientID: clientID, refreshToken: refreshToken)
                 guard generation == originalGeneration else { throw GitHubError.authenticationChanged }
                 let token = try response.validatedAccessToken()
-                try save(response: response, account: credentials.account, clientID: clientID)
+                try save(response: response, account: credentials.account)
                 return token
             }
             refresh = (id, pending)
@@ -228,28 +177,12 @@ actor GitHubAuthentication {
     }
 
     private func credentials() throws -> GitHubCredentials? {
-        try store.read().map { try JSONDecoder().decode(GitHubCredentials.self, from: $0) }
+        guard let credentials = try store.read().map({ try JSONDecoder().decode(GitHubCredentials.self, from: $0) }),
+              credentials.clientID == clientID else { return nil }
+        return credentials
     }
 
-    private func applications() throws -> GitHubApplicationState {
-        try appStore?.read().map { try JSONDecoder().decode(GitHubApplicationState.self, from: $0) } ?? GitHubApplicationState()
-    }
-
-    private func saveApplications(_ applications: GitHubApplicationState) throws {
-        guard let appStore else { throw GitHubError.notSignedIn }
-        try appStore.write(JSONEncoder().encode(applications))
-    }
-
-    private func applicationCredentials(clientID: String) throws -> GitHubApplicationCredentials? {
-        let applications = try applications()
-        if let current = applications.current, current.clientID == clientID { return current }
-        if let pending = applications.pending, pending.clientID == clientID {
-            return GitHubApplicationCredentials(clientID: pending.clientID, clientSecret: pending.clientSecret)
-        }
-        return nil
-    }
-
-    private func save(response: GitHubTokenResponse, account: GitHubAccount, clientID: String) throws {
+    private func save(response: GitHubTokenResponse, account: GitHubAccount) throws {
         let receivedAt = now()
         let credentials = GitHubCredentials(
             clientID: clientID, account: account, accessToken: try response.validatedAccessToken(),

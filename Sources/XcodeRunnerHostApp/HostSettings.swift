@@ -255,6 +255,17 @@ final class HostSettingsModel {
         }
     }
 
+    /// Saves the default limit on a new host, so runners can register and jobs can start before the limit is edited.
+    func configureDefaultPool() async {
+        do {
+            guard try await pool.status() == nil else { return }
+            try await settingsService.configurePool(maximumConcurrentJobs: HostInstallation.defaultMaximumConcurrentJobs)
+        } catch is CancellationError {
+        } catch {
+            saveError = "Could not save the default execution pool settings: \(error.localizedDescription)"
+        }
+    }
+
     var canApplyPoolConfiguration: Bool { hasLoadedPoolStatus && !isSaving && !github.isBusy && hostState != .stopping }
 
     func applyPoolConfiguration() async {

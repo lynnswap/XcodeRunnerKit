@@ -190,6 +190,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             signals.append(source)
         }
         storagePreparation = Task {
+            await settings.configureDefaultPool()
             do {
                 let storage = try await installation.waitForStorageForLaunch { @MainActor error in
                     guard !Task.isCancelled else { return }

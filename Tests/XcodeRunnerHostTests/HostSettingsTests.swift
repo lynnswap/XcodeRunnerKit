@@ -34,6 +34,18 @@ struct HostSettingsTests {
         try FileManager.default.removeItem(at: root)
     }
 
+    @Test func defaultPoolIsSavedOnlyOnANewHost() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let settings = model(at: root)
+        await settings.configureDefaultPool()
+        #expect(settings.saveError == nil)
+        #expect(try await settings.pool.status()?.configuration.maximumConcurrentJobs == HostInstallation.defaultMaximumConcurrentJobs)
+        try await settings.pool.configure(maximumConcurrentJobs: 6)
+        await settings.configureDefaultPool()
+        #expect(try await settings.pool.status()?.configuration.maximumConcurrentJobs == 6)
+    }
+
     @Test func poolApplySavesCapacityAndRetentionWithoutSavingRepositoryDraft() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
