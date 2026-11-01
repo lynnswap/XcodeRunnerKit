@@ -47,6 +47,31 @@ struct RepositoryRunnerStatus: Sendable, Identifiable {
     var errorMessage: String? { problems.isEmpty ? nil : problems.map(\.message).joined(separator: " ") }
 }
 
+extension RepositoryRunnerStatus {
+    /// Each repository's runners on every Mac. A problem on a Mac that this host manages starts with its name.
+    ///
+    /// - Parameter macs: Each Mac's statuses, where a `nil` name is this Mac.
+    static func combining(_ macs: [(name: String?, statuses: [RepositoryRunnerStatus])]) -> [RepositoryRunnerStatus] {
+        var combined: [RepositoryRunnerStatus] = []
+        for (name, statuses) in macs {
+            for status in statuses {
+                let problems = name.map { name in status.problems.map { .failed("\(name): \($0.message)") } } ?? status.problems
+                let previous = combined.firstIndex { $0.id == status.id }
+                let sum = { (count: KeyPath<RepositoryRunnerStatus, Int>) in
+                    status[keyPath: count] + (previous.map { combined[$0][keyPath: count] } ?? 0)
+                }
+                let next = RepositoryRunnerStatus(
+                    repository: status.repository, desiredCount: sum(\.desiredCount), registeredCount: sum(\.registeredCount),
+                    onlineCount: sum(\.onlineCount), busyCount: sum(\.busyCount), excessCount: sum(\.excessCount),
+                    problems: (previous.map { combined[$0].problems } ?? []) + problems, isUnlinked: status.isUnlinked
+                )
+                if let previous { combined[previous] = next } else { combined.append(next) }
+            }
+        }
+        return combined
+    }
+}
+
 /// GitHub rejected the access token while runners were reconciled.
 ///
 /// `statuses` describes every repository at that point, so callers can keep
@@ -67,7 +92,7 @@ protocol RunnerProvisioningClient: Sendable {
 extension GitHubClient: RunnerProvisioningClient {}
 
 actor RunnerProvisioner {
-    struct InstallationRequest: Sendable {
+    struct InstallationRequest: Codable, Sendable {
         let repository: GitHubRepository
         let runnerName: String
         let archive: URL
@@ -77,17 +102,10 @@ actor RunnerProvisioner {
         let replaceRegistration: Bool
     }
 
-    private struct Registration: Decodable {
-        let agentId: Int
-        let agentName: String?
-        let gitHubUrl: String?
-        let serverUrl: String?
-    }
-
     private struct LocalRunner {
-        let directory: RunnerDirectory
+        let folder: RunnerFolder
         let name: String
-        let registration: Registration
+        let registration: RunnerFolder.Registration
         let hasIndividualService: Bool
         let isHosted: Bool
 
@@ -118,15 +136,14 @@ actor RunnerProvisioner {
         let checksum: String
     }
 
-    private let installation: HostInstallation
+    /// The Mac whose runners this provisioner reconciles.
+    let mac: any RunnerMac
     private let client: any RunnerProvisioningClient
-    private let prepareArchive: @Sendable (GitHubRunnerDownload) async throws -> URL
-    private let installRunner: @Sendable (InstallationRequest) async throws -> Void
     // Resolving the host name can wait on network name lookups, so host startup must not evaluate it.
-    private let resolveHostName: @Sendable () -> String
     private var resolvedHostName: String?
     private var isReconciling = false
 
+    /// Reconciles this Mac's runners.
     init(
         installation: HostInstallation,
         installerURL: URL,
@@ -135,22 +152,36 @@ actor RunnerProvisioner {
         prepareArchive: (@Sendable (GitHubRunnerDownload) async throws -> URL)? = nil,
         installRunner: (@Sendable (InstallationRequest) async throws -> Void)? = nil
     ) {
-        self.installation = installation
-        self.client = client
-        self.resolveHostName = hostName
-        self.prepareArchive = prepareArchive ?? { download in
-            try await Self.downloadArchive(download, installation: installation)
-        }
-        self.installRunner = installRunner ?? { request in
-            try await Self.runInstaller(request, installerURL: installerURL, installation: installation)
-        }
+        self.init(
+            mac: LocalRunnerMac(
+                installation: installation, resolveHostName: hostName,
+                prepare: prepareArchive ?? { download in try await Self.downloadArchive(download, installation: installation) },
+                installRunner: installRunner ?? { request in
+                    try await Self.runInstaller(request, installerURL: installerURL, installation: installation)
+                }
+            ),
+            client: client
+        )
     }
 
-    private func hostName() -> String {
+    init(mac: any RunnerMac, client: any RunnerProvisioningClient) {
+        self.mac = mac
+        self.client = client
+    }
+
+    private func hostName() async throws -> String {
         if let resolvedHostName { return resolvedHostName }
-        let name = resolveHostName()
+        let name = try await mac.hostName()
         resolvedHostName = name
         return name
+    }
+
+    /// Runs a managing host's request on this Mac's runner folders, unless runners are being reconciled.
+    func perform<Value: Sendable>(_ operation: @Sendable (any RunnerMac) async throws -> Value) async throws -> Value {
+        guard !isReconciling else { throw ProvisioningError(RunnerProvisioningProblem.reconciliationInProgress.message) }
+        isReconciling = true
+        defer { isReconciling = false }
+        return try await operation(mac)
     }
 
     /// Registers enough runners for each repository, removes this Mac's runners of the unlinked repositories, and
@@ -173,13 +204,14 @@ actor RunnerProvisioner {
         defer { isReconciling = false }
         var archive: Result<PreparedArchive, any Error>?
         var statuses: [RepositoryRunnerStatus] = []
-        let initialScan: (runners: [LocalRunner], problems: [RunnerProvisioningProblem])
-        do { initialScan = try localRunners() }
+        var inventory: RunnerInventory
+        do { inventory = try await mac.runners() }
         catch {
             return repositories.map {
                 Self.status(repository: $0, capacity: capacity, runners: [], problems: [.failed(error.localizedDescription)])
             } + unlinked.map { Self.removalStatus(repository: $0, problems: [.failed(error.localizedDescription)]) }
         }
+        let initialScan = Self.localRunners(in: inventory)
         let initialLocal = initialScan.runners
         var snapshots: [Int: Result<[GitHubRunner], any Error>] = [:]
         for repository in repositories + unlinked {
@@ -246,7 +278,7 @@ actor RunnerProvisioner {
                 }
                 let unhosted = try local.filter { runner in
                     guard !runner.isHosted && !runner.hasIndividualService else { return false }
-                    return try !canResumeInstallation(at: runner.directory, repository: repository, remote: remote)
+                    return try !canResumeInstallation(at: runner.folder, repository: repository, remote: remote)
                 }
                 if !unhosted.isEmpty {
                     problems.append(.unhostedRegistrations(count: unhosted.count))
@@ -261,7 +293,7 @@ actor RunnerProvisioner {
                         do {
                             let download = try await client.runnerDownload(accessToken: token)
                             archiveResult = .success(PreparedArchive(
-                                url: try await prepareArchive(download), checksum: download.sha256Checksum
+                                url: try await mac.prepareArchive(download), checksum: download.sha256Checksum
                             ))
                         } catch { archiveResult = .failure(error) }
                         archive = archiveResult
@@ -275,21 +307,20 @@ actor RunnerProvisioner {
                             let name: String
                             var replaceRegistration = false
                             while true {
-                                let candidate = Self.runnerName(hostName: hostName(), repository: repository, slot: nextSlot)
+                                let candidate = Self.runnerName(hostName: try await hostName(), repository: repository, slot: nextSlot)
                                 nextSlot += 1
-                                let directory = RunnerDirectory(url: installation.runnersRoot.appending(path: candidate))
-                                if try canResumeInstallation(at: directory, repository: repository, remote: remote) {
+                                if let folder = inventory.folder(named: candidate),
+                                   try canResumeInstallation(at: folder, repository: repository, remote: remote) {
                                     name = candidate
-                                    replaceRegistration = try !directory.hasRegistration() && remote.contains(where: { $0.name == candidate })
+                                    replaceRegistration = try !folder.hasRegistration() && remote.contains(where: { $0.name == candidate })
                                     break
                                 }
-                                if !remote.contains(where: { $0.name == candidate }),
-                                   !FileManager.default.fileExists(atPath: directory.url.path(percentEncoded: false)) {
+                                if !remote.contains(where: { $0.name == candidate }), !inventory.entryNames.contains(candidate) {
                                     name = candidate
                                     break
                                 }
                             }
-                            try await installRunner(InstallationRequest(
+                            try await mac.install(InstallationRequest(
                                 repository: repository, runnerName: name, archive: prepared.url,
                                 sha256Checksum: prepared.checksum, registrationToken: registrationToken, labels: labels,
                                 replaceRegistration: replaceRegistration
@@ -300,7 +331,8 @@ actor RunnerProvisioner {
                     }
                     // A failed installer can still have registered a runner. Preserve and report that partial result.
                     remote = try await client.listRunners(repository: repository, accessToken: token)
-                    let scan = try localRunners()
+                    inventory = try await mac.runners()
+                    let scan = Self.localRunners(in: inventory)
                     for problem in scan.problems where !problems.contains(problem) { problems.append(problem) }
                     local = try scan.runners.filter {
                         try $0.belongs(to: repository, remote: remote, resolvedRepositories: resolvedRepositories)
@@ -327,26 +359,26 @@ actor RunnerProvisioner {
                 _ = try snapshots[repository.id]?.get()
                 // Provisioning can take long enough for an idle runner to start a job, so its state is listed again.
                 let remote = try await client.listRunners(repository: repository, accessToken: token)
-                var candidates: [(directory: RunnerDirectory, name: String, registered: GitHubRunner?)] = []
+                var candidates: [(folder: RunnerFolder, name: String, registered: GitHubRunner?)] = []
                 for runner in initialLocal where runner.isHosted && !runner.hasIndividualService {
                     // A local name alone can belong to another repository that took it after a rename.
                     if let registered = remote.first(where: runner.matches),
                        try runner.belongs(to: repository, remote: remote, resolvedRepositories: resolvedRepositories) {
-                        candidates.append((runner.directory, runner.name, registered))
-                    } else if try runner.directory.unregisteringRepository() == String(repository.id) {
+                        candidates.append((runner.folder, runner.name, registered))
+                    } else if try runner.folder.unregisteringRepository() == String(repository.id) {
                         // GitHub removed the registration before the folder could be marked.
-                        candidates.append((runner.directory, runner.name, nil))
+                        candidates.append((runner.folder, runner.name, nil))
                     }
                 }
                 // An installation that stopped before opting in to the host is also this repository's runner.
-                for directory in try installation.runnerDirectories().directories {
-                    guard try !directory.isHosted(), try !directory.hasIndividualService(), try !directory.isRemoved(),
-                          try directory.incompleteInstallationOwner() == String(repository.id) else { continue }
-                    if try directory.hasRegistration() {
-                        let registration = try directory.registration(as: Registration.self)
-                        let name = registration.agentName ?? directory.name
-                        candidates.append((directory, name, remote.first { $0.id == registration.agentId && $0.name == name }))
-                    } else if let registered = remote.first(where: { $0.name == directory.name }) {
+                for folder in inventory.folders {
+                    guard try !folder.isHosted(), try !folder.hasIndividualService(), try !folder.isRemoved(),
+                          try folder.incompleteInstallationOwner() == String(repository.id) else { continue }
+                    if try folder.hasRegistration() {
+                        let registration = try folder.registration()
+                        let name = registration.agentName ?? folder.name
+                        candidates.append((folder, name, remote.first { $0.id == registration.agentId && $0.name == name }))
+                    } else if let registered = remote.first(where: { $0.name == folder.name }) {
                         // The official runner registers remotely before saving its local .runner settings, so this
                         // installation's registration cannot be online. Another Mac with the same name can own one that is.
                         guard registered.status == "offline", !registered.busy else {
@@ -354,9 +386,9 @@ actor RunnerProvisioner {
                             problems.append(.failed("The incomplete runner \(registered.name) must be offline and idle before it can be removed. It was left unchanged."))
                             continue
                         }
-                        candidates.append((directory, directory.name, registered))
+                        candidates.append((folder, folder.name, registered))
                     } else {
-                        candidates.append((directory, directory.name, nil))
+                        candidates.append((folder, folder.name, nil))
                     }
                 }
                 for candidate in candidates {
@@ -368,7 +400,7 @@ actor RunnerProvisioner {
                             continue
                         }
                         do {
-                            try candidate.directory.markUnregistering(from: repository.id)
+                            try await mac.markUnregistering(candidate.folder.name, from: repository.id)
                         } catch {
                             remaining += 1
                             problems.append(.failed("Could not stop \(candidate.name): \(error.localizedDescription)"))
@@ -391,7 +423,7 @@ actor RunnerProvisioner {
                         }
                     }
                     do {
-                        try candidate.directory.markRemoved()
+                        try await mac.markRemoved(candidate.folder.name)
                     } catch {
                         remaining += 1
                         problems.append(.failed("Could not stop \(candidate.name): \(error.localizedDescription)"))
@@ -414,16 +446,16 @@ actor RunnerProvisioner {
     }
 
     private func canResumeInstallation(
-        at runner: RunnerDirectory, repository: GitHubRepository, remote: [GitHubRunner]
+        at runner: RunnerFolder, repository: GitHubRepository, remote: [GitHubRunner]
     ) throws -> Bool {
         // A folder that the host is about to delete cannot hold a new registration.
         guard try !runner.isHosted(), try !runner.hasIndividualService(), try !runner.isRemoved(),
               try runner.incompleteInstallationOwner() == String(repository.id) else { return false }
         if try runner.hasRegistration() {
-            let registration = try runner.registration(as: Registration.self)
+            let registration = try runner.registration()
             let name = registration.agentName ?? runner.name
             guard name == runner.name, remote.contains(where: { $0.id == registration.agentId && $0.name == name }) else {
-                throw ProvisioningError("The incomplete registration at \(runner.url.path(percentEncoded: false)) could not be matched to this repository on GitHub. It was left unchanged.")
+                throw ProvisioningError("The incomplete registration at \(runner.path) could not be matched to this repository on GitHub. It was left unchanged.")
             }
         } else if let registered = remote.first(where: { $0.name == runner.name }) {
             // The official runner registers remotely before saving its local .runner settings.
@@ -434,26 +466,23 @@ actor RunnerProvisioner {
         return true
     }
 
-    private func localRunners() throws -> (runners: [LocalRunner], problems: [RunnerProvisioningProblem]) {
-        let scan = try installation.runnerDirectories()
+    private static func localRunners(in inventory: RunnerInventory) -> (runners: [LocalRunner], problems: [RunnerProvisioningProblem]) {
         var runners: [LocalRunner] = []
         // An entry whose type cannot be read is reported for that runner alone.
-        var problems: [RunnerProvisioningProblem] = scan.unreadable.map {
-            .unreadableRegistration(path: $0.directory.registrationFile.path(percentEncoded: false), reason: $0.error.localizedDescription)
+        var problems: [RunnerProvisioningProblem] = inventory.unreadable.map {
+            .unreadableRegistration(path: $0.registrationFile, reason: $0.reason)
         }
-        for runner in scan.directories {
+        for runner in inventory.folders {
             do {
                 // A removed runner's folder stays until the host stops its service.
                 guard try runner.hasRegistration(), try !runner.isRemoved() else { continue }
-                let registration = try runner.registration(as: Registration.self)
+                let registration = try runner.registration()
                 runners.append(LocalRunner(
-                    directory: runner, name: registration.agentName ?? runner.name, registration: registration,
+                    folder: runner, name: registration.agentName ?? runner.name, registration: registration,
                     hasIndividualService: try runner.hasIndividualService(), isHosted: try runner.isHosted()
                 ))
             } catch {
-                problems.append(.unreadableRegistration(
-                    path: runner.registrationFile.path(percentEncoded: false), reason: error.localizedDescription
-                ))
+                problems.append(.unreadableRegistration(path: runner.registrationFile, reason: error.localizedDescription))
             }
         }
         return (runners, problems)
@@ -572,7 +601,7 @@ actor RunnerProvisioner {
     }
 }
 
-private struct ProvisioningError: LocalizedError {
+struct ProvisioningError: LocalizedError {
     let message: String
     init(_ message: String) { self.message = message }
     var errorDescription: String? { message }

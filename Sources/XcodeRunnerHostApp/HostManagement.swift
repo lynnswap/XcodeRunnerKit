@@ -45,7 +45,7 @@ final class HostManagement {
     /// Why the last pairing window closed without pairing.
     private(set) var pairingMessage: String?
     private(set) var errorMessage: String?
-    /// Answers the managing host's requests to read and change this Mac's settings.
+    /// Answers the managing host's requests to read and change this Mac's settings and runners.
     @ObservationIgnored weak var settings: HostSettingsModel?
     /// Outlives a window that closed when the Macs paired, until the managing host gets the reply.
     private var pairingTask: (window: UUID, task: Task<Void, Never>)?
@@ -85,6 +85,12 @@ final class HostManagement {
                             return
                         }
                         try await reply(await settings.answer(request))
+                    case .runners(let request):
+                        guard let github = await self.settings?.github else {
+                            try await reply(.refused("\(self.name) cannot share its runners."))
+                            return
+                        }
+                        try await reply(await github.answer(request))
                     case .unpair:
                         // Replying after the pairing is removed keeps the host from forgetting a Mac that still accepts it.
                         if case .failure(let error) = await self.forget(manager.id) {

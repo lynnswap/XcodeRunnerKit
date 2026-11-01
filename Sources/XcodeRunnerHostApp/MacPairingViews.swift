@@ -138,11 +138,13 @@ struct PairingCode: View {
 /// A Mac that this host manages.
 @MainActor
 struct ManagedMacView: View {
-    let macs: ManagedMacs
+    let model: HostSettingsModel
     let mac: ManagedMac
     let navigation: HostWindowNavigation
     @State private var isConfirmingRemoval = false
     @State private var isRemoving = false
+
+    private var macs: ManagedMacs { model.managedMacs }
 
     var body: some View {
         let status = macs.status(of: mac.id)
@@ -175,7 +177,7 @@ struct ManagedMacView: View {
                 if let message = macs.message { ErrorText(message) }
             }
             if let settings, let report {
-                ManagedMacSettingsSections(macs: macs, mac: mac, settings: settings, report: report)
+                ManagedMacSettingsSections(model: model, mac: mac, settings: settings, report: report)
             }
             Section {
                 HStack {
@@ -207,7 +209,7 @@ struct ManagedMacView: View {
 /// A managed Mac's runner services and execution settings, with the controls of the Mac's own window.
 @MainActor
 private struct ManagedMacSettingsSections: View {
-    let macs: ManagedMacs
+    let model: HostSettingsModel
     let mac: ManagedMac
     @Bindable var settings: ManagedMacSettings
     let report: HostSettingsReport
@@ -218,13 +220,16 @@ private struct ManagedMacSettingsSections: View {
             settings: report, draft: $settings.poolDraft, isSaving: settings.isSaving,
             canApply: settings.canApplyPoolConfiguration, saveError: settings.saveError
         ) {
-            Task { await macs.applyPoolConfiguration(of: mac.id) }
+            Task {
+                // This Mac registers the Mac's runners, so a changed limit is applied to them here.
+                if await model.managedMacs.applyPoolConfiguration(of: mac.id) { await model.github.synchronize() }
+            }
         }
         StorageSection(
             settings: report, directory: $settings.storageDirectoryInput, isSaving: settings.isSavingStorage,
             saveError: settings.storageSaveError, choose: nil
         ) {
-            Task { await macs.saveStorageDirectory(of: mac.id) }
+            Task { await model.managedMacs.saveStorageDirectory(of: mac.id) }
         }
     }
 }

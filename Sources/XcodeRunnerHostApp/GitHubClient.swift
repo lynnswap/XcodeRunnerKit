@@ -27,7 +27,7 @@ struct GitHubRunner: Decodable, Equatable, Identifiable, Sendable {
     let labels: [GitHubRunnerLabel]
 }
 
-struct GitHubRunnerDownload: Sendable {
+struct GitHubRunnerDownload: Codable, Sendable {
     let filename: String
     let downloadURL: URL
     let sha256Checksum: String

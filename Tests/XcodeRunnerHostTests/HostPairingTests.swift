@@ -4,6 +4,7 @@ import Network
 import Security
 import Testing
 import XcodeRunnerHostSupport
+import XcodeRunnerKit
 @testable import XcodeRunnerHostApp
 
 @MainActor @Suite(.timeLimit(.minutes(1)))
@@ -37,10 +38,14 @@ struct HostPairingTests {
 
     private func publicKey() -> Data { Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation }
 
-    /// A Mac whose settings answer the managing host, as in the app.
-    private func managedMac(store: MemorySecretStore = MemorySecretStore(), at root: URL) -> HostSettingsModel {
-        HostSettingsModel(
-            installation: HostInstallation(homeDirectory: root.appending(path: "Home")),
+    /// A Mac whose settings and runners answer the managing host, as in the app.
+    private func managedMac(
+        store: MemorySecretStore = MemorySecretStore(), at root: URL,
+        github: ((HostInstallation) -> GitHubHostSettings)? = nil
+    ) -> HostSettingsModel {
+        let installation = HostInstallation(homeDirectory: root.appending(path: "Home"))
+        return HostSettingsModel(
+            installation: installation, github: github?(installation),
             management: HostManagement(store: store, name: "Managed", advertises: false),
             managedMacs: ManagedMacs(store: MemorySecretStore(), name: "Managed", browses: false)
         )
@@ -128,6 +133,122 @@ struct HostPairingTests {
         }
         #expect(settings.readAt == readAt)
 
+        await macs.shutDown()
+    }
+
+    @Test func theManagingHostRegistersAndRemovesRunnersOnAPairedMac() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = GitHubRepository(id: 1, fullName: "owner/Project")
+        let installs = Installs()
+        // The managed Mac has no GitHub sign-in, so any GitHub request from it fails the test.
+        let client = await GitHubTestTransport([]).client
+        let managed = managedMac(at: root) { installation in
+            try? GitHubHostConfiguration(repositories: [repository])
+                .save(to: installation.hostRoot.appending(path: "github-host.json"))
+            return GitHubHostSettings(
+                installation: installation, pool: HostExecutionPool(directory: installation.poolDirectory), client: client,
+                authentication: GitHubAuthentication(clientID: "app", client: client, store: MemorySecretStore()),
+                provisioner: RunnerProvisioner(
+                    installation: installation, installerURL: root.appending(path: "unused-installer.sh"), client: client,
+                    hostName: "Managed Mac", prepareArchive: { _ in installation.homeDirectory.appending(path: "runner.tar.gz") },
+                    installRunner: { request in try await installs.install(request, in: installation, agentID: 2) }
+                )
+            )
+        }
+        managed.github.storageIsReady = true
+        try await managed.pool.configure(maximumConcurrentJobs: 1)
+        await managed.refreshPoolStatus()
+        let newRunner = RunnerProvisioner.runnerName(hostName: "Managed Mac", repository: repository, slot: 1)
+        let newRunnerFolder = managed.installation.runnersRoot.appending(path: newRunner)
+
+        let installation = HostInstallation(homeDirectory: root.appending(path: "Manager"))
+        let existing = installation.runnersRoot.appending(path: "existing")
+        try FileManager.default.createDirectory(at: existing, withIntermediateDirectories: true)
+        try Data(#"{"agentId":1,"agentName":"existing","gitHubUrl":"https://github.com/owner/Project"}"#.utf8)
+            .write(to: existing.appending(path: ".runner"))
+        try Data().write(to: existing.appending(path: ".xcode-runner-host"))
+        let store = MemorySecretStore()
+        try store.write(JSONEncoder().encode(GitHubCredentials(
+            clientID: "app", account: GitHubAccount(id: 1, login: "owner"), accessToken: "token",
+            refreshToken: nil, expiresAt: nil, refreshExpiresAt: nil
+        )))
+        let listing: [GitHubTestTransport.Reply] = [
+            .init(path: "/user/installations", body: #"{"installations":[{"id":10}]}"#),
+            .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Project"}]}"#),
+        ]
+        func runners(_ runners: [(id: Int, name: String)]) -> GitHubTestTransport.Reply {
+            let listed = runners.map { #"{"id":\#($0.id),"name":"\#($0.name)","status":"online","busy":false,"labels":[]}"# }
+            return .init(path: "/repos/owner/Project/actions/runners", body: #"{"runners":[\#(listed.joined(separator: ","))]}"#)
+        }
+        let bothRunners = runners([(1, "existing"), (2, newRunner)])
+        let transport = GitHubTestTransport(listing + [
+            // Selecting the repository leaves this Mac's runner and registers one on the managed Mac.
+        ] + listing + [
+            runners([(1, "existing")]), runners([(1, "existing")]),
+            .init(path: "/repos/actions/runner/releases/latest", body: #"{"assets":[{"name":"actions-runner-osx-arm64-2.338.0.tar.gz","browser_download_url":"https://example.invalid/runner.tar.gz","digest":"sha256:\#(String(repeating: "a", count: 64))"}]}"#),
+            .init(path: "/repos/owner/Project/actions/runners/registration-token", body: #"{"token":"registration-token"}"#),
+            bothRunners,
+        ] + listing + [
+            // Unlinking removes this Mac's runner while the managed Mac does not answer.
+            bothRunners, bothRunners, .init(path: "/repos/owner/Project/actions/runners/1", body: "", status: 204),
+        ] + listing + [
+            // The next synchronization reads the managed Mac again and removes its runner.
+            runners([(2, newRunner)]), runners([(2, newRunner)]), runners([(2, newRunner)]), runners([(2, newRunner)]),
+            .init(path: "/repos/owner/Project/actions/runners/2", body: "", status: 204),
+        ])
+        let managerClient = await transport.client
+        let pool = HostExecutionPool(directory: installation.poolDirectory)
+        try await pool.configure(maximumConcurrentJobs: 1)
+        let macs = ManagedMacs(store: MemorySecretStore(), name: "Manager", browses: false)
+        let manager = HostSettingsModel(
+            installation: installation,
+            github: GitHubHostSettings(
+                installation: installation, pool: pool, client: managerClient,
+                authentication: GitHubAuthentication(clientID: "app", client: managerClient, store: store)
+            ),
+            management: HostManagement(store: MemorySecretStore(), name: "Manager", advertises: false),
+            managedMacs: macs
+        )
+        let mac = try await pair(macs, with: managed.management)
+        try await waitUntil { managed.management.managementPort != nil }
+        await macs.checkStatus(of: mac.id, at: try local(managed.management.managementPort))
+        await manager.github.restore()
+        manager.github.storageIsReady = true
+
+        #expect(try await manager.github.updateRepositorySelection([repository.id]) == nil)
+        let request = try #require(await installs.requests.first)
+        #expect(await installs.requests.count == 1)
+        #expect(request.registrationToken == "registration-token")
+        #expect(request.runnerName == newRunner)
+        let status = try #require(manager.github.runnerStatuses.first)
+        #expect(status.desiredCount == 2)
+        #expect(status.onlineCount == 2)
+        #expect(status.errorMessage == nil)
+        // The managed Mac does not register runners from its own selection while it is managed.
+        #expect(try await managed.github.updateRepositorySelection([repository.id])?.contains("Manager registers this Mac's runners") == true)
+
+        await managed.management.shutDown()
+        let unlinkMessage = try await manager.github.updateRepositorySelection([])
+        #expect(unlinkMessage?.contains("Managed: The Mac could not be reached") == true)
+        #expect(try RunnerDirectory(url: existing).isRemoved())
+        #expect(try !RunnerDirectory(url: newRunnerFolder).isRemoved())
+        let record = installation.hostRoot.appending(path: "github-host.json")
+        #expect(try GitHubHostConfiguration.load(from: record).unlinkedRepositories == [repository])
+
+        // The listener keeps its last port after shutting down, so the new one is awaited.
+        let stoppedPort = managed.management.managementPort
+        managed.management.start()
+        try await waitUntil { managed.management.managementPort.map { $0 != stoppedPort } ?? false }
+        await macs.checkStatus(of: mac.id, at: try local(managed.management.managementPort))
+        await manager.github.synchronize()
+        #expect(manager.github.errorMessage == nil)
+        #expect(try RunnerDirectory(url: newRunnerFolder).isRemoved())
+        #expect(manager.github.runnerStatuses.isEmpty)
+        #expect(try GitHubHostConfiguration.load(from: record).unlinkedRepositories.isEmpty)
+        #expect(await transport.requests.count == 21)
+
+        await managed.management.shutDown()
         await macs.shutDown()
     }
 
@@ -301,5 +422,19 @@ struct HostPairingTests {
 
         await management.shutDown()
         await macs.shutDown()
+    }
+}
+
+/// Installs that a managed Mac ran, each leaving a hosted runner as the installer does.
+private actor Installs {
+    private(set) var requests: [RunnerProvisioner.InstallationRequest] = []
+
+    func install(_ request: RunnerProvisioner.InstallationRequest, in installation: HostInstallation, agentID: Int) throws {
+        requests.append(request)
+        let directory = installation.runnersRoot.appending(path: request.runnerName)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let registration = #"{"agentId":\#(agentID),"agentName":"\#(request.runnerName)","gitHubUrl":"https://github.com/\#(request.repository.fullName)"}"#
+        try Data(registration.utf8).write(to: directory.appending(path: ".runner"))
+        try Data().write(to: directory.appending(path: ".xcode-runner-host"))
     }
 }
