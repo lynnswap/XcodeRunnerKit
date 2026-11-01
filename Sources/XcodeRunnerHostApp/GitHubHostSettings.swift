@@ -235,7 +235,7 @@ final class GitHubHostSettings {
     private func performSynchronization() async {
         do {
             guard let status = try await pool.status() else {
-                errorMessage = "Set Maximum concurrent Xcode jobs under Xcode Execution and choose Apply to register runners."
+                errorMessage = "Set Maximum concurrent jobs for this Mac under Runners and choose Apply to register runners."
                 return
             }
             let selected = configuration.repositories

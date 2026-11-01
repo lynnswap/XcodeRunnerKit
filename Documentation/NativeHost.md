@@ -76,21 +76,23 @@ failed download stops the job.
 Hosts sign in through the shared
 [XcodeHomeRunner GitHub App](https://github.com/apps/xcodehomerunner), so you
 do not create a GitHub App. Click the hammer icon in the menu bar and open
-**Settings…**.
+**Settings…**. Until this Mac is set up, **Overview** lists these steps and
+offers the next one.
 
-1. Choose **Connect GitHub…**. GitHub's device page opens, and settings show a
-   code. Enter the code on that page and authorize the app.
+1. Choose **Connect GitHub…**. GitHub's device page opens, and the **GitHub**
+   pane shows a code. Enter the code on that page and authorize the app.
 2. Choose **Add Repositories on GitHub…**, install the app, and select the
    repositories this Mac will run.
-3. Return to settings and choose **Reload**.
-4. Select the repositories to manage and choose **Apply Repository Selection**.
+3. Return to the window and choose **Reload**.
+4. In **GitHub**, select the repositories to manage and choose **Apply**.
 
-Enter only codes shown in these settings. Entering a code that someone else
+Enter only codes shown in this window. Entering a code that someone else
 sent you gives them access to your repositories as you.
 
-A new host starts with **Maximum concurrent Xcode jobs** set to 4, so runners
+A new host starts with **Maximum concurrent jobs** set to 4, so runners
 register without editing the execution settings first. Change the limit and the
-Simulator retention policy there, then select **Apply**.
+Simulator retention policy in this Mac's pane under **Runners**, then select
+**Apply**.
 
 The app saves login tokens in Keychain and refreshes expiring tokens
 automatically; it stores no client secret. To change repository access later,
@@ -127,9 +129,10 @@ Devices in use finish before they are removed, so lowering the limit can
 temporarily leave more devices than the new limit. Runner registrations and
 GitHub's in-progress job count can still be higher.
 
-Settings shows each repository's registered, online, and busy runner counts,
-plus any error. The host retries synchronization every five minutes while signed
-in. Pool and repository settings are saved separately; editing one does not
+**Overview** shows the host status, the running and waiting Xcode jobs, and each
+repository's online and busy runner counts with any error. This Mac's pane under
+**Runners** lists its runner services. The host retries synchronization every
+five minutes while signed in. Pool and repository settings are saved separately; editing one does not
 apply pending changes in the other. **Disconnect** removes local login tokens and
 stops registration management; it leaves existing runner services running.
 
@@ -284,7 +287,8 @@ Tools and service logs stay under
 `~/Library/Application Support/XcodeRunnerKit`. Runner installations stay under
 `~/Library/XcodeRunnerKit/runners`.
 
-To move job data, choose a folder in **Storage** and select **Save**. The change
+To move job data, choose a folder in this Mac's pane under **Runners** >
+**Storage** and select **Save**. The change
 takes effect on the next host launch. Wait for running jobs and other users of
 that data to finish, then restart the host.
 

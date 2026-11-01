@@ -3,7 +3,6 @@ import ArgumentParser
 import Darwin
 import Foundation
 import Subprocess
-import SwiftUI
 import XcodeRunnerHostSupport
 import XcodeRunnerKit
 
@@ -289,20 +288,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showSettings(_ sender: Any?) {
-        if settingsWindow == nil {
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 640, height: 680),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                backing: .buffered, defer: false
-            )
-            window.title = "XcodeHomeRunner Settings"
-            window.isReleasedWhenClosed = false
-            window.contentMinSize = NSSize(width: 540, height: 420)
-            window.contentView = NSHostingView(rootView: HostSettingsView(model: settings))
-            window.setFrameAutosaveName("XcodeHomeRunnerSettings")
-            window.center()
-            settingsWindow = window
-        }
+        if settingsWindow == nil { settingsWindow = makeHostWindow(settings: settings) }
         NSApplication.shared.activate()
         settingsWindow?.makeKeyAndOrderFront(nil)
     }

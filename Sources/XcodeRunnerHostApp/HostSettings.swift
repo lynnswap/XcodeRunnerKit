@@ -74,12 +74,12 @@ final class HostSettingsModel {
     private(set) var isSavingStorage = false
     var storageDirectoryInput = ""
 
-    init(installation: HostInstallation) {
+    init(installation: HostInstallation, github: GitHubHostSettings? = nil) {
         self.installation = installation
         // Reading status leaves an unconfigured pool unchanged.
         self.pool = HostExecutionPool(directory: installation.poolDirectory)
         self.settingsService = HostSettingsService(installation: installation, pool: pool)
-        self.github = GitHubHostSettings(installation: installation, pool: pool)
+        self.github = github ?? GitHubHostSettings(installation: installation, pool: pool)
         do {
             savedStorageDirectory = try installation.requestedStorageDirectory() ?? installation.storage()?.directory
             storageDirectoryInput = savedStorageDirectory?.path(percentEncoded: false) ?? ""
@@ -312,115 +312,84 @@ final class HostSettingsModel {
 }
 
 @MainActor
-struct HostSettingsView: View {
+struct HostMacSettingsView: View {
     @Bindable var model: HostSettingsModel
 
     var body: some View {
-        ScrollView {
-            Form {
-                GitHubSettingsView(model: model.github)
-                    .disabled(model.isSaving)
-                Section("Storage") {
-                    TextField("Storage folder", text: $model.storageDirectoryInput)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityIdentifier("storage-folder")
-                        .disabled(!model.canEditStorage)
-                    HStack {
-                        Button("Choose…") { Task { await model.chooseStorageDirectory() } }
-                            .accessibilityIdentifier("choose-storage-folder")
-                        Button(model.isSavingStorage ? "Saving…" : "Save") { Task { await model.saveStorageSelection() } }
-                            .accessibilityIdentifier("save-storage-folder")
-                    }
-                    .disabled(!model.canEditStorage)
-                    Text(model.storageMessage).font(.callout).foregroundStyle(.secondary)
-                    Text("A changed folder is applied before runners start on the next launch. Existing data is copied and its original files are kept. Stop other tools that use these files before restarting the host.")
-                        .font(.callout).foregroundStyle(.secondary)
-                    if let error = model.storageError { errorMessage(error) }
-                    if let error = model.storageSaveError { errorMessage(error) }
+        Form {
+            Section {
+                if model.runners.isEmpty {
+                    Text(model.storageError == nil ? "No runners have opted in to this host." : "Runner services have not started because storage needs attention.")
+                        .foregroundStyle(.secondary)
                 }
-                Section("Xcode Execution") {
-                    LabeledContent("Running jobs") {
-                        Text(model.poolStatus.map { String($0.activeJobCount) } ?? unavailablePoolValue)
-                            .monospacedDigit()
+                ForEach(model.runners) { runner in
+                    VStack(alignment: .leading, spacing: 4) {
+                        LabeledContent(runner.name, value: runner.state.rawValue)
+                        if runner.state == .individualService {
+                            Text("This runner uses its individual service. The host does not start another service for it.")
+                                .font(.callout).foregroundStyle(.secondary)
+                        }
+                        if let error = runner.configurationError { ErrorText(error) }
                     }
-                    LabeledContent("Waiting jobs") {
-                        Text(model.poolStatus.map { String($0.waitingJobCount) } ?? unavailablePoolValue)
-                            .monospacedDigit()
-                    }
-                    LabeledContent("Current limit") {
-                        Text(model.poolStatus.map { String($0.configuration.maximumConcurrentJobs) } ?? unavailablePoolValue)
-                            .monospacedDigit()
-                    }
-                    TextField("Maximum concurrent Xcode jobs", text: $model.capacityInput)
-                        .textFieldStyle(.roundedBorder)
-                        .disabled(model.isSaving)
-                        .accessibilityIdentifier("execution-limit")
-                    LabeledContent("Current Simulator retention", value: model.simulatorRetentionDescription)
-                    Picker("Idle Simulators", selection: $model.keepsSimulatorsForever) {
-                        Text("Remove after an idle period").tag(false)
-                        Text("Keep indefinitely").tag(true)
-                    }
+                }
+                if let error = model.runnerScanError { ErrorText(error) }
+            } header: {
+                Text("Runner Services")
+            } footer: {
+                Text("Processes on this Mac. Overview shows each repository's connection and job counts from GitHub.")
+            }
+            Section {
+                TextField("Maximum concurrent jobs", text: $model.capacityInput)
                     .disabled(model.isSaving)
-                    .accessibilityIdentifier("simulator-retention-mode")
-                    if !model.keepsSimulatorsForever {
-                        TextField("Idle retention (minutes)", text: $model.simulatorIdleRetentionInput)
-                            .textFieldStyle(.roundedBorder)
-                            .disabled(model.isSaving)
-                            .accessibilityIdentifier("simulator-idle-retention")
-                    }
+                    .accessibilityIdentifier("execution-limit")
+                Picker("Idle Simulators", selection: $model.keepsSimulatorsForever) {
+                    Text("Remove after an idle period").tag(false)
+                    Text("Keep indefinitely").tag(true)
+                }
+                .disabled(model.isSaving)
+                .accessibilityIdentifier("simulator-retention-mode")
+                if !model.keepsSimulatorsForever {
+                    TextField("Idle retention (minutes)", text: $model.simulatorIdleRetentionInput)
+                        .disabled(model.isSaving)
+                        .accessibilityIdentifier("simulator-idle-retention")
+                }
+                HStack {
+                    Spacer()
                     Button(model.isSaving ? "Applying…" : "Apply") {
                         Task { await model.applyPoolConfiguration() }
                     }
                     .disabled(!model.canApplyPoolConfiguration)
                     .accessibilityIdentifier("apply-pool-configuration")
-                    Text(model.admissionMessage)
-                        .font(.callout).foregroundStyle(.secondary)
-                    Text("This limit is shared across all repositories. Changes apply to new jobs; running jobs finish first. Runner registrations are synchronized to the saved limit.")
-                        .font(.callout).foregroundStyle(.secondary)
-                    Text("Idle Simulators stay booted for reuse. Keep indefinitely disables expiry; the pool still removes excess or unhealthy devices. With an idle period, each return starts a new retention period.")
-                        .font(.callout).foregroundStyle(.secondary)
-                    if let error = model.poolError { errorMessage(error) }
-                    if let error = model.saveError { errorMessage(error) }
-                    if let error = model.configurationCleanupError { errorMessage(error) }
-                    if let error = model.simulatorPoolError { errorMessage(error) }
                 }
-                Section("Runner Services") {
-                    LabeledContent("Host", value: model.hostState.rawValue)
-                    if model.runners.isEmpty {
-                        Text(model.storageError == nil ? "No runners have opted in to this host." : "Runner services have not started because storage needs attention.")
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(model.runners) { runner in
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text(runner.name).font(.headline)
-                                Spacer()
-                                Text(runner.state.rawValue).foregroundStyle(.secondary)
-                            }
-                            if runner.state == .individualService {
-                                Text("This runner uses its individual service. The host does not start another service for it.")
-                                    .font(.callout).foregroundStyle(.secondary)
-                            }
-                            if let error = runner.configurationError { errorMessage(error) }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                    Text("Service status describes local processes. Check GitHub for connection and job status.")
-                        .font(.callout).foregroundStyle(.secondary)
-                    if let error = model.runnerScanError { errorMessage(error) }
-                }
+                if let error = model.poolError { ErrorText(error) }
+                if let error = model.saveError { ErrorText(error) }
+                if let error = model.configurationCleanupError { ErrorText(error) }
+                if let error = model.simulatorPoolError { ErrorText(error) }
+            } header: {
+                Text("Xcode Execution")
+            } footer: {
+                Text("The limit is shared by all repositories, and each repository registers that many runners. Running jobs finish before a lower limit applies. Idle Simulators stay booted for reuse until their retention ends.")
             }
-            .formStyle(.grouped)
+            Section {
+                TextField("Storage folder", text: $model.storageDirectoryInput, prompt: Text("Not chosen"))
+                    .accessibilityIdentifier("storage-folder")
+                    .disabled(!model.canEditStorage)
+                HStack {
+                    Spacer()
+                    Button("Choose…") { Task { await model.chooseStorageDirectory() } }
+                        .accessibilityIdentifier("choose-storage-folder")
+                    Button(model.isSavingStorage ? "Saving…" : "Save") { Task { await model.saveStorageSelection() } }
+                        .accessibilityIdentifier("save-storage-folder")
+                }
+                .disabled(!model.canEditStorage)
+                Text(model.storageMessage).foregroundStyle(.secondary)
+                if let error = model.storageError { ErrorText(error) }
+                if let error = model.storageSaveError { ErrorText(error) }
+            } header: {
+                Text("Storage")
+            } footer: {
+                Text("A changed folder is applied before runners start on the next launch. Existing data is copied and its original files are kept. Stop other tools that use these files before restarting the host.")
+            }
         }
-        .frame(minWidth: 540, minHeight: 420)
-    }
-
-    private var unavailablePoolValue: String {
-        if !model.hasLoadedPoolStatus { return "Checking…" }
-        return model.poolError == nil ? "Not configured" : "Unavailable"
-    }
-
-    private func errorMessage(_ message: String) -> some View {
-        Text(message).foregroundStyle(.red).font(.callout).textSelection(.enabled)
     }
 }
