@@ -190,7 +190,6 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             signals.append(source)
         }
         storagePreparation = Task {
-            await settings.configureDefaultPool()
             do {
                 let storage = try await installation.waitForStorageForLaunch { @MainActor error in
                     guard !Task.isCancelled else { return }
@@ -221,6 +220,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             }
         }
         poolMonitoring = Task {
+            // Pool reads and writes can wait for another process's pool lock, so they stay out of runner startup.
+            await settings.configureDefaultPool()
             while !Task.isCancelled {
                 await settings.trimSimulatorPool()
                 await settings.refreshPoolStatus()

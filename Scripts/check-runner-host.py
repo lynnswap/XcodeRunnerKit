@@ -235,7 +235,8 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     finally:
         subprocess.run(['launchctl','bootout',target],check=True)
     wait_for(lambda:not alive(restarted['pid']), 'Runner survived service removal')
-    assert not (host_root/'Pool').exists(), 'Host status reads configured an unused pool'
+    pool_configuration = json.loads((host_root/'Pool/configuration.json').read_text())
+    assert pool_configuration['maximumConcurrentJobs'] == 4, 'A new host did not save the default execution limit'
 
     shutil.copytree(app, root/'packaging/XcodeHomeRunner.app', symlinks=True)
     setup = root/'packaging/XcodeHomeRunner.app/Contents/Resources/HostSetup'
