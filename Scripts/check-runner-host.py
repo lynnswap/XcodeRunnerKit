@@ -313,6 +313,39 @@ with open(sys.argv[1], 'a+b') as coordinator:
         holder.terminate()
         holder.wait(timeout=HANG_LIMIT)
 
+with tempfile.TemporaryDirectory(prefix='RunnerHost unavailable storage ') as temporary:
+    root = Path(temporary)
+    home = root/'home'
+    host_root = home/'Library/Application Support/XcodeRunnerKit'
+    runners = home/'Library/XcodeRunnerKit/runners'
+    runners.mkdir(parents=True)
+    environment = {**os.environ, 'HOME':str(home)}
+    subprocess.run([str(cli), 'host', 'storage', 'configure', '--json'],
+                   env=environment, check=True, capture_output=True)
+    first = fixture(runners, 'first')
+    registration = (first/'.runner').read_bytes()
+    source = Path((host_root/'storage-directory').read_text())
+    (source/'Build/retained').write_text('preserved job data')
+    unavailable = root/'Disconnected storage'
+    source.rename(unavailable)
+    with (root/'host.log').open('wb') as log:
+        watched = HostOutput([executable, '--home-directory', str(home)], log, env=environment)
+        host = watched.process
+        try:
+            wait_for(lambda: watched.contains('Waiting for runner storage'),
+                     'Host did not wait for unavailable storage')
+            assert not (first/'pid.json').exists(), 'Runner started before its storage was available'
+            assert not source.exists(), 'Host recreated the unavailable storage parent'
+            unavailable.rename(source)
+            wait_for(lambda:(first/'pid.json').exists(), 'Runner did not start when storage returned')
+            assert host.poll() is None, 'Storage recovery replaced the host process'
+            assert json.loads((first/'pid.json').read_text())['storage'] == str(source)
+            assert (first/'.runner').read_bytes() == registration
+            assert (source/'Build/retained').read_text() == 'preserved job data'
+        finally:
+            stop_host(host, runners)
+            watched.close()
+
 with tempfile.TemporaryDirectory(prefix='RunnerHost blocked pool ') as temporary:
     root = Path(temporary)
     home = root/'home'
@@ -431,4 +464,4 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost storage change ') as tempora
         finally:
             stop_host(host, runners)
 
-print('PASS: runner lifecycle, hidden runner discovery, prompt shutdown while storage is locked, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')
+print('PASS: runner lifecycle, hidden runner discovery, prompt shutdown while storage is locked, recovery when unavailable storage returns, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')

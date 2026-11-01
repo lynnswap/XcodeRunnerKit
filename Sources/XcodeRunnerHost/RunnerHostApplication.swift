@@ -190,7 +190,13 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         }
         storagePreparation = Task {
             do {
-                let storage = try await installation.prepareStorageForLaunch()
+                let storage = try await installation.waitForStorageForLaunch { @MainActor error in
+                    guard !Task.isCancelled else { return }
+                    if self.settings.hostState != .waitingForStorage {
+                        print("Waiting for runner storage: \(error)")
+                    }
+                    self.settings.storageDidBecomeUnavailable(error)
+                }
                 try Task.checkCancellation()
                 environment = installation.environment(for: storage)
                 settings.storageDidBecomeAvailable(storage)
