@@ -7,6 +7,7 @@ import XcodeRunnerKit
 enum HostState: String, Sendable {
     case starting = "Starting"
     case preparingStorage = "Preparing storage"
+    case waitingForStorage = "Waiting for storage"
     case running = "Running"
     case needsAttention = "Needs attention"
     case stopping = "Stopping"
@@ -88,6 +89,9 @@ final class HostSettingsModel {
     }
 
     var storageMessage: String {
+        if hostState == .waitingForStorage {
+            return "Runner services start when storage becomes available. Folder changes saved now apply on the next host launch."
+        }
         if let savedStorageDirectory, savedStorageDirectory != activeStorage?.directory {
             if activeStorage == nil { return "Saved for the next host launch." }
             return "Saved for the next host launch. Running jobs continue using their current storage."
@@ -104,6 +108,12 @@ final class HostSettingsModel {
             savedStorageDirectory = storage.directory
             storageDirectoryInput = storage.directory.path(percentEncoded: false)
         }
+    }
+
+    func storageDidBecomeUnavailable(_ error: any Error) {
+        github.storageIsReady = false
+        storageError = "Storage is unavailable: \(error.localizedDescription) Retrying automatically."
+        hostState = .waitingForStorage
     }
 
     func storagePreparationFailed(_ error: any Error) {

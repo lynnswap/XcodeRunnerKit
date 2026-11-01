@@ -29,6 +29,52 @@ struct HostStorageMigrationTests {
         return try await installation.requestStorageDirectory(directory)
     }
 
+    @Test(.timeLimit(.minutes(1))) func waitsForSavedStorageAndLeavesLaterSelectionsForNextLaunch() async throws {
+        let (root, installation, source) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let retained = Data("retained build output".utf8)
+        try retained.write(to: source.buildDirectory.appending(path: "output"))
+        let unavailable = root.appending(path: "Disconnected storage")
+        try FileManager.default.moveItem(at: source.directory, to: unavailable)
+        let target = root.appending(path: "Next storage")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+        let physicalTarget = try target.compilerCanonicalURL()
+
+        try await confirmation { waiting in
+            let prepared = try await installation.waitForStorageForLaunch { _ in
+                waiting()
+                #expect(!FileManager.default.fileExists(atPath: source.directory.path(percentEncoded: false)))
+                await #expect(throws: Never.self) {
+                    try await installation.requestStorageDirectory(target)
+                }
+                #expect(throws: Never.self) {
+                    try FileManager.default.moveItem(at: unavailable, to: source.directory)
+                }
+            }
+            #expect(prepared.directory == source.directory)
+            #expect(try Data(contentsOf: prepared.buildDirectory.appending(path: "output")) == retained)
+        }
+        #expect(try installation.storage()?.directory == source.directory)
+        #expect(try installation.requestedStorageDirectory() == physicalTarget)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: target.path(percentEncoded: false)).isEmpty)
+        #expect(try await installation.prepareStorageForLaunch().directory == physicalTarget)
+    }
+
+    @Test(.timeLimit(.minutes(1))) func waitingForUnavailableStorageCanBeCancelled() async throws {
+        let (root, installation, source) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let unavailable = root.appending(path: "Disconnected storage")
+        try FileManager.default.moveItem(at: source.directory, to: unavailable)
+
+        let waiting = Task {
+            try await installation.waitForStorageForLaunch { _ in
+                withUnsafeCurrentTask { $0?.cancel() }
+            }
+        }
+        await #expect(throws: CancellationError.self) { try await waiting.value }
+        #expect(!FileManager.default.fileExists(atPath: source.directory.path(percentEncoded: false)))
+    }
+
     @Test func unavailableFirstSavedParentIsNotRecreatedBeforeRunnerStartup() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

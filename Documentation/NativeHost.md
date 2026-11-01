@@ -260,9 +260,15 @@ takes effect on the next host launch. Wait for running jobs and other users of
 that data to finish, then restart the host.
 
 The host copies the data and keeps the originals. The destination must not
-already contain `Work`, `CompilationCache`, or `Build`. If startup shows
-**Needs attention**, read the storage error, restore access to the original
-folder or choose another destination, and restart.
+already contain `Work`, `CompilationCache`, or `Build`. If the saved folder is
+temporarily missing, such as while an encrypted external volume mounts after
+login, the host shows **Waiting for storage** and retries every two seconds.
+Runner services start when storage preparation succeeds, without restarting the
+host. The host does not recreate the missing storage parent. Folder changes saved
+while waiting apply on the next host launch.
+
+Other storage failures show **Needs attention**. Read the storage error, restore
+access to the original folder or choose another destination, and restart.
 
 For removable storage, keep the volume mounted and approve the app's initial
 volume-access prompt. If you use custom `includeIf.gitdir` authentication rules,

@@ -29,7 +29,28 @@ extension HostInstallation {
 
     // The host calls this only after obtaining ownership of its runners, before starting services.
     @concurrent package func prepareStorageForLaunch() async throws -> Storage {
-        try await withStorageLock { try prepareStorageWhileLocked() }
+        try await withStorageLock { try prepareStorageWhileLocked(requested: requestedStorageDirectory()) }
+    }
+
+    @concurrent package func waitForStorageForLaunch(
+        onUnavailable: @Sendable (any Error) async -> Void
+    ) async throws -> Storage {
+        let requested = try await withStorageLock { try requestedStorageDirectory() }
+        while true {
+            do { return try await withStorageLock { try prepareStorageWhileLocked(requested: requested) } }
+            catch {
+                switch error {
+                case let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile:
+                    break
+                case let error as POSIXError where error.code == .ENOENT:
+                    break
+                default:
+                    throw error
+                }
+                await onUnavailable(error)
+                try await Task.sleep(for: .seconds(2))
+            }
+        }
     }
 
     private func activeStorageForChange() throws -> Storage? {
@@ -39,7 +60,7 @@ extension HostInstallation {
         }
     }
 
-    private func prepareStorageWhileLocked() throws -> Storage {
+    private func prepareStorageWhileLocked(requested: URL?) throws -> Storage {
         let active = try activeStorageForChange()
         if let journal = try readMigrationJournal() {
             if active?.directory == journal.target {
@@ -53,7 +74,6 @@ extension HostInstallation {
             }
         }
         try Task.checkCancellation()
-        let requested = try requestedStorageDirectory()
         if let active, let requested, requested != active.directory {
             let migrated = try migrateStorage(from: active, to: requested)
             try validateHostedWorkDirectories(storage: migrated)
