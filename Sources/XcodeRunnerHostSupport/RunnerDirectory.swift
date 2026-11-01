@@ -64,6 +64,8 @@ package struct RunnerDirectory: Sendable, Hashable {
             do {
                 if try entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true {
                     scan.directories.append(RunnerDirectory(url: entry))
+                } else {
+                    scan.otherEntries.append(entry)
                 }
             } catch {
                 scan.unreadable.append(UnreadableRunnerEntry(directory: RunnerDirectory(url: entry), error: error))
@@ -94,6 +96,8 @@ package struct RunnerDirectory: Sendable, Hashable {
 package struct RunnerDirectoryScan: Sendable {
     package var directories: [RunnerDirectory] = []
     package var unreadable: [UnreadableRunnerEntry] = []
+    /// Entries that are not folders, such as files.
+    package var otherEntries: [URL] = []
 }
 
 package struct UnreadableRunnerEntry: Sendable {

@@ -77,7 +77,13 @@ struct GitHubSettingsView: View {
                 } header: {
                     Text("Repositories")
                 } footer: {
-                    Text("This Mac registers runners for the selected repositories. Overview shows their status.")
+                    if let manager = model.management?.manager {
+                        Text("\(manager.name) registers this Mac's runners while it manages this Mac, so this selection applies after management stops.")
+                    } else if model.pairedMacs?.macs.isEmpty == false {
+                        Text("This Mac and the Macs it manages register runners for the selected repositories. Overview shows their status.")
+                    } else {
+                        Text("This Mac registers runners for the selected repositories. Overview shows their status.")
+                    }
                 }
             }
             if let error = model.errorMessage {

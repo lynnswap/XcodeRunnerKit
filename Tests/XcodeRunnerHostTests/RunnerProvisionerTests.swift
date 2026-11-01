@@ -229,15 +229,18 @@ struct RunnerProvisionerTests {
         #expect(await client.installations.count == 2)
     }
 
-    @Test func unusedRegistrationFieldsDoNotHideAnExistingRunner() async throws {
+    @Test func unusedRunnerFilesDoNotHideAnExistingRunner() async throws {
         let (root, client, provisioner) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
         try await client.addRunner(repository: firstRepository, identifier: 1, name: "existing")
-        // Provisioning reads only the runner ID, name, and repository URL.
-        let metadata = HostInstallation(homeDirectory: root).runnersRoot.appending(path: "existing/.runner")
+        // Provisioning reads only the runner ID, name, and repository URL, and a hosted runner's installation marker
+        // is not read.
+        let folder = HostInstallation(homeDirectory: root).runnersRoot.appending(path: "existing")
+        let metadata = folder.appending(path: ".runner")
         var registration = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: metadata)) as? [String: Any])
         registration["workFolder"] = 1
         try JSONSerialization.data(withJSONObject: registration).write(to: metadata)
+        try Data([0xFF]).write(to: folder.appending(path: ".xcode-runner-installation"))
         let statuses = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "access-token")
         #expect(statuses.first?.registeredCount == 1)
         #expect(statuses.first?.errorMessage == nil)

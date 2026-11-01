@@ -123,7 +123,7 @@ private struct HostPaneView: View {
             case .mac: HostMacSettingsView(model: settings)
             case .managedMac(let id):
                 if let mac = settings.managedMacs.mac(id) {
-                    ManagedMacView(macs: settings.managedMacs, mac: mac, navigation: navigation)
+                    ManagedMacView(model: settings, mac: mac, navigation: navigation)
                 } else {
                     ContentUnavailableView("This Mac was removed", systemImage: "desktopcomputer")
                 }
@@ -152,47 +152,62 @@ private struct HostOverviewView: View {
 
     var body: some View {
         Form {
-            if github.hasRestored && (github.account == nil || github.savedRepositoryIDs.isEmpty) {
+            // A managed Mac's runners are registered by its managing host, so it needs no sign-in or selection.
+            if model.management.manager == nil, github.hasRestored && (github.account == nil || github.savedRepositoryIDs.isEmpty) {
                 setup
             }
             Section(HostPane.macName) { HostStatusRows(settings: model) }
-            Section("Repositories") {
-                if github.isSynchronizing { ProgressView("Synchronizing runner registrations…") }
-                if github.runnerStatuses.isEmpty && !github.isSynchronizing {
-                    Text(github.savedRepositoryIDs.isEmpty
-                        ? "No repositories are selected."
-                        : "Runner counts appear after the next synchronization.")
+            Section {
+                if let manager = model.management.manager {
+                    Text("\(manager.name) registers runners on this Mac for the repositories selected there.")
                         .foregroundStyle(.secondary)
+                } else {
+                    repositories
                 }
-                ForEach(github.runnerStatuses) { status in
-                    VStack(alignment: .leading, spacing: 4) {
-                        LabeledContent(status.repository.fullName) {
-                            if status.isUnlinked {
-                                // Without a listing from GitHub, the runners still to remove are not counted.
-                                if status.registeredCount > 0 {
-                                    Text("Removing \(status.registeredCount) · \(status.busyCount) busy").monospacedDigit()
-                                } else {
-                                    Text("Removing")
-                                }
-                            } else {
-                                Text("\(status.onlineCount) of \(status.desiredCount) online · \(status.busyCount) busy")
-                                    .monospacedDigit()
-                            }
-                        }
-                        if status.isUnlinked, status.busyCount > 0 {
-                            Text("Busy runners are removed after their current jobs finish.")
-                                .font(.callout).foregroundStyle(.secondary)
-                        }
-                        if let error = status.errorMessage { ErrorText(error) }
-                        if status.excessCount > 0 {
-                            Text("\(status.excessCount) extra registrations are retained to keep existing jobs running. The shared Xcode execution limit still applies.")
-                                .font(.callout).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                if let error = github.errorMessage { ErrorText(error) }
+            } header: {
+                Text("Repositories")
+            } footer: {
+                if !model.managedMacs.macs.isEmpty { Text("Counts include the Macs that this Mac manages.") }
             }
         }
+    }
+
+    @ViewBuilder
+    private var repositories: some View {
+        if github.isSynchronizing { ProgressView("Synchronizing runner registrations…") }
+        if github.runnerStatuses.isEmpty && !github.isSynchronizing {
+            Text(github.savedRepositoryIDs.isEmpty
+                ? "No repositories are selected."
+                : "Runner counts appear after the next synchronization.")
+                .foregroundStyle(.secondary)
+        }
+        ForEach(github.runnerStatuses) { status in
+            VStack(alignment: .leading, spacing: 4) {
+                LabeledContent(status.repository.fullName) {
+                    if status.isUnlinked {
+                        // Without a listing from GitHub, the runners still to remove are not counted.
+                        if status.registeredCount > 0 {
+                            Text("Removing \(status.registeredCount) · \(status.busyCount) busy").monospacedDigit()
+                        } else {
+                            Text("Removing")
+                        }
+                    } else {
+                        Text("\(status.onlineCount) of \(status.desiredCount) online · \(status.busyCount) busy")
+                            .monospacedDigit()
+                    }
+                }
+                if status.isUnlinked, status.busyCount > 0 {
+                    Text("Busy runners are removed after their current jobs finish.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                if let error = status.errorMessage { ErrorText(error) }
+                if status.excessCount > 0 {
+                    Text("\(status.excessCount) extra registrations are retained to keep existing jobs running. The shared Xcode execution limit still applies.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+            }
+        }
+        if let error = github.errorMessage { ErrorText(error) }
     }
 
     /// The first unfinished step offers its action, so the order of setup stays visible.
@@ -435,6 +450,9 @@ private func connectPreviewMac(_ mac: ManagedMac, to macs: ManagedMacs, stopsAns
 }
 #Preview("Managed by Another Mac", traits: .fixedLayout(width: 760, height: 620)) {
     previewHostSplitViewController(pane: .mac, isSignedIn: true, pairing: .managed(by: "m6mini"))
+}
+#Preview("Overview Managed by Another Mac", traits: .fixedLayout(width: 760, height: 620)) {
+    previewHostSplitViewController(pane: .overview, isSignedIn: true, pairing: .managed(by: "m6mini"))
 }
 #Preview("Managed Mac", traits: .fixedLayout(width: 760, height: 620)) {
     previewHostSplitViewController(

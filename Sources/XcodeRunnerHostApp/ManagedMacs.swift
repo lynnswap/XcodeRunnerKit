@@ -46,6 +46,47 @@ final class ManagedMacSettings {
     fileprivate func endChange() { changeCount += 1 }
 }
 
+/// The runner folders of a Mac that this host manages, read and changed over the pairing connection.
+struct PairedRunnerMac: RunnerMac {
+    let id: HostPairing.ID
+    let macs: ManagedMacs
+
+    func hostName() async throws -> String {
+        guard case .hostName(let name) = try await macs.requestRunners(.hostName, from: id) else {
+            throw HostLinkError.unexpectedReply
+        }
+        return name
+    }
+
+    func runners() async throws -> RunnerInventory {
+        guard case .runners(let inventory) = try await macs.requestRunners(.inventory, from: id) else {
+            throw HostLinkError.unexpectedReply
+        }
+        return inventory
+    }
+
+    func prepareArchive(_ download: GitHubRunnerDownload) async throws -> URL {
+        guard case .archive(let archive) = try await macs.requestRunners(.prepareArchive(download), from: id) else {
+            throw HostLinkError.unexpectedReply
+        }
+        return archive
+    }
+
+    func install(_ request: RunnerProvisioner.InstallationRequest) async throws {
+        try await change(.install(request))
+    }
+
+    func markUnregistering(_ runner: String, from repositoryID: Int) async throws {
+        try await change(.markUnregistering(runner: runner, repositoryID: repositoryID))
+    }
+
+    func markRemoved(_ runner: String) async throws { try await change(.markRemoved(runner: runner)) }
+
+    private func change(_ request: RunnerRequest) async throws {
+        guard case .completed = try await macs.requestRunners(request, from: id) else { throw HostLinkError.unexpectedReply }
+    }
+}
+
 /// The Macs that this host manages, and whether each one can be reached.
 @MainActor @Observable
 final class ManagedMacs {
@@ -77,8 +118,11 @@ final class ManagedMacs {
     static let statusInterval = Duration.seconds(60)
     /// How often a Mac's settings are read while its pane is shown, so that its job counts stay current.
     static let settingsInterval = Duration.seconds(5)
-    /// How long a Mac has to apply a change. A lower job limit removes idle Simulators before the Mac replies.
+    /// How long a Mac has to apply a change. A lower job limit removes idle Simulators before the Mac replies, and
+    /// installing a runner registers it with GitHub.
     static let changeTimeout = Duration.seconds(300)
+    /// How long a Mac has to download the official runner archive.
+    static let downloadTimeout = Duration.seconds(900)
 
     private let store: any SecretStore
     private let name: String
@@ -306,16 +350,20 @@ final class ManagedMacs {
 
     /// Applies the job limit and Simulator retention edited for a Mac, after the checks that the Mac's own window
     /// makes.
-    func applyPoolConfiguration(of id: HostPairing.ID) async {
+    ///
+    /// - Returns: Whether the Mac saved a different job limit, so that its runner registrations need updating.
+    @discardableResult
+    func applyPoolConfiguration(of id: HostPairing.ID) async -> Bool {
         guard let mac = mac(id), let settings = settings[id], let report = settings.report, settings.canApplyPoolConfiguration
-        else { return }
+        else { return false }
         let changes: PoolSettingsDraft.Changes
         do {
             changes = try settings.poolDraft.changes(isNewPool: report.isNewPool)
         } catch {
             settings.saveError = error.localizedDescription
-            return
+            return false
         }
+        let previousCapacity = report.poolStatus?.configuration.maximumConcurrentJobs
         settings.isSaving = true
         settings.beginChange()
         defer {
@@ -326,9 +374,12 @@ final class ManagedMacs {
             let report = try await requestSettings(.configurePool(changes), from: mac)
             settings.saveError = nil
             settings.show(report)
-            if let saved = report.poolStatus?.configuration { settings.poolDraft.reset(to: saved) }
+            guard let saved = report.poolStatus?.configuration else { return false }
+            settings.poolDraft.reset(to: saved)
+            return saved.maximumConcurrentJobs != previousCapacity
         } catch {
             settings.saveError = Self.changeFailure(error, on: mac)
+            return false
         }
     }
 
@@ -364,8 +415,32 @@ final class ManagedMacs {
         switch reply {
         case .settings(let report): return report
         case .refused(let message): throw HostLinkError.refused(message)
-        case .unpaired: throw HostLinkError.unexpectedReply
+        default: throw HostLinkError.unexpectedReply
         }
+    }
+
+    /// Reads a Mac's settings now, without showing them in its pane.
+    func readSettings(of id: HostPairing.ID) async throws -> HostSettingsReport {
+        guard let mac = mac(id) else { throw HostLinkError.unreachable("The Mac is no longer paired.") }
+        return try await requestSettings(.read, from: mac)
+    }
+
+    /// Sends a request about a Mac's runner folders, and throws the Mac's refusal.
+    func requestRunners(_ request: RunnerRequest, from id: HostPairing.ID) async throws -> HostLinkReply {
+        guard let mac = mac(id) else { throw HostLinkError.unreachable("The Mac is no longer paired.") }
+        guard let endpoint = endpoints[mac.id] else {
+            throw HostLinkError.unreachable("\(mac.name) was not found on the local network.")
+        }
+        let timeout = switch request {
+        case .prepareArchive: Self.downloadTimeout
+        case .install: Self.changeTimeout
+        default: HostLink.requestTimeout
+        }
+        let reply = try await HostLink.send(
+            .runners(request), to: endpoint, key: mac.pairing.symmetricKey, identity: mac.id.uuidString, timeout: timeout
+        )
+        if case .refused(let message) = reply { throw HostLinkError.refused(message) }
+        return reply
     }
 
     /// The Mac's own message when it refused the change. Otherwise the change may or may not have been applied.

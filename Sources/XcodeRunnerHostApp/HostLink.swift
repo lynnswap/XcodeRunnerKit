@@ -17,6 +17,7 @@ struct HostPairing: Codable, Equatable, Identifiable, Sendable {
 /// A request from a managing host to a Mac it manages.
 enum HostLinkRequest: Codable, Sendable {
     case settings(HostSettingsRequest)
+    case runners(RunnerRequest)
     /// Asks the Mac to forget this pairing.
     case unpair
 }
@@ -28,8 +29,24 @@ enum HostSettingsRequest: Codable, Sendable {
     case saveStorage(directory: String)
 }
 
+/// Reads or changes a managed Mac's runner folders. The managing host compares them with GitHub and makes the GitHub
+/// requests, so only registration tokens leave it.
+enum RunnerRequest: Codable, Sendable {
+    case hostName
+    case inventory
+    case prepareArchive(GitHubRunnerDownload)
+    case install(RunnerProvisioner.InstallationRequest)
+    case markUnregistering(runner: String, repositoryID: Int)
+    case markRemoved(runner: String)
+}
+
 enum HostLinkReply: Codable, Sendable {
     case settings(HostSettingsReport)
+    case hostName(String)
+    case runners(RunnerInventory)
+    case archive(URL)
+    /// The Mac finished a change to its runner folders.
+    case completed
     case unpaired
     case refused(String)
 }

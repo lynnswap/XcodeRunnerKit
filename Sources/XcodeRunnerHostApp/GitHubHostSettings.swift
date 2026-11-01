@@ -38,6 +38,11 @@ final class GitHubHostSettings {
     private let provisioner: RunnerProvisioner
     private let pool: HostExecutionPool
     private let openURL: @MainActor (URL) -> Bool
+    /// The Macs that this host manages. They register runners for the same repositories as this Mac.
+    @ObservationIgnored weak var pairedMacs: ManagedMacs?
+    /// This Mac's pairing with a managing host, which then registers this Mac's runners instead.
+    @ObservationIgnored weak var management: HostManagement?
+    private var pairedProvisioners: [HostPairing.ID: RunnerProvisioner] = [:]
     private var configuration = GitHubHostConfiguration()
     private var connectionTask: Task<Void, Never>?
     private var synchronizationTask: Task<Void, Never>?
@@ -214,6 +219,9 @@ final class GitHubHostSettings {
             errorMessage = nil
             return nil
         }
+        if let manager = management?.manager {
+            return "Repository selection was saved. \(manager.name) registers this Mac's runners while it manages this Mac."
+        }
         guard storageIsReady else {
             return "Repository selection was saved. Runner registration changes are pending until host storage is ready."
         }
@@ -232,9 +240,14 @@ final class GitHubHostSettings {
         } catch { errorMessage = "Could not save the repository selection: \(error.localizedDescription)" }
     }
 
-    /// Registers the selected repositories' runners and removes the runners of repositories that left the selection.
+    /// Registers the selected repositories' runners on this Mac and the Macs it manages, and removes the runners of
+    /// repositories that left the selection.
     func synchronize() async {
         guard synchronizationTask == nil, storageIsReady, !isConnecting else { return }
+        guard management?.manager == nil else {
+            runnerStatuses = []
+            return
+        }
         guard !configuration.repositories.isEmpty || !configuration.unlinkedRepositories.isEmpty else { runnerStatuses = []; return }
         guard account != nil else {
             errorMessage = "Sign in to synchronize runner registrations. Existing jobs continue using the saved execution limit."
@@ -254,12 +267,10 @@ final class GitHubHostSettings {
         do {
             let selected = configuration.repositories
             let unlinked = configuration.unlinkedRepositories
-            // Removing the runners of unlinked repositories needs no execution limit.
             let capacity = try await pool.status()?.configuration.maximumConcurrentJobs
-            guard capacity != nil || selected.isEmpty else {
-                errorMessage = "Set Maximum concurrent jobs for this Mac under Runners and choose Apply to register runners."
-                return
-            }
+            let pairedMacs = self.pairedMacs
+            let paired = pairedMacs?.macs ?? []
+            pairedProvisioners = pairedProvisioners.filter { id, _ in paired.contains { $0.id == id } }
             let statuses = try await authenticated { token in
                 let available = try await client.listRepositories(accessToken: token)
                 repositories = available
@@ -276,16 +287,31 @@ final class GitHubHostSettings {
                         excessCount: 0, problems: [.repositoryInaccessible], isUnlinked: true
                     )
                 }
+                let accessible = selected.compactMap { current[$0.id] }
+                let accessibleUnlinked = unlinked.compactMap { current[$0.id] }
+                var macs: [(name: String?, statuses: [RepositoryRunnerStatus])] = []
+                var macName: String?
                 do {
-                    return try await provisioner.reconcile(
-                        repositories: selected.compactMap { current[$0.id] }, unlinked: unlinked.compactMap { current[$0.id] },
-                        capacity: capacity ?? 0, token: token
-                    ) + inaccessible
+                    macs.append((nil, try await reconcile(
+                        provisioner, capacity: capacity,
+                        missingLimit: "Set Maximum concurrent jobs for this Mac under Runners and choose Apply to register runners.",
+                        repositories: accessible, unlinked: accessibleUnlinked, token: token
+                    )))
+                    if let pairedMacs {
+                        for mac in paired {
+                            macName = mac.name
+                            macs.append((mac.name, try await pairedStatuses(
+                                of: mac, in: pairedMacs, repositories: accessible, unlinked: accessibleUnlinked, token: token
+                            )))
+                        }
+                    }
                 } catch let failure as RunnerProvisioningAuthenticationFailure {
                     // Keep the latest counts visible while the token is refreshed or the user signs in again.
-                    runnerStatuses = (failure.statuses + inaccessible).filter { !$0.hasFinishedRemoval }
+                    runnerStatuses = (RepositoryRunnerStatus.combining(macs + [(macName, failure.statuses)]) + inaccessible)
+                        .filter { !$0.hasFinishedRemoval }
                     throw failure.underlyingError
                 }
+                return RepositoryRunnerStatus.combining(macs) + inaccessible
             }
             runnerStatuses = statuses.filter { !$0.hasFinishedRemoval }
             errorMessage = nil
@@ -298,6 +324,85 @@ final class GitHubHostSettings {
             }
         } catch is CancellationError {
         } catch { handleGitHubFailure(error, operation: "synchronize runners") }
+    }
+
+    /// Reconciles one Mac's runners. A Mac without a job limit only removes the runners of unlinked repositories.
+    private func reconcile(
+        _ provisioner: RunnerProvisioner, capacity: Int?, missingLimit: String,
+        repositories: [GitHubRepository], unlinked: [GitHubRepository], token: String
+    ) async throws -> [RepositoryRunnerStatus] {
+        guard let capacity else {
+            let removals = unlinked.isEmpty
+                ? [] : try await provisioner.reconcile(repositories: [], unlinked: unlinked, capacity: 0, token: token)
+            return Self.unreconciled(repositories, unlinked: [], problem: .failed(missingLimit)) + removals
+        }
+        return try await provisioner.reconcile(repositories: repositories, unlinked: unlinked, capacity: capacity, token: token)
+    }
+
+    /// Reconciles the runners of a Mac that this host manages, with that Mac's job limit.
+    private func pairedStatuses(
+        of mac: ManagedMac, in pairedMacs: ManagedMacs,
+        repositories: [GitHubRepository], unlinked: [GitHubRepository], token: String
+    ) async throws -> [RepositoryRunnerStatus] {
+        // A Mac that does not answer keeps its runners until both sides are read again at the next synchronization.
+        let report: HostSettingsReport
+        do { report = try await pairedMacs.readSettings(of: mac.id) }
+        catch { return Self.unreconciled(repositories, unlinked: unlinked, problem: .failed(error.localizedDescription)) }
+        guard report.hasLoadedPoolStatus, report.poolError == nil else {
+            let message = report.poolError ?? "The Mac has not read its job limit yet."
+            return Self.unreconciled(repositories, unlinked: unlinked, problem: .failed(message))
+        }
+        let provisioner = pairedProvisioners[mac.id] ?? RunnerProvisioner(mac: PairedRunnerMac(id: mac.id, macs: pairedMacs), client: client)
+        pairedProvisioners[mac.id] = provisioner
+        return try await reconcile(
+            provisioner, capacity: report.poolStatus?.configuration.maximumConcurrentJobs,
+            missingLimit: "Set Maximum concurrent jobs in its pane under Runners and choose Apply to register runners.",
+            repositories: repositories, unlinked: unlinked, token: token
+        )
+    }
+
+    /// Statuses for a Mac whose runners were not reconciled. Nothing on it counts as removed.
+    private static func unreconciled(
+        _ repositories: [GitHubRepository], unlinked: [GitHubRepository], problem: RunnerProvisioningProblem
+    ) -> [RepositoryRunnerStatus] {
+        repositories.map {
+            RepositoryRunnerStatus(
+                repository: $0, desiredCount: 0, registeredCount: 0, onlineCount: 0, busyCount: 0, excessCount: 0,
+                problems: [problem]
+            )
+        } + unlinked.map {
+            RepositoryRunnerStatus(
+                repository: $0, desiredCount: 0, registeredCount: 0, onlineCount: 0, busyCount: 0, excessCount: 0,
+                problems: [problem], isUnlinked: true
+            )
+        }
+    }
+
+    /// Answers the managing host's request to read or change this Mac's runner folders, unless this Mac is
+    /// reconciling them or cannot run new runners yet.
+    func answer(_ request: RunnerRequest) async -> HostLinkReply {
+        switch request {
+        case .hostName, .inventory: break
+        case .prepareArchive, .install, .markUnregistering, .markRemoved:
+            guard storageIsReady, !isShuttingDown else {
+                return .refused("Runner changes wait until storage is ready and the runner host is running.")
+            }
+        }
+        do {
+            return try await provisioner.perform { mac in
+                switch request {
+                case .hostName: return .hostName(try await mac.hostName())
+                case .inventory: return .runners(try await mac.runners())
+                case .prepareArchive(let download): return .archive(try await mac.prepareArchive(download))
+                case .install(let installation): try await mac.install(installation)
+                case let .markUnregistering(runner, repositoryID): try await mac.markUnregistering(runner, from: repositoryID)
+                case .markRemoved(let runner): try await mac.markRemoved(runner)
+                }
+                return .completed
+            }
+        } catch {
+            return .refused(error.localizedDescription)
+        }
     }
 
     private func authenticated<Value>(_ operation: @MainActor (String) async throws -> Value) async throws -> Value {

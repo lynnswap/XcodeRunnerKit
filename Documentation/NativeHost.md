@@ -173,8 +173,19 @@ because the managing Mac cannot browse the other Mac's folders. When the Mac
 does not answer, its pane hides these values and shows when they were last
 read. **Remove Mac…** ends the pairing on both Macs. **Stop Management…** on a
 managed Mac ends it there; the managing Mac then shows that Mac as not found
-until you remove it. Each Mac still keeps its own GitHub sign-in and runner
-registrations.
+until you remove it.
+
+The managing Mac also registers runners on each paired Mac for the repositories
+selected in its **GitHub** pane, up to that Mac's job limit, and removes them
+when you deselect a repository. It sends the paired Mac only short-lived
+registration tokens, never its GitHub sign-in, and removes registrations from
+GitHub itself. **Overview** on the managing Mac counts the runners on all its
+Macs and names the Mac in each of its errors. A Mac that does not answer keeps
+its runners, and a deselected repository stays listed until that Mac answers
+and its runners are removed. A newly paired Mac gets its runners at the next
+synchronization, or when you change its job limit in its pane. While a Mac is
+managed, it does not register runners from its own sign-in; the runners that it
+registered before stay. **Remove Mac…** leaves the runners on that Mac.
 
 ## Settings from CLI and MCP
 

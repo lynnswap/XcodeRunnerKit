@@ -262,6 +262,8 @@ final class HostSettingsModel: HostSettingsDisplay {
         }
         // The managing host reads and changes this Mac's settings through the owner of this Mac's window.
         self.management.settings = self
+        self.github.pairedMacs = self.managedMacs
+        self.github.management = self.management
     }
 
     func storageDidBecomeAvailable(_ storage: HostInstallation.Storage) {
@@ -443,26 +445,19 @@ final class HostSettingsModel: HostSettingsDisplay {
         }
     }
 
-    /// Applies the managing host's changes. Returns once they are saved, and registers runners for a changed limit
-    /// afterwards, because registration can outlast the managing host's request.
+    /// Applies the managing host's changes. The managing host then registers runners for a changed limit.
     private func applyManagingHostChanges(_ changes: PoolSettingsDraft.Changes) async throws(HostSettingsError) {
         guard canApplyPoolConfiguration else {
             throw HostSettingsError("\(HostPane.macName) cannot apply these settings now. Try again in a moment.")
         }
-        let previousCapacity = poolStatus?.configuration.maximumConcurrentJobs
         isSaving = true
-        let saved: HostExecutionPool.Configuration
+        defer { isSaving = false }
         do {
-            saved = try await savePoolConfiguration(changes)
+            _ = try await savePoolConfiguration(changes)
         } catch {
-            isSaving = false
             throw HostSettingsError("Could not save the execution pool settings: \(error.localizedDescription)")
         }
         await refreshPoolStatus()
-        Task {
-            if previousCapacity != saved.maximumConcurrentJobs { await github.synchronize() }
-            isSaving = false
-        }
     }
 
     // With this guard's `throw` inline in `answer(_:)`, the Xcode 27.1 optimizer crashes while compiling it for Release.
