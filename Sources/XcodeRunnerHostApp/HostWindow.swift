@@ -21,11 +21,11 @@ enum HostPane: Hashable {
         }
     }
 
-    var systemImage: String {
+    var icon: Image {
         switch self {
-        case .overview: "gauge.with.dots.needle.50percent"
-        case .github: "person.crop.circle"
-        case .mac: "desktopcomputer"
+        case .overview: Image(systemName: "gauge.with.dots.needle.50percent")
+        case .github: Image("github-mark", bundle: .module)
+        case .mac: Image(systemName: "desktopcomputer")
         }
     }
 
@@ -87,7 +87,7 @@ private struct HostSidebar: View {
     }
 
     private func row(_ pane: HostPane) -> some View {
-        Label(pane.title, systemImage: pane.systemImage).tag(pane)
+        Label { Text(pane.title) } icon: { pane.icon }.tag(pane)
     }
 }
 

@@ -50,6 +50,7 @@ let package = Package(
                 .product(name: "Subprocess", package: "swift-subprocess"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
+            resources: [.process("Resources")],
             swiftSettings: [.swiftLanguageMode(.v6), .defaultIsolation(nil)]
         ),
         .testTarget(
