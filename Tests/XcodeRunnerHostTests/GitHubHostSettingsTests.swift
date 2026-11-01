@@ -228,8 +228,8 @@ struct GitHubHostSettingsTests {
         try Data(#"{"agentId":7,"agentName":"existing","gitHubUrl":"https://github.com/owner/Unlinked"}"#.utf8)
             .write(to: directory.appending(path: ".runner"))
         try Data().write(to: directory.appending(path: ".xcode-runner-host"))
-        let store = MemoryGitHubCredentialStore()
-        store.write(try JSONEncoder().encode(GitHubCredentials(
+        let store = MemorySecretStore()
+        try store.write(JSONEncoder().encode(GitHubCredentials(
             clientID: "app", account: GitHubAccount(id: 1, login: "owner"), accessToken: "token",
             refreshToken: nil, expiresAt: nil, refreshExpiresAt: nil
         )))
