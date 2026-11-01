@@ -195,6 +195,12 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
             wait_for(lambda:instant_log.exists() and 'Official runner service ended' in instant_log.read_text(), 'Immediate service exit was not observed')
             (first/'.xcode-runner-host').unlink()
             wait_for(lambda:(first/'stopped').exists() and not alive(first_pid), 'Removed runner did not stop')
+            unregistered = fixture(runners, 'unregistered')
+            wait_for(lambda:(unregistered/'pid.json').exists(), 'Runner to remove did not start')
+            unregistered_pid = json.loads((unregistered/'pid.json').read_text())['pid']
+            (unregistered/'.xcode-runner-removed').touch()
+            wait_for(lambda:not unregistered.exists(), 'Runner removed from GitHub kept its folder')
+            assert not alive(unregistered_pid)
             host.send_signal(signal.SIGTERM)
             assert host.wait(timeout=HANG_LIMIT) == 0
             assert (second/'stopped').exists() and not alive(second_pid)
@@ -471,4 +477,4 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost storage change ') as tempora
         finally:
             stop_host(host, runners)
 
-print('PASS: runner lifecycle, hidden runner discovery, prompt shutdown while storage is locked, recovery when unavailable storage returns, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')
+print('PASS: runner lifecycle, hidden runner discovery, removal of runners unregistered from GitHub, prompt shutdown while storage is locked, recovery when unavailable storage returns, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')

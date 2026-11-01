@@ -26,6 +26,11 @@ struct RunnerProvisionerTests {
         var pendingInstallationFailures = 0
         var failBeforeOptIn = false
         var failBeforeLocalSettings = false
+        var removals: [Int] = []
+        var failingRemoval: Int?
+        var jobStartedDuringInstallation: (id: Int, repository: GitHubRepository)?
+        var folderLockedAfterRemoval: Int?
+        var jobStartedBeforeRemoval: Int?
         private var nextIdentifier = 100
 
         init(installation: HostInstallation) { self.installation = installation }
@@ -60,6 +65,38 @@ struct RunnerProvisionerTests {
             runnerListRequests.append(repository.id)
             if failedRepository == repository.id { throw TestFailure("Repository access denied.") }
             return remote[repository.id, default: []]
+        }
+
+        func removeRunner(_ id: Int, from repository: GitHubRepository, accessToken: String) throws {
+            if failingRemoval == id { throw TestFailure("Runner removal failed.") }
+            if jobStartedBeforeRemoval == id {
+                setBusy(true, of: id, in: repository)
+                throw GitHubError.response(status: 422, message: "Bad request - Runner is still running a job")
+            }
+            if folderLockedAfterRemoval == id, let name = remote[repository.id]?.first(where: { $0.id == id })?.name {
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o500], ofItemAtPath: installation.runnersRoot.appending(path: name).path(percentEncoded: false)
+                )
+            }
+            removals.append(id)
+            remote[repository.id]?.removeAll { $0.id == id }
+        }
+
+        func failRemoval(of id: Int?) { failingRemoval = id }
+
+        func lockFolderAfterRemoval(of id: Int) { folderLockedAfterRemoval = id }
+
+        func finishJob(of id: Int, in repository: GitHubRepository) { setBusy(false, of: id, in: repository) }
+
+        func startJobDuringInstallation(of id: Int, in repository: GitHubRepository) {
+            jobStartedDuringInstallation = (id, repository)
+        }
+
+        func startJobBeforeRemoval(of id: Int) { jobStartedBeforeRemoval = id }
+
+        private func setBusy(_ busy: Bool, of id: Int, in repository: GitHubRepository) {
+            guard let index = remote[repository.id]?.firstIndex(where: { $0.id == id }), let runner = remote[repository.id]?[index] else { return }
+            remote[repository.id]?[index] = GitHubRunner(id: runner.id, name: runner.name, status: runner.status, busy: busy, labels: runner.labels)
         }
 
         func registrationToken(repository: GitHubRepository, accessToken: String) throws -> String {
@@ -113,6 +150,7 @@ struct RunnerProvisionerTests {
 
         func install(_ request: RunnerProvisioner.InstallationRequest) throws {
             installations.append(request)
+            if let job = jobStartedDuringInstallation { setBusy(true, of: job.id, in: job.repository) }
             let directory = installation.runnersRoot.appending(path: request.runnerName)
             let owner = directory.appending(path: ".xcode-runner-installation")
             if pendingInstallationFailures > 0 {
@@ -346,6 +384,195 @@ struct RunnerProvisionerTests {
         #expect(statuses.first?.errorMessage != nil)
         #expect(await client.installations.isEmpty)
         #expect(await client.archiveRequests == 0)
+    }
+
+    @Test func unlinkedRepositoriesLoseIdleRunnersAndKeepBusyOnesUntilTheirJobsFinish() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await client.addRunner(repository: firstRepository, identifier: 1, name: "selected")
+        try await client.addRunner(repository: secondRepository, identifier: 11, name: "idle")
+        try await client.addRunner(repository: secondRepository, identifier: 12, name: "busy", busy: true)
+        // A runner set up without the app belongs to a repository that never left the selection.
+        try await client.addRunner(repository: GitHubRepository(id: 3, fullName: "example/Manual"), identifier: 21, name: "manual")
+        let runners = HostInstallation(homeDirectory: root).runnersRoot
+
+        let statuses = try await provisioner.reconcile(
+            repositories: [firstRepository], unlinked: [secondRepository], capacity: 1, token: "access-token"
+        )
+        #expect(await client.removals == [11])
+        #expect(try RunnerDirectory(url: runners.appending(path: "idle")).isRemoved())
+        #expect(try !RunnerDirectory(url: runners.appending(path: "busy")).isRemoved())
+        let unlinked = try #require(statuses.first { $0.repository.id == secondRepository.id })
+        #expect(unlinked.isUnlinked)
+        #expect(unlinked.registeredCount == 1)
+        #expect(unlinked.busyCount == 1)
+        #expect(unlinked.errorMessage == nil)
+
+        await client.finishJob(of: 12, in: secondRepository)
+        let finished = try await provisioner.reconcile(
+            repositories: [firstRepository], unlinked: [secondRepository], capacity: 1, token: "access-token"
+        )
+        #expect(await client.removals == [11, 12])
+        #expect(try RunnerDirectory(url: runners.appending(path: "busy")).isRemoved())
+        #expect(finished.first { $0.repository.id == secondRepository.id }?.hasFinishedRemoval == true)
+        #expect(try !RunnerDirectory(url: runners.appending(path: "selected")).isRemoved())
+        #expect(try !RunnerDirectory(url: runners.appending(path: "manual")).isRemoved())
+    }
+
+    @Test func aFolderThatCouldNotBeMarkedAfterUnregisteringIsRemovedAtTheNextSynchronization() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await client.addRunner(repository: secondRepository, identifier: 11, name: "idle")
+        let directory = RunnerDirectory(url: HostInstallation(homeDirectory: root).runnersRoot.appending(path: "idle"))
+        let unlock = { try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.url.path(percentEncoded: false)) }
+        defer { try? unlock() }
+        await client.lockFolderAfterRemoval(of: 11)
+
+        let statuses = try await provisioner.reconcile(
+            repositories: [], unlinked: [secondRepository], capacity: 1, token: "access-token"
+        )
+        #expect(statuses.first?.errorMessage?.hasPrefix("Could not stop idle:") == true)
+        try unlock()
+        #expect(try !directory.isRemoved())
+
+        let retried = try await provisioner.reconcile(
+            repositories: [], unlinked: [secondRepository], capacity: 1, token: "access-token"
+        )
+        #expect(retried.first?.hasFinishedRemoval == true)
+        #expect(try directory.isRemoved())
+        #expect(await client.removals == [11])
+    }
+
+    @Test(arguments: [true, false])
+    func aRunnerThatStartsAJobBeforeItsRemovalIsKept(whileProvisioning: Bool) async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await client.addRunner(repository: secondRepository, identifier: 11, name: "idle")
+        if whileProvisioning {
+            await client.startJobDuringInstallation(of: 11, in: secondRepository)
+        } else {
+            // GitHub refuses to remove a runner that is running a job.
+            await client.startJobBeforeRemoval(of: 11)
+        }
+
+        let statuses = try await provisioner.reconcile(
+            repositories: [firstRepository], unlinked: [secondRepository], capacity: 1, token: "access-token"
+        )
+        #expect(await client.removals.isEmpty)
+        #expect(try !RunnerDirectory(url: HostInstallation(homeDirectory: root).runnersRoot.appending(path: "idle")).isRemoved())
+        let unlinked = statuses.first { $0.repository.id == secondRepository.id }
+        #expect(unlinked?.busyCount == 1)
+        #expect(unlinked?.errorMessage == nil)
+    }
+
+    @Test func aFailedRemovalKeepsTheRunnerAndIsRetried() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await client.addRunner(repository: secondRepository, identifier: 11, name: "idle")
+        let directory = RunnerDirectory(url: HostInstallation(homeDirectory: root).runnersRoot.appending(path: "idle"))
+        await client.failRemoval(of: 11)
+
+        let statuses = try await provisioner.reconcile(
+            repositories: [], unlinked: [secondRepository], capacity: 1, token: "access-token"
+        )
+        #expect(statuses.first?.registeredCount == 1)
+        #expect(statuses.first?.errorMessage == "Could not remove idle from GitHub: Runner removal failed.")
+        #expect(try !directory.isRemoved())
+
+        await client.failRemoval(of: nil)
+        let retried = try await provisioner.reconcile(
+            repositories: [], unlinked: [secondRepository], capacity: 1, token: "access-token"
+        )
+        #expect(retried.first?.hasFinishedRemoval == true)
+        #expect(await client.removals == [11])
+        #expect(try directory.isRemoved())
+    }
+
+    @Test func installationsThatStoppedBeforeOptingInAreRemovedWithTheirRepository() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runners = HostInstallation(homeDirectory: root).runnersRoot
+        let registered = RunnerProvisioner.runnerName(hostName: "CI Mac", repository: secondRepository, slot: 1)
+        // One installation saved its local settings, and the other stopped after GitHub registered it.
+        try await client.addRunner(repository: secondRepository, identifier: 11, name: "configured", hosted: false)
+        await client.addRemoteRunner(repository: secondRepository, identifier: 12, name: registered, online: false, busy: false)
+        try FileManager.default.createDirectory(at: runners.appending(path: registered), withIntermediateDirectories: true)
+        for name in ["configured", registered] {
+            try String(secondRepository.id).write(
+                to: runners.appending(path: "\(name)/.xcode-runner-installation"), atomically: true, encoding: .utf8
+            )
+        }
+
+        let statuses = try await provisioner.reconcile(
+            repositories: [], unlinked: [secondRepository], capacity: 1, token: "access-token"
+        )
+        #expect(Set(await client.removals) == [11, 12])
+        #expect(try RunnerDirectory(url: runners.appending(path: "configured")).isRemoved())
+        #expect(try RunnerDirectory(url: runners.appending(path: registered)).isRemoved())
+        #expect(statuses.first?.hasFinishedRemoval == true)
+
+        // Selecting the repository again before the host deletes the folder installs into another one.
+        _ = try await provisioner.reconcile(repositories: [secondRepository], capacity: 1, token: "access-token")
+        #expect(await client.installations.map(\.runnerName) == [
+            RunnerProvisioner.runnerName(hostName: "CI Mac", repository: secondRepository, slot: 2),
+        ])
+    }
+
+    @Test func anOnlineRunnerWithAnIncompleteInstallationsNameStaysWithItsOwner() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = HostInstallation(homeDirectory: root).runnersRoot
+            .appending(path: RunnerProvisioner.runnerName(hostName: "CI Mac", repository: secondRepository, slot: 1))
+        // Another Mac with the same name registered the runner that this Mac's installation stopped before registering.
+        await client.addRemoteRunner(repository: secondRepository, identifier: 12, name: directory.lastPathComponent, online: true, busy: false)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try String(secondRepository.id).write(
+            to: directory.appending(path: ".xcode-runner-installation"), atomically: true, encoding: .utf8
+        )
+
+        let statuses = try await provisioner.reconcile(
+            repositories: [], unlinked: [secondRepository], capacity: 1, token: "access-token"
+        )
+        #expect(await client.removals.isEmpty)
+        #expect(try !RunnerDirectory(url: directory).isRemoved())
+        #expect(statuses.first?.hasFinishedRemoval == false)
+        #expect(statuses.first?.errorMessage?.contains("must be offline and idle") == true)
+    }
+
+    @Test func aSelectedRepositorysRunnerStaysWhenAnUnlinkedRepositoryTookItsOldName() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let renamed = GitHubRepository(id: firstRepository.id, fullName: "example/Renamed")
+        let reused = GitHubRepository(id: secondRepository.id, fullName: firstRepository.fullName)
+        try await client.addRunner(repository: renamed, identifier: 1, name: "existing", busy: true, localRepository: firstRepository)
+        await client.resolveRepository(firstRepository.fullName, as: .success(reused))
+
+        let statuses = try await provisioner.reconcile(
+            repositories: [renamed], unlinked: [reused], capacity: 1, token: "access-token"
+        )
+        #expect(await client.removals.isEmpty)
+        #expect(try !RunnerDirectory(url: HostInstallation(homeDirectory: root).runnersRoot.appending(path: "existing")).isRemoved())
+        #expect(statuses.first { $0.repository.id == reused.id }?.hasFinishedRemoval == true)
+    }
+
+    @Test(arguments: [false, true])
+    func aRunnerThatCannotBeIdentifiedKeepsItsUnlinkedRepositoryPending(hasMalformedRegistration: Bool) async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let renamed = GitHubRepository(id: secondRepository.id, fullName: "example/Renamed")
+        if hasMalformedRegistration {
+            let directory = HostInstallation(homeDirectory: root).runnersRoot.appending(path: "malformed")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data(#"{"agentId":"#.utf8).write(to: directory.appending(path: ".runner"))
+        } else {
+            try await client.addRunner(repository: renamed, identifier: 11, name: "existing", localRepository: secondRepository)
+            await client.resolveRepository(secondRepository.fullName, as: .failure(URLError(.networkConnectionLost)))
+        }
+
+        let statuses = try await provisioner.reconcile(repositories: [], unlinked: [renamed], capacity: 1, token: "access-token")
+        #expect(statuses.first?.hasFinishedRemoval == false)
+        #expect(statuses.first?.errorMessage != nil)
+        #expect(await client.removals.isEmpty)
     }
 
     @Test func individualServicesRemainUnchangedAndAreReported() async throws {

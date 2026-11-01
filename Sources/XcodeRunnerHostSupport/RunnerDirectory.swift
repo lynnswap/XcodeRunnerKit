@@ -23,16 +23,25 @@ package struct RunnerDirectory: Sendable, Hashable {
     package func hasIndividualService() throws -> Bool { try itemExists(".service") }
     /// Whether the official runner saved its registration settings.
     package func hasRegistration() throws -> Bool { try itemExists(".runner") }
+    /// Whether the registration was removed from GitHub, so the host stops the service and deletes the folder.
+    package func isRemoved() throws -> Bool { try itemExists(".xcode-runner-removed") }
+
+    /// Asks the host to stop the service and delete the folder.
+    package func markRemoved() throws {
+        try Data().write(to: url.appending(path: ".xcode-runner-removed"))
+    }
+
+    /// The ID of the repository that this Mac started removing the registration from, or nil.
+    package func unregisteringRepository() throws -> String? { try text(of: ".xcode-runner-unregistering") }
+
+    /// Records that this Mac removes the registration from a repository, so that the folder can still be removed
+    /// after GitHub stops listing the runner.
+    package func markUnregistering(from repositoryID: Int) throws {
+        try Data(String(repositoryID).utf8).write(to: url.appending(path: ".xcode-runner-unregistering"))
+    }
 
     /// The repository ID recorded while a managed installation is incomplete, or nil.
-    package func incompleteInstallationOwner() throws -> String? {
-        do {
-            return try String(contentsOf: url.appending(path: ".xcode-runner-installation"), encoding: .utf8)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
-            return nil
-        }
-    }
+    package func incompleteInstallationOwner() throws -> String? { try text(of: ".xcode-runner-installation") }
 
     /// Decodes the registration fields that `Fields` declares, leaving the others unchecked.
     package func registration<Fields: Decodable>(as fields: Fields.Type) throws -> Fields {
@@ -61,6 +70,15 @@ package struct RunnerDirectory: Sendable, Hashable {
             }
         }
         return scan
+    }
+
+    private func text(of name: String) throws -> String? {
+        do {
+            return try String(contentsOf: url.appending(path: name), encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            return nil
+        }
     }
 
     private func itemExists(_ name: String) throws -> Bool {

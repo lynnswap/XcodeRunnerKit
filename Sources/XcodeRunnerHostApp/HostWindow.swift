@@ -178,8 +178,21 @@ private struct HostOverviewView: View {
                 ForEach(github.runnerStatuses) { status in
                     VStack(alignment: .leading, spacing: 4) {
                         LabeledContent(status.repository.fullName) {
-                            Text("\(status.onlineCount) of \(status.desiredCount) online · \(status.busyCount) busy")
-                                .monospacedDigit()
+                            if status.isUnlinked {
+                                // Without a listing from GitHub, the runners still to remove are not counted.
+                                if status.registeredCount > 0 {
+                                    Text("Removing \(status.registeredCount) · \(status.busyCount) busy").monospacedDigit()
+                                } else {
+                                    Text("Removing")
+                                }
+                            } else {
+                                Text("\(status.onlineCount) of \(status.desiredCount) online · \(status.busyCount) busy")
+                                    .monospacedDigit()
+                            }
+                        }
+                        if status.isUnlinked, status.busyCount > 0 {
+                            Text("Busy runners are removed after their current jobs finish.")
+                                .font(.callout).foregroundStyle(.secondary)
                         }
                         if let error = status.errorMessage { ErrorText(error) }
                         if status.excessCount > 0 {
