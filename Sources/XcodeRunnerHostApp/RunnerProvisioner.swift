@@ -35,6 +35,11 @@ struct RepositoryRunnerStatus: Sendable, Identifiable {
     let busyCount: Int
     let excessCount: Int
     let problems: [RunnerProvisioningProblem]
+    /// Whether the repository left the selection, so `registeredCount` counts this Mac's runners still to remove.
+    var isUnlinked = false
+
+    /// Whether this Mac has no runners left to remove for a repository that left the selection.
+    var hasFinishedRemoval: Bool { isUnlinked && registeredCount == 0 && problems.isEmpty }
 
     var id: Int { repository.id }
 
@@ -56,6 +61,7 @@ protocol RunnerProvisioningClient: Sendable {
     func listRunners(repository: GitHubRepository, accessToken: String) async throws -> [GitHubRunner]
     func registrationToken(repository: GitHubRepository, accessToken: String) async throws -> String
     func runnerDownload(accessToken: String) async throws -> GitHubRunnerDownload
+    func removeRunner(_ id: Int, from repository: GitHubRepository, accessToken: String) async throws
 }
 
 extension GitHubClient: RunnerProvisioningClient {}
@@ -140,10 +146,6 @@ actor RunnerProvisioner {
         }
     }
 
-    /// Registers enough runners for each repository and reports their state.
-    ///
-    /// Other failures are reported per repository. Throws
-    /// RunnerProvisioningAuthenticationFailure when GitHub rejects the token.
     private func hostName() -> String {
         if let resolvedHostName { return resolvedHostName }
         let name = resolveHostName()
@@ -151,13 +153,21 @@ actor RunnerProvisioner {
         return name
     }
 
+    /// Registers enough runners for each repository, removes this Mac's runners of the unlinked repositories, and
+    /// reports their state.
+    ///
+    /// Other failures are reported per repository. Throws
+    /// RunnerProvisioningAuthenticationFailure when GitHub rejects the token.
+    ///
+    /// - Parameter unlinked: Repositories that left the selection. Only runners that GitHub lists for them are
+    ///   removed, and a busy runner is removed at a later call, after its job finishes.
     func reconcile(
-        repositories: [GitHubRepository], capacity: Int, token: String
+        repositories: [GitHubRepository], unlinked: [GitHubRepository] = [], capacity: Int, token: String
     ) async throws -> [RepositoryRunnerStatus] {
         guard !isReconciling else {
             return repositories.map {
                 Self.status(repository: $0, capacity: capacity, runners: [], problems: [.reconciliationInProgress])
-            }
+            } + unlinked.map { Self.removalStatus(repository: $0, problems: [.reconciliationInProgress]) }
         }
         isReconciling = true
         defer { isReconciling = false }
@@ -168,11 +178,11 @@ actor RunnerProvisioner {
         catch {
             return repositories.map {
                 Self.status(repository: $0, capacity: capacity, runners: [], problems: [.failed(error.localizedDescription)])
-            }
+            } + unlinked.map { Self.removalStatus(repository: $0, problems: [.failed(error.localizedDescription)]) }
         }
         let initialLocal = initialScan.runners
         var snapshots: [Int: Result<[GitHubRunner], any Error>] = [:]
-        for repository in repositories {
+        for repository in repositories + unlinked {
             do {
                 try Task.checkCancellation()
                 let runners = try await client.listRunners(repository: repository, accessToken: token)
@@ -182,7 +192,7 @@ actor RunnerProvisioner {
         var resolvedRepositories: [String: Result<GitHubRepository?, any Error>] = [:]
         for local in initialLocal {
             guard let fullName = local.repositoryFullName, resolvedRepositories[fullName.lowercased()] == nil else { continue }
-            let needsResolution = repositories.contains { repository in
+            let needsResolution = (repositories + unlinked).contains { repository in
                 guard fullName.caseInsensitiveCompare(repository.fullName) != .orderedSame,
                       let snapshot = snapshots[repository.id], case .success(let remote) = snapshot else { return false }
                 return remote.contains(where: local.matches)
@@ -305,6 +315,90 @@ actor RunnerProvisioner {
             }
             statuses.append(Self.status(repository: repository, capacity: capacity, runners: knownRunners, problems: problems))
         }
+
+        for repository in unlinked {
+            var remaining = 0
+            var busyCount = 0
+            // A registration that could not be read may be one of this repository's runners.
+            var problems = initialScan.problems
+            do {
+                try Task.checkCancellation()
+                // Old repository names were resolved from the first listing.
+                _ = try snapshots[repository.id]?.get()
+                // Provisioning can take long enough for an idle runner to start a job, so its state is listed again.
+                let remote = try await client.listRunners(repository: repository, accessToken: token)
+                var candidates: [(directory: RunnerDirectory, name: String, registered: GitHubRunner?)] = []
+                for runner in initialLocal where runner.isHosted && !runner.hasIndividualService {
+                    // A local name alone can belong to another repository that took it after a rename.
+                    if let registered = remote.first(where: runner.matches),
+                       try runner.belongs(to: repository, remote: remote, resolvedRepositories: resolvedRepositories) {
+                        candidates.append((runner.directory, runner.name, registered))
+                    } else if try runner.directory.unregisteringRepository() == String(repository.id) {
+                        // GitHub removed the registration before the folder could be marked.
+                        candidates.append((runner.directory, runner.name, nil))
+                    }
+                }
+                // An installation that stopped before opting in to the host is also this repository's runner.
+                for directory in try installation.runnerDirectories().directories {
+                    guard try !directory.isHosted(), try !directory.hasIndividualService(), try !directory.isRemoved(),
+                          try directory.incompleteInstallationOwner() == String(repository.id) else { continue }
+                    if try directory.hasRegistration() {
+                        let registration = try directory.registration(as: Registration.self)
+                        let name = registration.agentName ?? directory.name
+                        candidates.append((directory, name, remote.first { $0.id == registration.agentId && $0.name == name }))
+                    } else {
+                        // The official runner registers remotely before saving its local .runner settings.
+                        candidates.append((directory, directory.name, remote.first { $0.name == directory.name }))
+                    }
+                }
+                for candidate in candidates {
+                    if let registered = candidate.registered {
+                        // A busy runner is removed after its job, at a later synchronization.
+                        guard !registered.busy else {
+                            remaining += 1
+                            busyCount += 1
+                            continue
+                        }
+                        do {
+                            try candidate.directory.markUnregistering(from: repository.id)
+                        } catch {
+                            remaining += 1
+                            problems.append(.failed("Could not stop \(candidate.name): \(error.localizedDescription)"))
+                            continue
+                        }
+                        do {
+                            try await client.removeRunner(registered.id, from: repository, accessToken: token)
+                        } catch GitHubError.response(status: 422, message: _) {
+                            // GitHub refuses to remove a runner that started a job after the listing.
+                            remaining += 1
+                            busyCount += 1
+                            continue
+                        } catch {
+                            remaining += 1
+                            problems.append(.failed("Could not remove \(candidate.name) from GitHub: \(error.localizedDescription)"))
+                            if let error = error as? GitHubError, case .response(status: 401, message: _) = error {
+                                authenticationError = error
+                            }
+                            continue
+                        }
+                    }
+                    do {
+                        try candidate.directory.markRemoved()
+                    } catch {
+                        remaining += 1
+                        problems.append(.failed("Could not stop \(candidate.name): \(error.localizedDescription)"))
+                    }
+                }
+            } catch {
+                problems.append(.failed(error.localizedDescription))
+                if let error = error as? GitHubError, case .response(status: 401, message: _) = error {
+                    authenticationError = error
+                }
+            }
+            statuses.append(Self.removalStatus(
+                repository: repository, remaining: remaining, busyCount: busyCount, problems: problems
+            ))
+        }
         if let authenticationError {
             throw RunnerProvisioningAuthenticationFailure(statuses: statuses, underlyingError: authenticationError)
         }
@@ -314,7 +408,8 @@ actor RunnerProvisioner {
     private func canResumeInstallation(
         at runner: RunnerDirectory, repository: GitHubRepository, remote: [GitHubRunner]
     ) throws -> Bool {
-        guard try !runner.isHosted(), try !runner.hasIndividualService(),
+        // A folder that the host is about to delete cannot hold a new registration.
+        guard try !runner.isHosted(), try !runner.hasIndividualService(), try !runner.isRemoved(),
               try runner.incompleteInstallationOwner() == String(repository.id) else { return false }
         if try runner.hasRegistration() {
             let registration = try runner.registration(as: Registration.self)
@@ -340,7 +435,8 @@ actor RunnerProvisioner {
         }
         for runner in scan.directories {
             do {
-                guard try runner.hasRegistration() else { continue }
+                // A removed runner's folder stays until the host stops its service.
+                guard try runner.hasRegistration(), try !runner.isRemoved() else { continue }
                 let registration = try runner.registration(as: Registration.self)
                 runners.append(LocalRunner(
                     directory: runner, name: registration.agentName ?? runner.name, registration: registration,
@@ -376,6 +472,15 @@ actor RunnerProvisioner {
             repository: repository, desiredCount: capacity, registeredCount: runners.count,
             onlineCount: runners.count(where: { $0.status == "online" }), busyCount: runners.count(where: \.busy),
             excessCount: max(0, runners.count - capacity), problems: problems
+        )
+    }
+
+    private static func removalStatus(
+        repository: GitHubRepository, remaining: Int = 0, busyCount: Int = 0, problems: [RunnerProvisioningProblem]
+    ) -> RepositoryRunnerStatus {
+        RepositoryRunnerStatus(
+            repository: repository, desiredCount: 0, registeredCount: remaining, onlineCount: 0, busyCount: busyCount,
+            excessCount: 0, problems: problems, isUnlinked: true
         )
     }
 

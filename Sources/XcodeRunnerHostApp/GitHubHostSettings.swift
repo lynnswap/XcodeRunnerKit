@@ -6,6 +6,8 @@ import XcodeRunnerKit
 
 struct GitHubHostConfiguration: Codable, Equatable {
     var repositories: [GitHubRepository] = []
+    /// Repositories that left the selection while this Mac still had their runners.
+    var unlinkedRepositories: [GitHubRepository] = []
 
     static func load(from url: URL) throws -> Self {
         do { return try JSONDecoder().decode(Self.self, from: Data(contentsOf: url)) }
@@ -15,6 +17,15 @@ struct GitHubHostConfiguration: Codable, Equatable {
     func save(to url: URL) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONEncoder().encode(self).write(to: url, options: .atomic)
+    }
+}
+
+extension GitHubHostConfiguration {
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        repositories = try container.decode([GitHubRepository].self, forKey: .repositories)
+        // Settings saved before unlinking removed runners have no unlinked repositories.
+        unlinkedRepositories = try container.decodeIfPresent([GitHubRepository].self, forKey: .unlinkedRepositories) ?? []
     }
 }
 
@@ -174,6 +185,12 @@ final class GitHubHostSettings {
             }
             return repository
         }
+        // The next synchronization removes this Mac's runners of the repositories that leave the selection.
+        var unlinked: [Int: GitHubRepository] = [:]
+        for repository in configuration.unlinkedRepositories + configuration.repositories where !selectedIDs.contains(repository.id) {
+            unlinked[repository.id] = repository
+        }
+        next.unlinkedRepositories = unlinked.values.sorted { $0.id < $1.id }
         try next.save(to: record)
         configuration = next
         if draftWasUnedited { selectedRepositoryIDs = selectedIDs }
@@ -192,7 +209,7 @@ final class GitHubHostSettings {
     }
 
     private func applySavedRepositorySelection() async -> String? {
-        if configuration.repositories.isEmpty {
+        if configuration.repositories.isEmpty && configuration.unlinkedRepositories.isEmpty {
             runnerStatuses = []
             errorMessage = nil
             return nil
@@ -215,9 +232,10 @@ final class GitHubHostSettings {
         } catch { errorMessage = "Could not save the repository selection: \(error.localizedDescription)" }
     }
 
+    /// Registers the selected repositories' runners and removes the runners of repositories that left the selection.
     func synchronize() async {
         guard synchronizationTask == nil, storageIsReady, !isConnecting else { return }
-        guard !configuration.repositories.isEmpty else { runnerStatuses = []; return }
+        guard !configuration.repositories.isEmpty || !configuration.unlinkedRepositories.isEmpty else { runnerStatuses = []; return }
         guard account != nil else {
             errorMessage = "Sign in to synchronize runner registrations. Existing jobs continue using the saved execution limit."
             return
@@ -234,32 +252,50 @@ final class GitHubHostSettings {
 
     private func performSynchronization() async {
         do {
-            guard let status = try await pool.status() else {
+            let selected = configuration.repositories
+            let unlinked = configuration.unlinkedRepositories
+            // Removing the runners of unlinked repositories needs no execution limit.
+            let capacity = try await pool.status()?.configuration.maximumConcurrentJobs
+            guard capacity != nil || selected.isEmpty else {
                 errorMessage = "Set Maximum concurrent jobs for this Mac under Runners and choose Apply to register runners."
                 return
             }
-            let selected = configuration.repositories
-            runnerStatuses = try await authenticated { token in
+            let statuses = try await authenticated { token in
                 let available = try await client.listRepositories(accessToken: token)
                 repositories = available
                 let current = Dictionary(uniqueKeysWithValues: available.map { ($0.id, $0) })
                 let inaccessible = selected.filter { current[$0.id] == nil }.map { repository in
                     RepositoryRunnerStatus(
-                        repository: repository, desiredCount: status.configuration.maximumConcurrentJobs,
+                        repository: repository, desiredCount: capacity ?? 0,
                         registeredCount: 0, onlineCount: 0, busyCount: 0, excessCount: 0, problems: [.repositoryInaccessible]
+                    )
+                } + unlinked.filter { current[$0.id] == nil }.map { repository in
+                    // GitHub keeps the registrations until the app can remove them, so the runners stay as well.
+                    RepositoryRunnerStatus(
+                        repository: repository, desiredCount: 0, registeredCount: 0, onlineCount: 0, busyCount: 0,
+                        excessCount: 0, problems: [.repositoryInaccessible], isUnlinked: true
                     )
                 }
                 do {
                     return try await provisioner.reconcile(
-                        repositories: selected.compactMap { current[$0.id] }, capacity: status.configuration.maximumConcurrentJobs, token: token
+                        repositories: selected.compactMap { current[$0.id] }, unlinked: unlinked.compactMap { current[$0.id] },
+                        capacity: capacity ?? 0, token: token
                     ) + inaccessible
                 } catch let failure as RunnerProvisioningAuthenticationFailure {
                     // Keep the latest counts visible while the token is refreshed or the user signs in again.
-                    runnerStatuses = failure.statuses + inaccessible
+                    runnerStatuses = (failure.statuses + inaccessible).filter { !$0.hasFinishedRemoval }
                     throw failure.underlyingError
                 }
             }
+            runnerStatuses = statuses.filter { !$0.hasFinishedRemoval }
             errorMessage = nil
+            let finished = Set(statuses.filter(\.hasFinishedRemoval).map(\.id))
+            if !finished.isEmpty {
+                var next = configuration
+                next.unlinkedRepositories.removeAll { finished.contains($0.id) }
+                try next.save(to: record)
+                configuration = next
+            }
         } catch is CancellationError {
         } catch { handleGitHubFailure(error, operation: "synchronize runners") }
     }
