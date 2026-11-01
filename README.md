@@ -294,7 +294,7 @@ Add `--compilation-cache /path/to/shared-CAS`, or set
 The compiler cache is shared; each run still has separate DerivedData and build
 outputs.
 
-For jobs started by XcodeRunnerHost, the CLI defaults to
+For jobs started by XcodeHomeRunner, the CLI defaults to
 `<Storage>/CompilationCache/<GITHUB_REPOSITORY_ID>`. Jobs from the same repository
 share a cache across runners and branches; different repository IDs use separate
 directories. The hosted default requires a valid `GITHUB_REPOSITORY_ID` and never
@@ -361,7 +361,7 @@ xcodebuild test -scheme XcodeRunnerKit-Package \
   -destination 'platform=macOS,arch=arm64'
 ```
 
-The host app's project is `App/XcodeRunnerHost.xcworkspace`. The app target only
+The host app's project is `App/XcodeHomeRunner.xcworkspace`. The app target only
 starts the package's `XcodeRunnerHostApp` target, which holds the host code and
 its tests; that product exists for the app and is not a supported library API.
 To sign builds from Xcode, set `DEVELOPMENT_TEAM` in

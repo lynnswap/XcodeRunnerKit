@@ -15,9 +15,9 @@ import time
 
 # Pass an ad-hoc signed app from build-runner-host.sh; the installer must reject it.
 if len(sys.argv) != 3:
-    sys.exit('Usage: check-runner-host.py XCODE_RUNNER_HOST_APP XCODE_RUNNER_CLI')
+    sys.exit('Usage: check-runner-host.py XCODE_HOME_RUNNER_APP XCODE_RUNNER_CLI')
 app = Path(sys.argv[1]).resolve()
-executable = str(app/'Contents/MacOS/xcode-runner-host')
+executable = str(app/'Contents/MacOS/XcodeHomeRunner')
 cli = Path(sys.argv[2]).resolve()
 scripts = Path(__file__).resolve().parent
 
@@ -160,7 +160,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
             (legacy/'stop-delay').write_text('8')
             (legacy/'bin').mkdir()
             (legacy/'bin/runsvc.sh').write_text((legacy/'runsvc.sh').read_text())
-            legacy_label = f'dev.lynnswap.XcodeRunnerHost.legacy.{os.getpid()}'
+            legacy_label = f'lynnpd.xcodehomerunner.legacy.{os.getpid()}'
             legacy_target = f'gui/{os.getuid()}/{legacy_label}'
             legacy_plist = root/'legacy.plist'
             legacy_plist.write_bytes(plistlib.dumps({
@@ -206,7 +206,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
 
     launched = fixture(runners, 'launchd')
     (launched/'stop-delay').write_text('8')
-    label = f'dev.lynnswap.XcodeRunnerHost.test.{os.getpid()}'
+    label = f'lynnpd.xcodehomerunner.test.{os.getpid()}'
     target = f'gui/{os.getuid()}/{label}'
     plist = root/'service.plist'
     plist.write_bytes(plistlib.dumps({
@@ -237,8 +237,8 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     wait_for(lambda:not alive(restarted['pid']), 'Runner survived service removal')
     assert not (host_root/'Pool').exists(), 'Host status reads configured an unused pool'
 
-    shutil.copytree(app, root/'packaging/XcodeRunnerHost.app', symlinks=True)
-    setup = root/'packaging/XcodeRunnerHost.app/Contents/Resources/HostSetup'
+    shutil.copytree(app, root/'packaging/XcodeHomeRunner.app', symlinks=True)
+    setup = root/'packaging/XcodeHomeRunner.app/Contents/Resources/HostSetup'
     for name in ('install-github-runner.sh', 'enable-hosted-runner.sh', 'lock-host-storage.py',
                  'stop-runner-service.py', 'cleanup-runner-temp.sh', 'cleanup-runner-temp.py'):
         assert (setup/name).read_bytes() == (scripts/name).read_bytes(), f'Missing or outdated bundled setup script: {name}'
@@ -248,7 +248,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     fake_launchctl.write_text('#!/bin/bash\nexit 0\n')
     fake_launchctl.chmod(0o755)
     environment = {**os.environ, 'HOME':str(root/'home'), 'PATH':str(tools)+os.pathsep+os.environ['PATH']}
-    rejected = subprocess.run(['bash',str(scripts/'install-runner-host.sh'),str(root/'packaging/XcodeRunnerHost.app')],env=environment,capture_output=True)
+    rejected = subprocess.run(['bash',str(scripts/'install-runner-host.sh'),str(root/'packaging/XcodeHomeRunner.app')],env=environment,capture_output=True)
     assert rejected.returncode != 0 and b'certificate signing identity' in rejected.stderr
     assert not (root/'home/Applications').exists()
 

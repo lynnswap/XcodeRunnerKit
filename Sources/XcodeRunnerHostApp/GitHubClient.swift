@@ -216,7 +216,7 @@ struct GitHubClient: Sendable {
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         if let accessToken { request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization") }
         request.setValue("2026-03-10", forHTTPHeaderField: "X-GitHub-Api-Version")
-        request.setValue("XcodeRunnerHost", forHTTPHeaderField: "User-Agent")
+        request.setValue("XcodeHomeRunner", forHTTPHeaderField: "User-Agent")
         return request
     }
 
@@ -224,7 +224,7 @@ struct GitHubClient: Sendable {
         var request = URLRequest(url: URL(string: "https://github.com/")!.appending(path: path))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("XcodeRunnerHost", forHTTPHeaderField: "User-Agent")
+        request.setValue("XcodeHomeRunner", forHTTPHeaderField: "User-Agent")
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         var components = URLComponents()
         components.queryItems = values.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }

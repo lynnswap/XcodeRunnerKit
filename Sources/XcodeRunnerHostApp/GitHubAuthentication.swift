@@ -37,7 +37,7 @@ protocol GitHubCredentialStore: Sendable {
 
 struct GitHubKeychainStore: GitHubCredentialStore {
     private let account: String
-    private let service = "dev.lynnswap.XcodeRunnerHost.GitHub"
+    private let service = "lynnpd.xcodehomerunner.github"
 
     init(hostRoot: URL, accountSuffix: String = "credentials") {
         account = SHA256.hash(data: Data(hostRoot.standardizedFileURL.path(percentEncoded: false).utf8))

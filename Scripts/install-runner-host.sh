@@ -4,7 +4,9 @@ umask 077
 
 source_app=${1:?Usage: install-runner-host.sh APP; drain hosted jobs before updating}
 if [[ $# -ne 1 ]]; then echo "Usage: install-runner-host.sh APP" >&2; exit 2; fi
-identifier=dev.lynnswap.XcodeRunnerHost
+identifier=lynnpd.xcodehomerunner
+# Hosts installed before the XcodeHomeRunner rename used this label and app name.
+legacy_identifier=dev.lynnswap.XcodeRunnerHost
 script_directory="$(cd "$(dirname "$0")" && pwd)"
 codesign --verify --strict "$source_app"
 signature=$(codesign -dv "$source_app" 2>&1)
@@ -16,8 +18,8 @@ python3 - "$source_app" <<'PY'
 from pathlib import Path
 import plistlib, sys
 d=plistlib.loads((Path(sys.argv[1])/"Contents/Info.plist").read_bytes())
-if d["CFBundleIdentifier"] != "dev.lynnswap.XcodeRunnerHost" or d["CFBundleExecutable"] != "xcode-runner-host":
-    raise RuntimeError("The app is not an XcodeRunnerHost bundle")
+if d["CFBundleIdentifier"] != "lynnpd.xcodehomerunner" or d["CFBundleExecutable"] != "XcodeHomeRunner":
+    raise RuntimeError("The app is not an XcodeHomeRunner bundle")
 PY
 layout=$("$HOME/Library/Application Support/XcodeRunnerKit/bin/xcode-runner" host storage configure --json)
 runners_root=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["runnersRoot"])' <<< "$layout")
@@ -29,30 +31,38 @@ host_root="$(cd "$host_root" && pwd -P)"
 applications="$(cd "$applications" && pwd -P)"
 domain="gui/$(id -u)"
 reloaded=0
-app="$applications/XcodeRunnerHost.app"
+app="$applications/XcodeHomeRunner.app"
 staging=$(mktemp -d "$applications/.runner-host.XXXXXX")
 trap 'rm -rf "$staging"' EXIT
-ditto "$source_app" "$staging/XcodeRunnerHost.app"
-codesign --verify --strict "$staging/XcodeRunnerHost.app"
+ditto "$source_app" "$staging/XcodeHomeRunner.app"
+codesign --verify --strict "$staging/XcodeHomeRunner.app"
 if launchctl print "$domain/$identifier" >/dev/null 2>&1; then
     python3 "$script_directory/stop-runner-service.py" "$domain/$identifier" --ownership-lock "$runners_root/.xcode-runner-host.lock"
     reloaded=1
 fi
-if [[ -d "$app" ]]; then
-    rm -rf "$applications/XcodeRunnerHost.previous.app"
-    mv "$app" "$applications/XcodeRunnerHost.previous.app"
+if launchctl print "$domain/$legacy_identifier" >/dev/null 2>&1; then
+    python3 "$script_directory/stop-runner-service.py" "$domain/$legacy_identifier" --ownership-lock "$runners_root/.xcode-runner-host.lock"
 fi
-mv "$staging/XcodeRunnerHost.app" "$app"
+rm -f "$HOME/Library/LaunchAgents/$legacy_identifier.plist"
+if [[ -d "$applications/XcodeRunnerHost.app" ]]; then
+    rm -rf "$applications/XcodeRunnerHost.previous.app"
+    mv "$applications/XcodeRunnerHost.app" "$applications/XcodeRunnerHost.previous.app"
+fi
+if [[ -d "$app" ]]; then
+    rm -rf "$applications/XcodeHomeRunner.previous.app"
+    mv "$app" "$applications/XcodeHomeRunner.previous.app"
+fi
+mv "$staging/XcodeHomeRunner.app" "$app"
 python3 - "$app" "$host_root" <<'PY'
 from pathlib import Path
 import plistlib, sys
 app, root=map(Path, sys.argv[1:])
-identifier="dev.lynnswap.XcodeRunnerHost"
+identifier="lynnpd.xcodehomerunner"
 plist=Path.home()/"Library/LaunchAgents"/(identifier+".plist")
 plist.write_bytes(plistlib.dumps({
     "Label": identifier,
-    "ProgramArguments": [str(app/"Contents/MacOS/xcode-runner-host"), "--settings-service"],
-    "MachServices": {"dev.lynnswap.XcodeRunnerHost.Settings": True},
+    "ProgramArguments": [str(app/"Contents/MacOS/XcodeHomeRunner"), "--settings-service"],
+    "MachServices": {"lynnpd.xcodehomerunner.settings": True},
     "AssociatedBundleIdentifiers": [identifier],
     "RunAtLoad": True,
     "KeepAlive": {"SuccessfulExit": False},

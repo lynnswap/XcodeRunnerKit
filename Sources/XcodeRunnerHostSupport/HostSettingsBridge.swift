@@ -6,7 +6,7 @@ import Synchronization
 }
 
 package enum HostSettingsBridge {
-    package static let serviceName = "dev.lynnswap.XcodeRunnerHost.Settings"
+    package static let serviceName = "lynnpd.xcodehomerunner.settings"
 
     package static func request(_ request: HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse {
         let data = try JSONEncoder().encode(request)

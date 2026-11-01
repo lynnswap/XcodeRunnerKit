@@ -1,6 +1,6 @@
 # GitHub Actions host setup
 
-XcodeRunnerHost is a macOS menu bar app that starts official GitHub Actions
+XcodeHomeRunner is a macOS menu bar app that starts official GitHub Actions
 runners and manages their Xcode job limit.
 
 Use an Apple silicon Mac with macOS 26 or later and Xcode 27.1 or later.
@@ -28,18 +28,35 @@ the CLI and app together. `install-host-tools.sh` replaces the CLI;
 `install-runner-host.sh` stops the current host and its runner services before
 replacing the app.
 
-Build and install the app with a certificate from
-`security find-identity -v -p codesigning`. The build script uses Xcode to
-build `App/XcodeRunnerHost.xcworkspace` and signs the app with that identity:
+Build the app on a Mac whose Xcode is signed in to your Apple Developer
+account (**Xcode > Settings > Accounts**) and has your Developer ID Application
+certificate, then install it on the CI Mac. Replace `TEAM_ID` with your team
+identifier:
 
 ```sh
-bash Scripts/build-runner-host.sh "SIGNING_IDENTITY" .build/RunnerHost
-bash Scripts/install-runner-host.sh .build/RunnerHost/XcodeRunnerHost.app
+bash Scripts/build-runner-host.sh TEAM_ID .build/RunnerHost
+bash Scripts/install-runner-host.sh .build/RunnerHost/XcodeHomeRunner.app
 ```
 
+The build script archives `App/XcodeHomeRunner.xcworkspace` and exports it for
+Developer ID distribution with Xcode-managed signing. The app has an Associated
+Domains entitlement for its sign-in callback, so the first build lets Xcode
+register the `lynnpd.xcodehomerunner` App ID and create its provisioning
+profile. That App ID belongs to one team. The app, CLI, and installers use the
+fixed `lynnpd.xcodehomerunner` identifiers for the bundle, LaunchAgent, and
+settings service, so a build for another team must change all of them.
+
 The installer places the app in `~/Applications` and starts it through a user
-LaunchAgent. An ad-hoc signature (`-`) is not accepted. Use the same signing
-identity for updates so macOS can retain the app's access permissions.
+LaunchAgent. An ad-hoc signature (`-`) is not accepted. Use the same team for
+updates so macOS can retain the app's access permissions.
+
+Hosts installed before the app was renamed from XcodeRunnerHost are migrated by
+the same installer: it stops the `dev.lynnswap.XcodeRunnerHost` service, removes
+its LaunchAgent, and keeps the old app as `XcodeRunnerHost.previous.app`. Runner
+registrations and job data stay in place. GitHub login tokens and the GitHub
+App's client secret are not carried over, because they belong to the old app's
+Keychain items. If the host was connected to GitHub, choose **Create GitHub App…**
+again in settings and sign in; you can then delete the old app on GitHub.
 
 Complete Xcode's license acceptance and first-launch setup before starting jobs.
 Xcode installation and setup that requires administrator access remain manual.
@@ -279,13 +296,13 @@ update them for the new physical work path before restarting.
 
 To update, repeat [the installation steps](#install). The installers keep the
 previous app as
-`XcodeRunnerHost.previous.app` and the previous CLI as `bin/xcode-runner.previous`.
+`XcodeHomeRunner.previous.app` and the previous CLI as `bin/xcode-runner.previous`.
 
 Inspect or restart the host with:
 
 ```sh
-launchctl print "gui/$(id -u)/dev.lynnswap.XcodeRunnerHost"
-launchctl kickstart -k "gui/$(id -u)/dev.lynnswap.XcodeRunnerHost"
+launchctl print "gui/$(id -u)/lynnpd.xcodehomerunner"
+launchctl kickstart -k "gui/$(id -u)/lynnpd.xcodehomerunner"
 ```
 
 Logs are under `~/Library/Application Support/XcodeRunnerKit/logs`:

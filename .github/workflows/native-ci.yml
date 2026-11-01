@@ -56,7 +56,7 @@ jobs:
         run: bash Scripts/build-runner-host.sh - "$RUNNER_TEMP/RunnerHost"
       - name: Check common runner host processes
         run: |
-          python3 Scripts/check-runner-host.py "$RUNNER_TEMP/RunnerHost/XcodeRunnerHost.app" \
+          python3 Scripts/check-runner-host.py "$RUNNER_TEMP/RunnerHost/XcodeHomeRunner.app" \
             "$RUNNER_TEMP/XcodeRunnerKit-cli/Build/Products/Release/xcode-runner"
       - name: Check separate-process capacity
         run: python3 Scripts/check-execution-pool.py

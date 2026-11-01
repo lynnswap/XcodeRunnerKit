@@ -764,42 +764,54 @@ with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
     home.mkdir()
     tools = root / "tools"
     tools.mkdir()
-    for name, body in {"codesign": "exit 0", "launchctl": "[[ \"$1\" != print ]]"}.items():
+    launchctl_log = root / "launchctl.log"
+    # Only the pre-rename service reports as loaded, so the installer must stop it.
+    fake_launchctl = 'echo "$*" >> "$LAUNCHCTL_LOG"\nif [[ "$1" == print ]]; then [[ "$2" == */dev.lynnswap.XcodeRunnerHost ]]; fi'
+    for name, body in {"codesign": "exit 0", "launchctl": fake_launchctl}.items():
         tool = tools / name
         tool.write_text("#!/bin/bash\n" + body + "\n")
         tool.chmod(0o755)
-    app = root / "input" / "XcodeRunnerHost.app"
+    app = root / "input" / "XcodeHomeRunner.app"
     (app / "Contents/MacOS").mkdir(parents=True)
-    (app / "Contents/MacOS/xcode-runner-host").write_text("first executable")
+    (app / "Contents/MacOS/XcodeHomeRunner").write_text("first executable")
     setup = app / "Contents/Resources/HostSetup"
     setup.mkdir(parents=True)
     (setup / "install-github-runner.sh").write_text("first setup script")
     (app / "Contents/Info.plist").write_bytes(plistlib.dumps({
-        "CFBundleIdentifier": "dev.lynnswap.XcodeRunnerHost",
-        "CFBundleExecutable": "xcode-runner-host",
+        "CFBundleIdentifier": "lynnpd.xcodehomerunner",
+        "CFBundleExecutable": "XcodeHomeRunner",
     }))
-    env = {**os.environ, "HOME": str(home), "PATH": str(tools) + os.pathsep + os.environ["PATH"]}
+    env = {**os.environ, "HOME": str(home), "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+           "LAUNCHCTL_LOG": str(launchctl_log)}
     install_cli(home)
     runners = home / "Library/XcodeRunnerKit/runners"
     host = home / "Library/Application Support/XcodeRunnerKit"
     applications = home / "Applications"
+    legacy_plist = home / "Library/LaunchAgents/dev.lynnswap.XcodeRunnerHost.plist"
+    legacy_plist.parent.mkdir(parents=True)
+    legacy_plist.write_bytes(plistlib.dumps({"Label": "dev.lynnswap.XcodeRunnerHost"}))
+    (applications / "XcodeRunnerHost.app/Contents/MacOS").mkdir(parents=True)
+    (applications / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host").write_text("legacy executable")
     command = ["bash", str(scripts / "install-runner-host.sh"), str(app)]
     subprocess.run(command, env=env, check=True, capture_output=True)
-    plist = plistlib.loads((home / "Library/LaunchAgents/dev.lynnswap.XcodeRunnerHost.plist").read_bytes())
-    assert plist["AssociatedBundleIdentifiers"] == ["dev.lynnswap.XcodeRunnerHost"]
-    assert plist["ProgramArguments"] == [str(applications.resolve() / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host"), "--settings-service"]
-    assert plist["MachServices"] == {"dev.lynnswap.XcodeRunnerHost.Settings": True}
-    assert (applications / "XcodeRunnerHost.app/Contents/Resources/HostSetup/install-github-runner.sh").read_text() == "first setup script"
-    (app / "Contents/MacOS/xcode-runner-host").write_text("updated executable")
+    assert f"bootout gui/{os.getuid()}/dev.lynnswap.XcodeRunnerHost" in launchctl_log.read_text().splitlines()
+    assert not legacy_plist.exists() and not (applications / "XcodeRunnerHost.app").exists()
+    assert (applications / "XcodeRunnerHost.previous.app/Contents/MacOS/xcode-runner-host").read_text() == "legacy executable"
+    plist = plistlib.loads((home / "Library/LaunchAgents/lynnpd.xcodehomerunner.plist").read_bytes())
+    assert plist["AssociatedBundleIdentifiers"] == ["lynnpd.xcodehomerunner"]
+    assert plist["ProgramArguments"] == [str(applications.resolve() / "XcodeHomeRunner.app/Contents/MacOS/XcodeHomeRunner"), "--settings-service"]
+    assert plist["MachServices"] == {"lynnpd.xcodehomerunner.settings": True}
+    assert (applications / "XcodeHomeRunner.app/Contents/Resources/HostSetup/install-github-runner.sh").read_text() == "first setup script"
+    (app / "Contents/MacOS/XcodeHomeRunner").write_text("updated executable")
     (setup / "install-github-runner.sh").write_text("updated setup script")
     subprocess.run(command, env=env, check=True, capture_output=True)
-    assert (applications / "XcodeRunnerHost.previous.app/Contents/MacOS/xcode-runner-host").read_text() == "first executable"
-    assert (applications / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host").read_text() == "updated executable"
-    assert (applications / "XcodeRunnerHost.previous.app/Contents/Resources/HostSetup/install-github-runner.sh").read_text() == "first setup script"
-    assert (applications / "XcodeRunnerHost.app/Contents/Resources/HostSetup/install-github-runner.sh").read_text() == "updated setup script"
+    assert (applications / "XcodeHomeRunner.previous.app/Contents/MacOS/XcodeHomeRunner").read_text() == "first executable"
+    assert (applications / "XcodeHomeRunner.app/Contents/MacOS/XcodeHomeRunner").read_text() == "updated executable"
+    assert (applications / "XcodeHomeRunner.previous.app/Contents/Resources/HostSetup/install-github-runner.sh").read_text() == "first setup script"
+    assert (applications / "XcodeHomeRunner.app/Contents/Resources/HostSetup/install-github-runner.sh").read_text() == "updated setup script"
     (tools / "codesign").write_text("#!/bin/bash\nif [[ \"$1\" == -dv ]]; then echo Signature=adhoc >&2; fi\n")
     failure = subprocess.run(command, env=env, capture_output=True)
     assert failure.returncode != 0 and b"certificate signing identity" in failure.stderr
-    assert (applications / "XcodeRunnerHost.app/Contents/MacOS/xcode-runner-host").read_text() == "updated executable"
+    assert (applications / "XcodeHomeRunner.app/Contents/MacOS/XcodeHomeRunner").read_text() == "updated executable"
 
-print("PASS: unified storage, serialized initial selection and runner registration/startup migration, unavailable parent rejection at setup and admitted execution, saved and per-operation build service selection, explicit overrides, managed directory recovery and permissions, existing data preservation, cleanup, physical runner work paths, common-host opt-in, app installation, and signature requirements")
+print("PASS: unified storage, serialized initial selection and runner registration/startup migration, unavailable parent rejection at setup and admitted execution, saved and per-operation build service selection, explicit overrides, managed directory recovery and permissions, existing data preservation, cleanup, physical runner work paths, common-host opt-in, app installation and migration from the previous host name, and signature requirements")
