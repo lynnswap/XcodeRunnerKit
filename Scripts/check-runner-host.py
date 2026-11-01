@@ -222,7 +222,16 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
         wait_for(lambda:(launched/'stopping').exists(), 'Old service did not start shutdown')
         # The old helper still owns the lock during this delayed shutdown.
         assert alive(process['pid'])
-        failed_start = subprocess.run(arguments, capture_output=True, timeout=HANG_LIMIT)
+        # DIAGNOSTIC (temporary): show host processes and the second host's output if it does not exit.
+        print('DIAG before second start:', subprocess.run(['ps','-axo','pid,ppid,pgid,stat,command'],capture_output=True,text=True).stdout.count('xcode-runner-host'), flush=True)
+        print(subprocess.run(['/bin/bash','-c','ps -axo pid,ppid,pgid,stat,command | grep -e xcode-runner-host -e runsvc | grep -v grep'],capture_output=True,text=True).stdout, flush=True)
+        try:
+            failed_start = subprocess.run(arguments, capture_output=True, timeout=30)
+        except subprocess.TimeoutExpired as timeout:
+            print('DIAG second host stdout:', timeout.stdout, flush=True)
+            print('DIAG second host stderr:', timeout.stderr, flush=True)
+            print(subprocess.run(['/bin/bash','-c','ps -axo pid,ppid,pgid,stat,command | grep -e xcode-runner-host -e runsvc | grep -v grep'],capture_output=True,text=True).stdout, flush=True)
+            raise
         assert failed_start.returncode != 0 and b'Another runner host' in failed_start.stderr
         assert json.loads((launched/'pid.json').read_text())['pid'] == process['pid']
         subprocess.run(['launchctl','kickstart',target],check=True)
