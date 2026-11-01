@@ -180,6 +180,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         installStatusItem()
         settingsServer?.start()
+        settings.management.start()
+        settings.managedMacs.start()
         settings.hostState = .preparingStorage
         for number in [SIGTERM, SIGINT] {
             signal(number, SIG_IGN)
@@ -312,6 +314,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         Task {
             for runner in runners.values { runner.task.cancel() }
             await settings.github.shutDown()
+            await settings.management.shutDown()
+            await settings.managedMacs.shutDown()
             await storagePreparation?.value
             await monitoring?.value
             await poolMonitoring?.value

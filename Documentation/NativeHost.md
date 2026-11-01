@@ -142,6 +142,34 @@ five minutes while signed in. Pool and repository settings are saved separately;
 apply pending changes in the other. **Disconnect** removes local login tokens and
 stops registration management; it leaves existing runner services running.
 
+## Pair other Macs
+
+One host can list the other XcodeHomeRunner hosts on your local network under
+**Runners**. Install the app on each Mac first, then pair them:
+
+1. On the Mac to add, open **Settings…**, select that Mac under **Runners**, and
+   choose **Allow Management…**. The Mac waits five minutes for a managing Mac.
+2. On the managing Mac, choose **Add Mac…** at the bottom of the sidebar, select
+   the Mac, and choose **Continue**. Both Macs show a six-digit code.
+3. If the codes match, choose **Pair** on the managing Mac and **Allow** on the
+   added Mac. A different code means that another device answered, so choose
+   **Don't Allow**.
+
+The added Mac needs no GitHub sign-in, Remote Login, or SSH key. Each Mac keeps
+the pairing key in its Keychain, and the key never crosses the network. The
+added Mac considers one request at a time. It stops waiting when you choose
+**Don't Allow** or when a request ends before the Macs pair; choose **Allow
+Management…** again to retry. Pairing uses Bonjour, so macOS asks for local
+network access the first time you choose **Allow Management…** or **Add Mac…**.
+If you declined, allow XcodeHomeRunner in **System Settings > Privacy &
+Security > Local Network**.
+
+A Mac either manages other Macs or is managed by one. Each paired Mac's pane
+shows whether the managing Mac can connect to it. **Remove Mac…** ends the
+pairing on both Macs. **Stop Management…** on a managed Mac ends it there; the
+managing Mac then shows that Mac as not found until you remove it. Each Mac
+still keeps its own GitHub sign-in, runner services, and execution settings.
+
 ## Settings from CLI and MCP
 
 The GUI, CLI, and MCP server use the same settings operations. Read the catalog
