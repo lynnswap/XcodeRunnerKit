@@ -230,7 +230,9 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
             second_out, second_err = second.communicate(timeout=20)
         except subprocess.TimeoutExpired:
             print('DIAG second host pid', second.pid, 'still running', flush=True)
-            print(subprocess.run(['/usr/bin/sample', str(second.pid), '3'], capture_output=True, text=True).stdout[-6000:], flush=True)
+            sampled = subprocess.run(['/usr/bin/sample', str(second.pid), '3'], capture_output=True, text=True).stdout
+            graph = sampled[sampled.find('Call graph:'):sampled.find('Binary Images:')]
+            print('DIAG call graph:\n' + '\n'.join(line[:220] for line in graph.splitlines()[:160]), flush=True)
             print(subprocess.run(['/bin/bash','-c',f'lsof -p {second.pid} | grep -i -e lock -e runners; lsof 2>/dev/null | grep xcode-runner-host.lock'],capture_output=True,text=True).stdout, flush=True)
             second.kill()
             second_out, second_err = second.communicate()
