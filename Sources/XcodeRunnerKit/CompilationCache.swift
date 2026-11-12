@@ -11,9 +11,12 @@ extension URL {
 
     /// The spellings under which compilers and Xcode name this location.
     ///
-    /// Symbolic links are resolved through the deepest existing ancestor,
-    /// because a build can create the rest.
+    /// Xcode passes a path through a symbolic link as the project spells it,
+    /// and compilers resolve the paths they find themselves. Links are resolved
+    /// through the deepest existing ancestor, because a build can create the rest.
     var compilerVisiblePaths: [String] {
+        var given = path(percentEncoded: false)
+        while given.count > 1, given.hasSuffix("/") { given.removeLast() }
         var existing = self
         var missing: [String] = []
         var physical = existing.physicalPath
@@ -22,11 +25,13 @@ extension URL {
             existing.deleteLastPathComponent()
             physical = existing.physicalPath
         }
-        guard let physical else { return [path(percentEncoded: false)] }
+        guard let physical else { return [given] }
         // Xcode passes paths under /private/tmp and /private/var without /private.
-        let standardized = (physical as NSString).standardizingPath
-        return (standardized == physical ? [physical] : [physical, standardized]).map { spelling in
+        let resolved = [physical, (physical as NSString).standardizingPath].map { spelling in
             missing.reduce(URL(filePath: spelling)) { $0.appending(path: $1) }.path(percentEncoded: false)
+        }
+        return resolved.reduce(into: [given]) { spellings, spelling in
+            if !spellings.contains(spelling) { spellings.append(spelling) }
         }
     }
 
