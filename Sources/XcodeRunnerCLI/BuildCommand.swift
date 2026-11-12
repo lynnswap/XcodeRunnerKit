@@ -58,7 +58,7 @@ struct BuildOptions: ParsableArguments {
     var cacheDiagnostics = false
     @Flag(help: "Share cache entries between checkouts at different paths. #filePath, __FILE__, test failure locations, debug information, and coverage data then name a placeholder instead of the checkout.")
     var mapSourceDirectory = false
-    @Option(name: .customLong("prefix-mapping"), help: "Extra physical-path=canonical-prefix mapping. May be repeated.")
+    @Option(name: .customLong("prefix-mapping"), help: "Extra path=canonical-prefix mapping. May be repeated.")
     var prefixMappings: [String] = []
     @Option(help: "Runtime identifier for a Simulator reused between operations.")
     var simulatorRuntime: String?

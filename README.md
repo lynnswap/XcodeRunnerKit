@@ -314,8 +314,9 @@ because every job has its own.
 
 Keep package checkout names consistent across jobs because SwiftPM includes the
 package identity in compiler inputs. For source locations outside the checkout,
-use `--prefix-mapping /physical/path=/canonical-prefix` or
-`CompilationCache.prefixMappings`. These mappings replace paths in the same way.
+use `--prefix-mapping /path=/canonical-prefix` or
+`CompilationCache.prefixMappings`. The path may go through symbolic links. These
+mappings replace paths in the same way.
 Explicit build settings override cache defaults.
 
 Use `--cache-diagnostics` to see compiler cache hits and misses. Remove a shared
