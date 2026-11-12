@@ -16,6 +16,7 @@ extension URL {
     /// through the deepest existing ancestor, because a build can create the rest.
     var compilerVisiblePaths: [String] {
         var given = path(percentEncoded: false)
+        // Clang ignores a mapping whose source ends in a slash.
         while given.count > 1, given.hasSuffix("/") { given.removeLast() }
         var existing = self
         var missing: [String] = []
@@ -26,8 +27,10 @@ extension URL {
             physical = existing.physicalPath
         }
         guard let physical else { return [given] }
+        // xcodebuild receives its locations with a link in the last component unresolved.
+        let canonical = (try? existing.compilerCanonicalURL().path(percentEncoded: false)) ?? physical
         // Xcode passes paths under /private/tmp and /private/var without /private.
-        let resolved = [physical, (physical as NSString).standardizingPath].map { spelling in
+        let resolved = [canonical, physical].flatMap { [$0, ($0 as NSString).standardizingPath] }.map { spelling in
             missing.reduce(URL(filePath: spelling)) { $0.appending(path: $1) }.path(percentEncoded: false)
         }
         return resolved.reduce(into: [given]) { spellings, spelling in
