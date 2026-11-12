@@ -13,5 +13,6 @@ import Testing
     let mode = ProcessInfo.processInfo.environment["PROBE_MODE"] ?? "success"
     try FileHandle.standardOutput.write(contentsOf: Data("BuildProbe payload ready pid=\(ProcessInfo.processInfo.processIdentifier)\n".utf8))
     if mode == "failure" { #expect(Bool(false)) }
+    if mode == "source" { #expect(FileManager.default.fileExists(atPath: #filePath)) }
     if mode == "wait" { try await Task.sleep(for: .seconds(120)) }
 }

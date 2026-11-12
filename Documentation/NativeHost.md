@@ -277,7 +277,9 @@ those flags are not needed in each workflow.
 
 The CLI uses GitHub's `GITHUB_REPOSITORY_ID` to select a repository-specific
 compiler cache. All runners and branches of that repository share the cache;
-other repository IDs use separate directories. A missing or invalid ID fails the
+other repository IDs use separate directories. Entries are reused between
+runners only with [`--map-source-directory`](../README.md#shared-compilation-cache),
+because each runner checks out at its own path. A missing or invalid ID fails the
 operation instead of sharing an unscoped cache. An explicit `--compilation-cache`
 uses that directory as given, so choose a repository-specific path when overriding
 the default.

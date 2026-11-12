@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify compilation-cache reuse across relocated checkouts and DerivedData."""
+"""Verify compilation-cache reuse across DerivedData and, when mapped, relocated checkouts."""
 import argparse
 import concurrent.futures
 import json
@@ -28,27 +28,34 @@ def main():
                         "--pool-directory", str(root / "pool"), "--maximum-concurrent-jobs", "2"],
                        check=True, capture_output=True)
 
-        def run(name, changed=False):
-            package = root / name / "BuildProbe"
-            shutil.copytree(REPO / "Tests/Fixtures/BuildProbe", package,
-                            ignore=shutil.ignore_patterns(".build", ".swiftpm"))
+        def run(name, changed=False, checkout=None):
+            # A named checkout runs without source mapping, where only the same path shares entries.
+            package = root / (checkout or name) / "BuildProbe"
+            if not package.exists():
+                shutil.copytree(REPO / "Tests/Fixtures/BuildProbe", package,
+                                ignore=shutil.ignore_patterns(".build", ".swiftpm"))
             if changed:
                 # The expected 12 detects a replayed C object only when both edits apply.
                 replace(package / "Sources/CProbe/CProbe.c", "value * 2", "value * 3")
                 replace(package / "Tests/BuildProbeTests/BuildProbeTests.swift",
                         "doubled(4) == 8", "doubled(4) == 12")
+            mapping = ["--environment", "TEST_RUNNER_PROBE_MODE=source"] if checkout else [
+                "--map-source-directory",
+                "--prefix-mapping", str((package / "Sources").resolve()) + "=/^xcodeRunnerFixtureSources",
+            ]
             output = root / name / "output"
+            # The runner creates the output directory but not its ancestors.
+            output.parent.mkdir(exist_ok=True)
             log = root / (name + ".log")
             start = time.monotonic()
             with log.open("w") as handle:
                 result = subprocess.run([
-                    str(args.executable.resolve()), "test" if changed else "build-for-testing",
+                    str(args.executable.resolve()), "test" if changed or checkout else "build-for-testing",
                     "--package", str(package), "--scheme", "BuildProbe",
                     "--destination", "platform=macOS,arch=arm64",
                     "--output-directory", str(output),
                     "--pool-directory", str(root / "pool"),
-                    "--compilation-cache", str(root / "cas"), "--cache-diagnostics",
-                    "--prefix-mapping", str((package / "Sources").resolve()) + "=/^xcodeRunnerFixtureSources",
+                    "--compilation-cache", str(root / "cas"), "--cache-diagnostics", *mapping,
                     "--", "-parallel-testing-enabled", "NO", "-jobs", "4",
                 ], stdout=handle, stderr=subprocess.STDOUT, timeout=600)
             text = log.read_text().lower()
@@ -72,7 +79,11 @@ def main():
         changed = run("changed", changed=True)
         # The passing C test is the evidence; misses also come from the edited Swift test.
         assert changed["missNotes"] > 0, "Changed compiler input incorrectly produced only cache hits"
-        print(json.dumps({"passed": True, "runs": [cold, relocated, *parallel, changed],
+        # Without source mapping the test opens its own file through #filePath.
+        unmapped = run("unmapped", checkout="unmapped")
+        repeated = run("repeated", checkout="unmapped")
+        assert repeated["hitNotes"] > 0 and repeated["missNotes"] == 0, repeated
+        print(json.dumps({"passed": True, "runs": [cold, relocated, *parallel, changed, unmapped, repeated],
                           "fixture": "Swift, Clang, SDK Observation macro; stable BuildProbe package identity"}))
 
 

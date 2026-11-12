@@ -302,11 +302,21 @@ falls back to an unscoped cache. Existing unscoped cache entries are retained bu
 are not imported into repository caches. An explicit `--compilation-cache` or
 Swift `CompilationCache(directory:)` uses the supplied directory as given.
 
+Jobs share entries when their checkouts are at the same path. Each hosted runner
+checks out into its own work directory, so add `--map-source-directory`, or set
+`CompilationCache.mapsSourceDirectory`, to share entries between checkouts at
+different paths. The compiler then sees the source directory under a placeholder:
+`#filePath`, `__FILE__`, test failure locations, debug information, and coverage
+data name `/^xcodeRunnerSource` or `/^src` instead of files on disk. Leave the
+option off for tests that open fixtures or snapshots through those paths.
+DerivedData, including SwiftPM checkouts inside it, always uses a placeholder
+because every job has its own.
+
 Keep package checkout names consistent across jobs because SwiftPM includes the
 package identity in compiler inputs. For source locations outside the checkout,
 use `--prefix-mapping /physical/path=/canonical-prefix` or
-`CompilationCache.prefixMappings`. Path mappings also affect paths in debug and
-coverage data. Explicit build settings override cache defaults.
+`CompilationCache.prefixMappings`. These mappings replace paths in the same way.
+Explicit build settings override cache defaults.
 
 Use `--cache-diagnostics` to see compiler cache hits and misses. Remove a shared
 cache only after its users have stopped.
