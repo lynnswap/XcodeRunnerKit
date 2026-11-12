@@ -56,6 +56,8 @@ struct BuildOptions: ParsableArguments {
     var compilationCache: String?
     @Flag(help: "Emit compilation cache diagnostic remarks.")
     var cacheDiagnostics = false
+    @Flag(help: "Share cache entries between checkouts at different paths. #filePath, __FILE__, test failure locations, debug information, and coverage data then name a placeholder instead of the checkout.")
+    var mapSourceDirectory = false
     @Option(name: .customLong("prefix-mapping"), help: "Extra physical-path=canonical-prefix mapping. May be repeated.")
     var prefixMappings: [String] = []
     @Option(help: "Runtime identifier for a Simulator reused between operations.")
@@ -102,6 +104,7 @@ struct BuildOptions: ParsableArguments {
         }
         if var cache {
             cache.enablesDiagnosticRemarks = cacheDiagnostics
+            cache.mapsSourceDirectory = mapSourceDirectory
             cache.prefixMappings = try Self.assignments(prefixMappings).sorted(by: { $0.key < $1.key }).map {
                 CompilationCache.PrefixMapping(
                     source: URL(filePath: $0.key, relativeTo: URL.currentDirectory()).absoluteURL,
@@ -109,8 +112,8 @@ struct BuildOptions: ParsableArguments {
                 )
             }
             request.compilationCache = cache
-        } else if cacheDiagnostics || !prefixMappings.isEmpty {
-            throw ValidationError("Specify --compilation-cache with cache diagnostics or prefix mappings.")
+        } else if cacheDiagnostics || mapSourceDirectory || !prefixMappings.isEmpty {
+            throw ValidationError("Specify --compilation-cache with cache diagnostics, source directory mapping, or prefix mappings.")
         }
         request.environment = try Self.assignments(environment)
         request.buildSettings = try Self.assignments(settings)
