@@ -8,6 +8,35 @@ extension URL {
         }
         return URL(filePath: path)
     }
+
+    /// The spellings under which compilers and Xcode name this location.
+    ///
+    /// Symbolic links are resolved through the deepest existing ancestor,
+    /// because a build can create the rest.
+    var compilerVisiblePaths: [String] {
+        var existing = self
+        var missing: [String] = []
+        var physical = existing.physicalPath
+        while physical == nil, existing.pathComponents.count > 1 {
+            missing.insert(existing.lastPathComponent, at: 0)
+            existing.deleteLastPathComponent()
+            physical = existing.physicalPath
+        }
+        guard let physical else { return [path(percentEncoded: false)] }
+        // Xcode passes paths under /private/tmp and /private/var without /private.
+        let standardized = (physical as NSString).standardizingPath
+        return (standardized == physical ? [physical] : [physical, standardized]).map { spelling in
+            missing.reduce(URL(filePath: spelling)) { $0.appending(path: $1) }.path(percentEncoded: false)
+        }
+    }
+
+    /// The path with every symbolic link resolved, or nil when the location does not exist.
+    private var physicalPath: String? {
+        // canonicalPathKey leaves a symbolic link in the last component unresolved.
+        guard let resolved = realpath(path(percentEncoded: false), nil) else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
 }
 
 /// Shares compiler outputs while keeping each job's build database isolated.
@@ -39,7 +68,9 @@ public struct CompilationCache: Sendable {
         self.parentDirectory = directory
     }
 
-    /// A physical source prefix and its stable compiler-visible replacement.
+    /// A source prefix and its stable compiler-visible replacement.
+    ///
+    /// The source may name its location through symbolic links.
     public struct PrefixMapping: Sendable {
         public var source: URL
         public var replacement: String
@@ -54,11 +85,6 @@ public struct CompilationCache: Sendable {
         var mappings = prefixMappings + [
             PrefixMapping(source: derivedDataDirectory, replacement: "/^xcodeRunnerDerivedData"),
         ]
-        // Xcode passes paths under /private/tmp and /private/var without /private.
-        let standardized = (derivedDataDirectory.path(percentEncoded: false) as NSString).standardizingPath
-        if standardized != derivedDataDirectory.path(percentEncoded: false) {
-            mappings.append(PrefixMapping(source: URL(filePath: standardized), replacement: "/^xcodeRunnerDerivedData"))
-        }
         var settings = [
             "COMPILATION_CACHE_ENABLE_CACHING": "YES",
             "COMPILATION_CACHE_CAS_PATH": directory.path(percentEncoded: false),
@@ -73,8 +99,8 @@ public struct CompilationCache: Sendable {
             settings["SWIFT_ENABLE_PROJECT_PREFIX_MAPPING"] = "YES"
             settings["CLANG_ENABLE_PROJECT_PREFIX_MAPPING"] = "YES"
         }
-        let values = "$(inherited) " + mappings.map { mapping in
-            Self.quotedListElement(mapping.source.path(percentEncoded: false) + "=" + mapping.replacement)
+        let values = "$(inherited) " + mappings.flatMap { mapping in
+            mapping.source.compilerVisiblePaths.map { Self.quotedListElement($0 + "=" + mapping.replacement) }
         }.joined(separator: " ")
         settings["SWIFT_OTHER_PREFIX_MAPPINGS"] = values
         settings["CLANG_OTHER_PREFIX_MAPPINGS"] = values

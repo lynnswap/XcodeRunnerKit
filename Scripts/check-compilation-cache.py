@@ -28,8 +28,7 @@ def main():
                         "--pool-directory", str(root / "pool"), "--maximum-concurrent-jobs", "2"],
                        check=True, capture_output=True)
 
-        def run(name, changed=False, checkout=None):
-            # A named checkout runs without source mapping, where only the same path shares entries.
+        def run(name, sharing="source", changed=False, checkout=None):
             package = root / (checkout or name) / "BuildProbe"
             if not package.exists():
                 shutil.copytree(REPO / "Tests/Fixtures/BuildProbe", package,
@@ -39,10 +38,17 @@ def main():
                 replace(package / "Sources/CProbe/CProbe.c", "value * 2", "value * 3")
                 replace(package / "Tests/BuildProbeTests/BuildProbeTests.swift",
                         "doubled(4) == 8", "doubled(4) == 12")
-            mapping = ["--environment", "TEST_RUNNER_PROBE_MODE=source"] if checkout else [
-                "--map-source-directory",
-                "--prefix-mapping", str((package / "Sources").resolve()) + "=/^xcodeRunnerFixtureSources",
-            ]
+            if sharing == "source":
+                options = ["--map-source-directory", "--prefix-mapping",
+                           str((package / "Sources").resolve()) + "=/^xcodeRunnerFixtureSources"]
+            elif sharing == "link":
+                # The mapping names the checkout through a symbolic link the compiler never sees.
+                link = root / (name + "-link")
+                link.symlink_to(package)
+                options = ["--prefix-mapping", str(link) + "=/^xcodeRunnerFixture"]
+            else:
+                # Only the same path shares entries, and the test opens its own file through #filePath.
+                options = ["--environment", "TEST_RUNNER_PROBE_MODE=source"]
             output = root / name / "output"
             # The runner creates the output directory but not its ancestors.
             output.parent.mkdir(exist_ok=True)
@@ -50,12 +56,12 @@ def main():
             start = time.monotonic()
             with log.open("w") as handle:
                 result = subprocess.run([
-                    str(args.executable.resolve()), "test" if changed or checkout else "build-for-testing",
+                    str(args.executable.resolve()), "test" if changed or sharing is None else "build-for-testing",
                     "--package", str(package), "--scheme", "BuildProbe",
                     "--destination", "platform=macOS,arch=arm64",
                     "--output-directory", str(output),
                     "--pool-directory", str(root / "pool"),
-                    "--compilation-cache", str(root / "cas"), "--cache-diagnostics", *mapping,
+                    "--compilation-cache", str(root / "cas"), "--cache-diagnostics", *options,
                     "--", "-parallel-testing-enabled", "NO", "-jobs", "4",
                 ], stdout=handle, stderr=subprocess.STDOUT, timeout=600)
             text = log.read_text().lower()
@@ -79,11 +85,14 @@ def main():
         changed = run("changed", changed=True)
         # The passing C test is the evidence; misses also come from the edited Swift test.
         assert changed["missNotes"] > 0, "Changed compiler input incorrectly produced only cache hits"
-        # Without source mapping the test opens its own file through #filePath.
-        unmapped = run("unmapped", checkout="unmapped")
-        repeated = run("repeated", checkout="unmapped")
+        unmapped = run("unmapped", sharing=None)
+        repeated = run("repeated", sharing=None, checkout="unmapped")
         assert repeated["hitNotes"] > 0 and repeated["missNotes"] == 0, repeated
-        print(json.dumps({"passed": True, "runs": [cold, relocated, *parallel, changed, unmapped, repeated],
+        run("linked", sharing="link")
+        relinked = run("relinked", sharing="link")
+        assert relinked["hitNotes"] > 0 and relinked["missNotes"] == 0, relinked
+        print(json.dumps({"passed": True,
+                          "runs": [cold, relocated, *parallel, changed, unmapped, repeated, relinked],
                           "fixture": "Swift, Clang, SDK Observation macro; stable BuildProbe package identity"}))
 
 
