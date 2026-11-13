@@ -72,7 +72,11 @@ final class RemoteOperations {
             folder = repository.appending(path: String(index))
         }
         foldersInUse.insert(folder)
-        defer { foldersInUse.remove(folder) }
+        // Another operation can take the folder once this one frees it, so this one frees it once.
+        var holdsFolder = true
+        defer {
+            if holdsFolder { foldersInUse.remove(folder) }
+        }
         let checkout = folder.appending(path: operation.name)
         let output = storage.buildDirectory.appending(path: "Remote/\(UUID().uuidString)")
         let tool = tool
@@ -126,7 +130,10 @@ final class RemoteOperations {
                 var failures = await Self.removeAll([folder, output])
                 if case .failure(let error) = result { failures.insert(error.localizedDescription, at: 0) }
                 // The dashboard's next operation can arrive before it acknowledges this one.
-                if failures.isEmpty { foldersInUse.remove(folder) }
+                if failures.isEmpty {
+                    foldersInUse.remove(folder)
+                    holdsFolder = false
+                }
                 // The dashboard has the exit status, so it learns what this Mac kept as well.
                 try await reply(failures.isEmpty ? .operation(.finished) : .refused(failures.joined(separator: " ")))
                 _ = try await group.next()
@@ -201,6 +208,8 @@ final class RemoteOperations {
             "--compilation-cache=\(cache.path(percentEncoded: false))",
         ] + operation.arguments
         let directory = operation.directory.isEmpty ? checkout : checkout.appending(path: operation.directory)
+        // The archive has no folders without files, and the dashboard's current directory can be one.
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         let command: ExecutionResult<Void, SequenceOutput, CombinedErrorOutput>
         do {

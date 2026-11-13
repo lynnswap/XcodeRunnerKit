@@ -616,8 +616,8 @@ struct HostPairingTests {
         echo "arguments: $*"
         echo "directory: $PWD"
         echo "folder: $(basename "$(dirname "$PWD")")"
-        echo "files: $(find . \( -type f -o -type l \) | sort | tr '\n' ' ')"
-        if [ -L link ]; then echo "link: $(readlink link)"; fi
+        echo "files: $(find .. \( -type f -o -type l \) | sort | tr '\n' ' ')"
+        if [ -L ../link ]; then echo "link: $(readlink ../link)"; fi
         if [ "$1" = test ]; then
             trap 'touch "$XCODE_RUNNER_HOST_ROOT/stopped"; exit 143' TERM
             echo started
@@ -667,6 +667,8 @@ struct HostPairingTests {
         try FileManager.default.removeItem(at: checkout.appending(path: "App/deleted"))
         try Data().write(to: checkout.appending(path: "App/untracked"))
         try Data().write(to: checkout.appending(path: "App/ignored"))
+        // Git lists no folder without files, and a command can run in one.
+        try FileManager.default.createDirectory(at: checkout.appending(path: "App/Empty"), withIntermediateDirectories: true)
         return (host, storage, shown, try local(host.management.ports[shown.id]), checkout)
     }
 
@@ -681,8 +683,8 @@ struct HostPairingTests {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let (host, storage, shown, endpoint, directory) = try await hostAndCheckout(at: root)
-        let checkout = try await Checkout.containing(directory.appending(path: "App"))
-        #expect(checkout.directory == "App")
+        let checkout = try await Checkout.containing(directory.appending(path: "App/Empty"))
+        #expect(checkout.directory == "App/Empty")
         #expect(checkout.name == "Project")
         let outputDirectory = root.appending(path: "Output")
 
@@ -695,11 +697,11 @@ struct HostPairingTests {
 
         #expect(status == 3)
         // The working tree is sent as it is, without what Git ignores.
-        #expect(lines.contains("files: ./changed ./committed ./link ./untracked "))
+        #expect(lines.contains("files: ../changed ../committed ../link ../untracked "))
         #expect(lines.contains("link: committed"))
         // The host's folders are shown as this Mac's.
         let local = checkout.root.path(percentEncoded: false)
-        #expect(lines.contains("directory: \(local)/App"))
+        #expect(lines.contains("directory: \(local)/App/Empty"))
         #expect(lines.contains("Log: \(outputDirectory.path(percentEncoded: false))/Job/xcodebuild.log"))
         let cache = storage.compilationCacheDirectory.appending(path: "remote").path(percentEncoded: false)
         #expect(lines.contains("arguments: build --output-directory=\(outputDirectory.path(percentEncoded: false)) --compilation-cache=\(cache) --scheme=App -- -quiet"))
