@@ -57,13 +57,13 @@ struct AddMacView<Macs: MacList>: View {
             macs.stopDiscoveringPairableMacs()
         }
         .onChange(of: macs.waitingMacs, initial: true) {
-            if selectedMac == nil { selection = macs.waitingMacs.first?.id }
+            if selectedMac == nil { selection = pairableMacs.first?.id }
         }
     }
 
     private var macList: some View {
         Section {
-            if macs.waitingMacs.isEmpty {
+            if pairableMacs.isEmpty {
                 if let message = macs.discoveryMessage {
                     ErrorText(message)
                 } else {
@@ -74,10 +74,16 @@ struct AddMacView<Macs: MacList>: View {
                 }
             } else {
                 Picker("Mac", selection: $selection) {
-                    ForEach(macs.waitingMacs) { mac in Text(mac.name).tag(Optional(mac.id)) }
+                    ForEach(pairableMacs) { mac in Text(mac.name).tag(Optional(mac.id)) }
                 }
                 .pickerStyle(.radioGroup)
                 .labelsHidden()
+            }
+            // A Mac that runs another version waits too, and cannot pair until both run the same one.
+            ForEach(macs.waitingMacs.filter { $0.mismatch != nil }) { mac in
+                if let mismatch = mac.mismatch {
+                    Text(mismatch.explanation(of: mac.name, for: macs.pairedWith)).font(.callout).foregroundStyle(.secondary)
+                }
             }
         } header: {
             Text("Macs Waiting to Pair")
@@ -107,7 +113,9 @@ struct AddMacView<Macs: MacList>: View {
         }
     }
 
-    private var selectedMac: WaitingMac? { macs.waitingMacs.first { $0.id == selection } }
+    /// The waiting Macs that run the same version of the app.
+    private var pairableMacs: [WaitingMac] { macs.waitingMacs.filter { $0.mismatch == nil } }
+    private var selectedMac: WaitingMac? { pairableMacs.first { $0.id == selection } }
 
     private func pair() {
         guard let mac = selectedMac else { return }
@@ -220,6 +228,9 @@ struct PairedMacConnectionRows<Macs: MacList>: View {
         case .rejected:
             Text("\(mac.name) no longer accepts \(macs.pairedWith.object). Remove it, then pair again.")
                 .font(.callout).foregroundStyle(.secondary)
+        case .incompatible(let mismatch):
+            Text("\(mismatch.explanation(of: mac.name, for: macs.pairedWith)) The pairing is kept, and the Macs connect again after the update.")
+                .font(.callout).foregroundStyle(.secondary)
         case .unreachable(let message): ErrorText(message)
         case .checking, .online: EmptyView()
         }
@@ -288,6 +299,10 @@ struct HostManagementSection: View {
                             .accessibilityIdentifier("stop-management")
                     }
                 }
+                if let mismatch = management.versionMismatches[manager.id] {
+                    Text("\(mismatch.explanation(of: manager.name, for: .thisMac)) Until then, \(manager.name) cannot manage this Mac.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
             } else if let window = management.pairingWindow, window.role == .manager {
                 PairingWindowRows(management: management, window: window)
             } else {
@@ -339,6 +354,10 @@ struct HostDashboardsSection: View {
                 LabeledContent(dashboard.name) {
                     Button("Remove…") { removing = dashboard }
                         .accessibilityIdentifier("remove-dashboard")
+                }
+                if let mismatch = management.versionMismatches[dashboard.id] {
+                    Text("\(mismatch.explanation(of: dashboard.name, for: .thisMac)) Until then, \(dashboard.name) cannot show this Mac.")
+                        .font(.callout).foregroundStyle(.secondary)
                 }
             }
             if let window = management.pairingWindow, window.role == .dashboard {
@@ -425,6 +444,20 @@ private struct PairingWindowRows: View {
     }
 }
 
+extension VersionMismatch {
+    /// Which Mac runs the older version of the app, and so has to be updated.
+    ///
+    /// - Parameters:
+    ///   - macName: The Mac that this mismatch describes.
+    ///   - other: The Mac that connects to it or lists it.
+    func explanation(of macName: String, for other: MacReference) -> String {
+        switch self {
+        case .older: "\(macName) runs an older version of XcodeHomeRunner. Update it to the version on \(other.object)."
+        case .newer: "\(macName) runs a newer version of XcodeHomeRunner. Update \(other.object) to that version."
+        }
+    }
+}
+
 private extension PairedMacs.Status {
     var title: String {
         switch self {
@@ -432,6 +465,7 @@ private extension PairedMacs.Status {
         case .checking: "Checking…"
         case .online: "Connected"
         case .rejected: "Pairing no longer applies"
+        case .incompatible: "Runs another version"
         case .unreachable: "Not responding"
         }
     }
@@ -441,14 +475,14 @@ private extension PairedMacs.Status {
         case .notFound: "questionmark.circle"
         case .checking: "circle.dotted"
         case .online: "checkmark.circle.fill"
-        case .rejected, .unreachable: "exclamationmark.triangle.fill"
+        case .rejected, .incompatible, .unreachable: "exclamationmark.triangle.fill"
         }
     }
 
     var tint: Color {
         switch self {
         case .online: .green
-        case .unreachable: .orange
+        case .incompatible, .unreachable: .orange
         case .rejected: .red
         case .notFound, .checking: .secondary
         }

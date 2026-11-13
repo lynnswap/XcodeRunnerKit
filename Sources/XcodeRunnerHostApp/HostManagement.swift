@@ -41,6 +41,7 @@ final class HostManagement {
     private let store: any SecretStore
     private let name: String
     private let advertises: Bool
+    private let version: Int
     private let hostID: UUID
     private(set) var manager: HostPairing?
     /// The Macs that show this Mac in their window. They change its settings and leave its runners to this Mac or
@@ -49,6 +50,8 @@ final class HostManagement {
     private(set) var pairingWindow: PairingWindow?
     /// Each pairing's listening port, for connections that do not use Bonjour.
     private(set) var ports: [HostPairing.ID: NWEndpoint.Port] = [:]
+    /// The paired Macs whose last request came from another version of the app. This Mac does not answer them.
+    private(set) var versionMismatches: [HostPairing.ID: VersionMismatch] = [:]
     /// Why the last pairing window closed without pairing.
     private(set) var pairingMessage: String?
     private(set) var errorMessage: String?
@@ -62,11 +65,14 @@ final class HostManagement {
     /// The managing host's listening port.
     var managementPort: NWEndpoint.Port? { manager.flatMap { ports[$0.id] } }
 
-    /// - Parameter advertises: Whether listeners register Bonjour services. Tests connect to the listening ports instead.
-    init(store: any SecretStore, name: String, advertises: Bool = true) {
+    /// - Parameters:
+    ///   - advertises: Whether listeners register Bonjour services. Tests connect to the listening ports instead.
+    ///   - version: The version of this Mac's messages.
+    init(store: any SecretStore, name: String, advertises: Bool = true, version: Int = HostLink.version) {
         self.store = store
         self.name = name
         self.advertises = advertises
+        self.version = version
         do {
             let record = try store.read().map { try JSONDecoder().decode(Record.self, from: $0) }
             hostID = record?.hostID ?? UUID()
@@ -86,15 +92,16 @@ final class HostManagement {
 
     private func listen(to pairing: HostPairing, as role: PairingRole) {
         guard listeners[pairing.id] == nil else { return }
-        let txtRecord = NWTXTRecord([HostLink.pairingKeyName: pairing.id.uuidString])
+        let txtRecord = NWTXTRecord([HostLink.pairingKeyName: pairing.id.uuidString, HostLink.versionKeyName: String(version)])
         // This Mac advertises one service for each pairing, and a service name has to be its only one of that type.
         let serviceName = role == .manager ? name : pairing.id.uuidString
         listeners[pairing.id] = Task {
             do {
                 try await HostLink.listen(
-                    key: pairing.symmetricKey, identity: pairing.id.uuidString,
+                    key: pairing.symmetricKey, identity: pairing.id.uuidString, version: version,
                     advertising: advertises ? .bonjour(name: serviceName, type: HostLink.managementService, txtRecord: txtRecord) : nil,
-                    ready: { port in await self.listenerIsReady(port, for: pairing.id) }
+                    ready: { port in await self.listenerIsReady(port, for: pairing.id) },
+                    connected: { version in await self.connected(pairing.id, version: version) }
                 ) { request, reply in
                     switch request {
                     case .settings(let request):
@@ -190,13 +197,13 @@ final class HostManagement {
         let window = PairingWindow(role: role, expiresAt: .now.addingTimeInterval(Self.pairingDuration))
         pairingWindow = window
         pairingMessage = nil
-        let txtRecord = NWTXTRecord([HostLink.roleKeyName: role.rawValue])
+        let txtRecord = NWTXTRecord([HostLink.roleKeyName: role.rawValue, HostLink.versionKeyName: String(version)])
         let task = Task {
             do {
                 try await withThrowingTaskGroup { group in
                     group.addTask {
                         try await HostLink.acceptPairing(
-                            name: self.name, hostID: self.hostID, role: role,
+                            name: self.name, hostID: self.hostID, role: role, version: self.version,
                             advertising: self.advertises
                                 ? .bonjour(name: self.name, type: HostLink.pairingService, txtRecord: txtRecord) : nil,
                             ready: { port in await self.pairingListenerIsReady(port, window: window.id) },
@@ -341,6 +348,13 @@ final class HostManagement {
     private func stopListening(to id: HostPairing.ID) {
         listeners.removeValue(forKey: id)?.cancel()
         ports[id] = nil
+        versionMismatches[id] = nil
+    }
+
+    /// Records whether a paired Mac's request came from this Mac's version of the app.
+    private func connected(_ id: HostPairing.ID, version: Int) {
+        guard listeners[id] != nil else { return }
+        versionMismatches[id] = version == self.version ? nil : VersionMismatch(theirs: version, own: self.version)
     }
 
     private func closePairingWindow(_ window: UUID, message: String?) {

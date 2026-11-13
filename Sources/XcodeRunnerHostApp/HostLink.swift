@@ -81,7 +81,10 @@ enum HostLinkReply: Codable, Sendable {
 enum PairingRequest: Codable, Sendable {
     /// Commits to the asking Mac's public key, and sends the other values that the code covers, before the Mac sends
     /// its key. Someone in between then has to choose every value before learning the one that decides the code.
-    case begin(commitment: Data, pairingID: UUID, requesterName: String, role: PairingRole)
+    ///
+    /// - Parameter version: The version of the asking Mac's messages. A Mac from before messages carried a version
+    ///   sends none.
+    case begin(commitment: Data, pairingID: UUID, requesterName: String, role: PairingRole, version: Int?)
     case reveal(publicKey: Data)
     /// Sent after the person confirms on the asking Mac that both Macs show the same code.
     case confirm(Data)
@@ -102,9 +105,42 @@ struct PairingRefusal: Error {
     init(_ message: String) { self.message = message }
 }
 
+/// How another Mac's app version compares with the version of the Mac that connects to it or lists it.
+enum VersionMismatch: String, Codable, Equatable, Sendable {
+    /// The other Mac runs an older version.
+    case older
+    /// The other Mac runs a newer version.
+    case newer
+
+    /// - Parameter version: The other Mac's version of the messages, which differs from `own`.
+    init(theirs version: Int, own: Int) { self = version < own ? .older : .newer }
+}
+
+/// A request or a reply with the version of its sender's messages, so that Macs that run different versions can say
+/// so instead of failing to read each other.
+struct Versioned<Payload: Codable & Sendable>: Codable, Sendable {
+    let version: Int
+    /// `nil` when the payload could not be read, as when another version sent it.
+    let payload: Payload?
+
+    init(_ payload: Payload, version: Int) {
+        self.version = version
+        self.payload = payload
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Versions from before messages carried one sent the payload alone.
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 0
+        payload = try? container.decode(Payload.self, forKey: .payload)
+    }
+}
+
 enum HostLinkError: LocalizedError, Equatable {
     /// The TLS handshake failed: the other Mac does not have this key.
     case rejected
+    /// The other Mac runs another version of the app, and the Macs cannot read each other's messages.
+    case incompatible(VersionMismatch)
     case unreachable(String)
     case timedOut
     case refused(String)
@@ -117,6 +153,8 @@ enum HostLinkError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .rejected: "The Mac did not accept the key."
+        case .incompatible(.older): "The Mac runs an older version of XcodeHomeRunner. Update it."
+        case .incompatible(.newer): "The Mac runs a newer version of XcodeHomeRunner. Update this version to match it."
         case .unreachable(let message): "The Mac could not be reached: \(message)"
         case .timedOut: "The Mac did not answer."
         case .refused(let message): message
@@ -191,11 +229,16 @@ enum HostLink {
     /// The pairing service's TXT record key holding the role that the Mac waits for, so a Mac lists only the Macs
     /// it can pair with.
     static let roleKeyName = "role"
+    /// The TXT record key of both services holding `version`, so a Mac can tell before it connects.
+    static let versionKeyName = "version"
+    /// The version of the messages that paired Macs exchange. Raise it with every change after which a Mac running
+    /// the previous version could not read a request, a reply, or a report.
+    static let version = 1
     /// A connection whose key the other Mac rejects keeps waiting instead of failing, so requests stop after this long.
     static let requestTimeout = Duration.seconds(10)
 
-    typealias ServerProtocol = Coder<HostLinkReply, HostLinkRequest, NetworkJSONCoder>
-    typealias ClientProtocol = Coder<HostLinkRequest, HostLinkReply, NetworkJSONCoder>
+    typealias ServerProtocol = Coder<Versioned<HostLinkReply>, Versioned<HostLinkRequest>, NetworkJSONCoder>
+    typealias ClientProtocol = Coder<Versioned<HostLinkRequest>, Versioned<HostLinkReply>, NetworkJSONCoder>
     typealias PairingServerProtocol = Coder<PairingReply, PairingRequest, NetworkJSONCoder>
 
     /// TLS with the pairing key as the pre-shared key. The ephemeral ECDH exchange keeps recorded connections secret
@@ -215,40 +258,54 @@ enum HostLink {
 
     static func clientParameters(key: SymmetricKey, identity: String) -> NWParametersBuilder<ClientProtocol> {
         .parameters(initialParameters: tlsParameters(key: key, identity: identity)) {
-            Coder(sending: HostLinkRequest.self, receiving: HostLinkReply.self, using: .json) { TCP() }
+            Coder(sending: Versioned<HostLinkRequest>.self, receiving: Versioned<HostLinkReply>.self, using: .json) { TCP() }
         }
     }
 
     static func serverParameters(key: SymmetricKey, identity: String) -> NWParametersBuilder<ServerProtocol> {
         .parameters(initialParameters: tlsParameters(key: key, identity: identity)) {
-            Coder(sending: HostLinkReply.self, receiving: HostLinkRequest.self, using: .json) { TCP() }
+            Coder(sending: Versioned<HostLinkReply>.self, receiving: Versioned<HostLinkRequest>.self, using: .json) { TCP() }
         }
     }
 
     /// Sends one request and returns the reply, failing promptly when the Mac rejects the key or cannot be reached.
     ///
-    /// - Parameter timeout: How long the Mac has to reply.
+    /// Throws `HostLinkError.incompatible` when the Mac answers with another version.
+    ///
+    /// - Parameters:
+    ///   - version: The version of this Mac's messages.
+    ///   - timeout: How long the Mac has to reply.
     static func send(
         _ request: HostLinkRequest, to endpoint: NWEndpoint, key: SymmetricKey, identity: String,
-        timeout: Duration = requestTimeout
+        version: Int = version, timeout: Duration = requestTimeout
     ) async throws -> HostLinkReply {
         let connection = NetworkConnection(to: endpoint, using: clientParameters(key: key, identity: identity))
         return try await whileConnected(connection) { connection in
             try await within(timeout) {
-                try await connection.send(request)
-                return try await connection.receive().content
+                try await connection.send(Versioned(request, version: version))
+                let reply = try await connection.receive().content
+                guard reply.version == version else {
+                    throw HostLinkError.incompatible(VersionMismatch(theirs: reply.version, own: version))
+                }
+                guard let payload = reply.payload else { throw HostLinkError.unexpectedReply }
+                return payload
             }
         }
     }
 
     /// Accepts connections that use `key` until the task is cancelled.
     ///
+    /// A request from a Mac that runs another version is answered with this Mac's version and not handled.
+    ///
     /// - Parameters:
+    ///   - version: The version of this Mac's messages.
     ///   - ready: Called with the listening port once the listener is ready.
+    ///   - connected: Called with the version of each request's sender.
     ///   - handle: Answers a request through `reply`, and can act after replying.
     static func listen(
-        key: SymmetricKey, identity: String, advertising service: BonjourListenerProvider?,
+        key: SymmetricKey, identity: String, version: Int = version, advertising service: BonjourListenerProvider?,
         ready: @escaping @Sendable (NWEndpoint.Port) async -> Void,
+        connected: @escaping @Sendable (_ version: Int) async -> Void,
         handle: @escaping @Sendable (HostLinkRequest, _ reply: (HostLinkReply) async throws -> Void) async throws -> Void
     ) async throws {
         let listener = try NetworkListener(for: service, using: serverParameters(key: key, identity: identity))
@@ -259,7 +316,13 @@ enum HostLink {
         try await listener.run { connection in
             do {
                 for try await message in connection.messages {
-                    try await handle(message.content) { try await connection.send($0) }
+                    await connected(message.content.version)
+                    guard message.content.version == version, let request = message.content.payload else {
+                        // The sender reads this reply's version and not its payload.
+                        try await connection.send(Versioned(HostLinkReply.refused("The Macs run different versions."), version: version))
+                        continue
+                    }
+                    try await handle(request) { try await connection.send(Versioned($0, version: version)) }
                 }
             } catch {
                 // One connection's failure, such as a wrong key, does not stop the listener.
@@ -274,7 +337,7 @@ enum HostLink {
     ///   - confirm: Shows the code and returns once the person confirms that the Mac shows the same code.
     /// - Returns: The pairing and the Mac's host ID.
     static func requestPairing(
-        at endpoint: NWEndpoint, pairingID: UUID, requesterName: String, role: PairingRole,
+        at endpoint: NWEndpoint, pairingID: UUID, requesterName: String, role: PairingRole, version: Int = version,
         confirm: @escaping @Sendable (_ macName: String, _ code: String) async throws -> Void
     ) async throws -> (pairing: HostPairing, hostID: UUID) {
         let connection = NetworkConnection(to: endpoint) {
@@ -286,7 +349,7 @@ enum HostLink {
             let commitment = Data(SHA256.hash(data: publicKey))
             let reply = try await within(requestTimeout) {
                 try await connection.send(PairingRequest.begin(
-                    commitment: commitment, pairingID: pairingID, requesterName: requesterName, role: role
+                    commitment: commitment, pairingID: pairingID, requesterName: requesterName, role: role, version: version
                 ))
                 return try await connection.receive().content
             }
@@ -339,7 +402,7 @@ enum HostLink {
     ///   - save: Keeps the pairing once the person allowed it and the asking Mac confirmed the code.
     ///   - ended: Called after each connection, once the asking Mac got the reply.
     static func acceptPairing(
-        name: String, hostID: UUID, role: PairingRole, advertising service: BonjourListenerProvider?,
+        name: String, hostID: UUID, role: PairingRole, version: Int = version, advertising service: BonjourListenerProvider?,
         ready: @escaping @Sendable (NWEndpoint.Port) async -> Void,
         begin: @escaping @Sendable (_ connection: UUID, _ requesterName: String) async throws -> Void,
         allow: @escaping @Sendable (_ connection: UUID, _ code: String) async throws -> Void,
@@ -356,7 +419,7 @@ enum HostLink {
         try await listener.run { connection in
             let id = UUID()
             await answerPairing(
-                on: connection, name: name, hostID: hostID, role: role,
+                on: connection, name: name, hostID: hostID, role: role, version: version,
                 begin: { requesterName in try await begin(id, requesterName) },
                 allow: { code in try await allow(id, code) },
                 save: save
@@ -367,7 +430,7 @@ enum HostLink {
 
     /// Answers one Mac's request to pair, with the pairing's proof or the reason this Mac refused.
     private static func answerPairing(
-        on connection: NetworkConnection<PairingServerProtocol>, name: String, hostID: UUID, role: PairingRole,
+        on connection: NetworkConnection<PairingServerProtocol>, name: String, hostID: UUID, role: PairingRole, version: Int,
         begin: @escaping @Sendable (_ requesterName: String) async throws -> Void,
         allow: @escaping @Sendable (_ code: String) async throws -> Void,
         save: @escaping @Sendable (HostPairing) async throws -> Void
@@ -377,10 +440,15 @@ enum HostLink {
         // Cancelling a pending receive closes the connection, so the reply is sent before the group cancels it.
         await withThrowingTaskGroup(of: Step.self) { group in
             do {
-                guard case .begin(let commitment, let pairingID, let requesterName, let requestedRole) = try await within(
-                    requestTimeout, { try await connection.receive().content }
-                ) else {
+                guard case .begin(let commitment, let pairingID, let requesterName, let requestedRole, let requesterVersion)
+                        = try await within(requestTimeout, { try await connection.receive().content }) else {
                     throw notVerified
+                }
+                // Macs that run different versions cannot read each other's messages after they pair.
+                guard requesterVersion == version else {
+                    throw PairingRefusal(VersionMismatch(theirs: requesterVersion ?? 0, own: version) == .older
+                        ? "\(name) runs a newer version of XcodeHomeRunner. Update \(requesterName) to pair."
+                        : "\(name) runs an older version of XcodeHomeRunner. Update it to pair.")
                 }
                 // The person opened this Mac to one role, so a request cannot choose another.
                 guard requestedRole == role else {

@@ -555,6 +555,50 @@ struct HostPairingTests {
         await dashboard.shutDown()
     }
 
+    @Test func macsThatRunDifferentVersionsSayWhichOneToUpdate() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let managerStore = MemorySecretStore()
+        let managed = managedMac(at: root)
+        let management = managed.management
+        let macs = PairedMacs(store: managerStore, name: "Manager", role: .manager, browses: false)
+        let mac = try await pair(macs, with: management)
+        try await waitUntil { management.managementPort != nil }
+        let endpoint = try local(management.managementPort)
+
+        // The managing host is updated first. Each Mac names the other one's version, and neither reads its messages.
+        let updated = PairedMacs(
+            store: managerStore, name: "Manager", role: .manager, browses: false, version: HostLink.version + 1
+        )
+        await updated.checkStatus(of: mac.id, at: endpoint)
+        #expect(updated.status(of: mac.id) == .incompatible(.older))
+        #expect(management.versionMismatches == [mac.id: .newer])
+        #expect(updated.settings[mac.id]?.report == nil)
+
+        // The pairing is kept, so the Macs connect again once they run the same version.
+        await macs.checkStatus(of: mac.id, at: endpoint)
+        #expect(macs.status(of: mac.id) == .online)
+        #expect(management.versionMismatches.isEmpty)
+
+        // A Mac that waits to pair with another version is listed with the reason, and does not pair.
+        updated.discoverPairableMacs()
+        updated.pairableMacsChanged([.init(id: "waiting", name: "Waiting", endpoint: endpoint, version: HostLink.version)])
+        #expect(updated.waitingMacs == [WaitingMac(id: "waiting", name: "Waiting", mismatch: .older)])
+        await #expect(throws: HostLinkError.incompatible(.older)) { try await updated.pair(with: "waiting") }
+        // A Mac that waits refuses a Mac of another version that asks without having listed it.
+        let other = HostManagement(store: MemorySecretStore(), name: "Other", advertises: false)
+        let waiting = try await waitToPair(other)
+        await #expect(throws: HostLinkError.refused("Other runs an older version of XcodeHomeRunner. Update it to pair.")) {
+            try await updated.pair(at: waiting)
+        }
+        #expect(other.manager == nil)
+        await other.shutDown()
+
+        await management.shutDown()
+        await macs.shutDown()
+        await updated.shutDown()
+    }
+
     @Test func aMacRefusesAPairingRequestForAnotherRole() async throws {
         let management = HostManagement(store: MemorySecretStore(), name: "Managed", advertises: false)
         let manager = PairedMacs(store: MemorySecretStore(), name: "Manager", role: .manager, browses: false)
@@ -631,7 +675,7 @@ struct HostPairingTests {
         let connection = pairingConnection(to: try await waitToPair(management))
 
         try await connection.send(PairingRequest.begin(
-            commitment: Data(SHA256.hash(data: publicKey())), pairingID: UUID(), requesterName: "Someone", role: .manager
+            commitment: Data(SHA256.hash(data: publicKey())), pairingID: UUID(), requesterName: "Someone", role: .manager, version: HostLink.version
         ))
         _ = try await connection.receive()
         try await connection.send(PairingRequest.reveal(publicKey: publicKey()))
@@ -652,7 +696,7 @@ struct HostPairingTests {
         let endpoint = try await waitToPair(management)
         let first = pairingConnection(to: endpoint)
         try await first.send(PairingRequest.begin(
-            commitment: Data(SHA256.hash(data: publicKey())), pairingID: UUID(), requesterName: "First", role: .manager
+            commitment: Data(SHA256.hash(data: publicKey())), pairingID: UUID(), requesterName: "First", role: .manager, version: HostLink.version
         ))
         _ = try await first.receive()
 
@@ -675,7 +719,7 @@ struct HostPairingTests {
         }
         let serving = Task {
             try await impostor.run { connection in
-                guard case .begin(let commitment, let pairingID, let requesterName, let role) = try await connection.receive().content else { return }
+                guard case .begin(let commitment, let pairingID, let requesterName, let role, _) = try await connection.receive().content else { return }
                 let privateKey = Curve25519.KeyAgreement.PrivateKey()
                 let publicKey = privateKey.publicKey.rawRepresentation
                 let hostID = UUID()
@@ -732,7 +776,7 @@ struct HostPairingTests {
             to: try local(management.managementPort),
             using: HostLink.clientParameters(key: mac.pairing.symmetricKey, identity: mac.id.uuidString)
         )
-        try await connection.send(HostLinkRequest.settings(.read))
+        try await connection.send(Versioned(HostLinkRequest.settings(.read), version: HostLink.version))
         _ = try await connection.receive()
 
         // Without ECDHE, anyone who records the connections can read them once the pairing key leaks.
