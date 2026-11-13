@@ -714,6 +714,24 @@ struct HostPairingTests {
         await host.management.shutDown()
     }
 
+    @Test func aHostRefusesAnOperationWhileItsStorageIsMissing() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (host, storage, shown, endpoint, directory) = try await hostAndCheckout(at: root)
+        let checkout = try await Checkout.containing(directory)
+        // As when the volume that holds the storage is not mounted.
+        try FileManager.default.removeItem(at: storage.directory)
+
+        await #expect(throws: HostLinkError.refused("\(HostPane.macName)'s storage is not available at \(storage.directory.path(percentEncoded: false)).")) {
+            try await RemoteOperationClient.run(
+                "build", arguments: [], in: checkout, on: shown, at: endpoint, outputDirectory: root.appending(path: "Output")
+            ) { _ in }
+        }
+        #expect(!FileManager.default.fileExists(atPath: storage.directory.path(percentEncoded: false)))
+
+        await host.management.shutDown()
+    }
+
     @Test func aHostStopsAnOperationWhenTheDashboardLeaves() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

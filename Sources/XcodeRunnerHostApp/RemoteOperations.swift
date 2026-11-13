@@ -87,6 +87,16 @@ final class RemoteOperations {
             checkoutDirectory: checkout.path(percentEncoded: false), outputDirectory: output.path(percentEncoded: false)
         )))
         do {
+            // Creating the folders of storage that is not mounted would run the operation on the startup volume.
+            for location in [storage.workDirectory, storage.buildDirectory] {
+                var isDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: location.path(percentEncoded: false), isDirectory: &isDirectory),
+                      isDirectory.boolValue else {
+                    throw RemoteOperationFailure(
+                        "\(HostPane.macName)'s storage is not available at \(storage.directory.path(percentEncoded: false))."
+                    )
+                }
+            }
             // An operation that the host did not finish, as when it quit, left its checkout.
             try await Self.remove(folder)
             try await Self.receiveCheckout(into: checkout, archive: folder.appending(path: "files.tar"), next: next)
