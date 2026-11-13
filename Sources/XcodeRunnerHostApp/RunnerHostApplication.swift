@@ -440,9 +440,12 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             print("Removed \(directory.name).")
         }
         let isPaused = settings.isPaused
-        // A paused host lets each runner finish the job that it runs, and stops the others.
+        // A paused host lets each runner finish the job that it runs, and stops the others. The official runner has
+        // no way to refuse jobs while it runs, so a job that it takes in the instant before its service stops is
+        // cancelled, as when the host quits.
         var finishing: Set<URL> = []
         if isPaused {
+            var stopping: [(directory: URL, task: Task<Void, Never>)] = []
             for (directory, runner) in runners {
                 // A service that just ended has no processes to list, and no job.
                 if runner.state == .running, let group = runner.processGroup, (try? Self.groupRunsJob(group)) == true {
@@ -450,9 +453,13 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                     continue
                 }
                 runners[directory] = nil
+                // Every idle runner is asked to stop before any of them is waited for, so none takes a job meanwhile.
                 runner.task.cancel()
+                stopping.append((directory, runner.task))
+            }
+            for runner in stopping {
                 await runner.task.value
-                print("Paused \(directory.lastPathComponent).")
+                print("Paused \(runner.directory.lastPathComponent).")
             }
             try Task.checkCancellation()
         }

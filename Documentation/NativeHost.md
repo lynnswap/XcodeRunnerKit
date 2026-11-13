@@ -150,9 +150,10 @@ stops registration management; it leaves existing runner services running.
 
 To use a Mac for something else for a while, turn off **Take new jobs** under
 **Runner Services** in its pane. The host stops each runner service once the
-runner has no job, and starts none, so the jobs that run finish. The runners
-stay registered and appear offline on GitHub, where their jobs wait or go to
-other runners with the same labels. A paused Mac also refuses a build or test
+runner has no job, and starts none, so the jobs that run finish. A job that a
+runner takes in the instant before its service stops is cancelled, as when the
+host quits. The runners stay registered and appear offline on GitHub, where
+their jobs wait or go to other runners with the same labels. A paused Mac also refuses a build or test
 that a dashboard sends with `--host`. Overview shows the Mac as **Paused**.
 
 Turning **Take new jobs** on starts the runner services again without
