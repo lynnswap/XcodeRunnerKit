@@ -69,6 +69,8 @@ final class ManagedMacsRelay {
     private var pairing: Task<Void, Never>?
     /// The last pairing that a dashboard started, and that dashboard. Only it reads, confirms, and cancels the pairing.
     private var pairingAttempt: (id: UUID, dashboard: HostPairing.ID)?
+    /// An attempt that its dashboard cancelled before its request to start arrived on another connection.
+    private var cancelledAttempt: UUID?
     private var pairedMac: ListedMac?
     private var pairingError: String?
     private var discovery: Task<Void, Never>?
@@ -112,12 +114,12 @@ final class ManagedMacsRelay {
             case .read(let refreshing):
                 if let refreshing { await macs.refresh(refreshing) }
             case .configurePool(let changes, let mac):
-                _ = try await macs.relay(.configurePool(changes), to: mac)
+                try await relay(.configurePool(changes), to: mac)
                 // The dashboard sends a limit only when it was edited. This host's last read of the Mac may be older
                 // than the limit that the edit replaced, so it does not decide whether the limit changed.
                 limitChanged = changes.maximumConcurrentJobs != nil
             case .saveStorage(let directory, let mac):
-                _ = try await macs.relay(.saveStorage(directory: directory), to: mac)
+                try await relay(.saveStorage(directory: directory), to: mac)
             case .remove(let mac):
                 await macs.remove(mac)
             case .discover:
@@ -126,6 +128,7 @@ final class ManagedMacsRelay {
                 discoverWhileAsked()
             case .pair(let waitingMac, let attempt):
                 try requireCanAddMacs()
+                guard attempt != cancelledAttempt else { break }
                 // This host's own Add Mac sheet, or another dashboard, may be pairing.
                 guard pairing == nil, !macs.isPairing else { throw PairedMacs.alreadyPairing }
                 pairingAttempt = (attempt, dashboard)
@@ -144,7 +147,10 @@ final class ManagedMacsRelay {
                 guard pairingAttempt.map({ $0 == (attempt, dashboard) }) == true, pairing != nil else { break }
                 macs.confirmCode()
             case .cancelPairing(let attempt):
-                guard pairingAttempt.map({ $0 == (attempt, dashboard) }) == true else { break }
+                guard pairingAttempt.map({ $0 == (attempt, dashboard) }) == true else {
+                    if pairingAttempt?.id != attempt { cancelledAttempt = attempt }
+                    break
+                }
                 pairing?.cancel()
                 await pairing?.value
             }
@@ -158,6 +164,16 @@ final class ManagedMacsRelay {
         let tasks = [pairing, discovery]
         for task in tasks { task?.cancel() }
         for task in tasks { await task?.value }
+    }
+
+    /// Changes a Mac's settings. When the Mac does not confirm the change, the dashboard shows what this host's own
+    /// pane for the Mac shows: the change may or may not have been applied.
+    private func relay(_ request: HostSettingsRequest, to mac: HostPairing.ID) async throws {
+        do {
+            _ = try await macs.relay(request, to: mac)
+        } catch {
+            throw HostLinkError.refused(PairedMacSettings.changeFailure(error, on: macs.mac(mac)?.name ?? "The Mac"))
+        }
     }
 
     private func requireCanAddMacs() throws {
