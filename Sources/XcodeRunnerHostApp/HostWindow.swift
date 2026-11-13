@@ -436,7 +436,7 @@ func connectPreviewMac(_ mac: PairedMac, to macs: PairedMacs, stopsAnswering: Bo
     settings.hostState = .running
     settings.storageDidBecomeAvailable(HostInstallation.Storage(directory: installation.hostRoot.appending(path: "Storage")))
     settings.runners = [
-        RunnerSettingsRow(directory: installation.runnersRoot.appending(path: "1"), name: "m1pro-XcodeRunnerKit-1", state: .running, configurationError: nil),
+        RunnerSettingsRow(directory: installation.runnersRoot.appending(path: "1"), name: "\(mac.name)-XcodeRunnerKit-1", state: .running, configurationError: nil),
     ]
     settings.management.start()
     Task {

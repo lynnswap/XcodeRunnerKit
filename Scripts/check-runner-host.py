@@ -492,4 +492,4 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost storage change ') as tempora
         finally:
             stop_host(host, runners)
 
-print('PASS: runner lifecycle, hidden runner discovery, removal of runners unregistered from GitHub, prompt shutdown while storage is locked, recovery when unavailable storage returns, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')
+print('PASS: dashboard launch without host files, runner lifecycle, hidden runner discovery, removal of runners unregistered from GitHub, prompt shutdown while storage is locked, recovery when unavailable storage returns, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')
