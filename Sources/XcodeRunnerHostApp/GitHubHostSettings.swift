@@ -443,7 +443,7 @@ final class GitHubHostSettings {
     /// reconciling them or cannot run new runners yet.
     func answer(_ request: RunnerRequest) async -> HostLinkReply {
         switch request {
-        case .hostName, .inventory: break
+        case .hostName, .inventory, .markLabelsApplied: break
         case .prepareArchive, .install, .markUnregistering, .markRemoved:
             guard storageIsReady, !isShuttingDown else {
                 return .refused("Runner changes wait until storage is ready and the runner host is running.")
@@ -458,6 +458,7 @@ final class GitHubHostSettings {
                 case .install(let installation): try await mac.install(installation)
                 case let .markUnregistering(runner, repositoryID): try await mac.markUnregistering(runner, from: repositoryID)
                 case .markRemoved(let runner): try await mac.markRemoved(runner)
+                case .markLabelsApplied(let labels): try await mac.markLabelsApplied(labels)
                 }
                 return .completed
             }

@@ -153,8 +153,9 @@ struct PairingCode: View {
 struct PairedMacView<Macs: MacList>: View {
     let macs: Macs
     let mac: ListedMac
-    /// Called after the Mac saved a different job limit. A managing host then registers the Mac's runners.
-    let limitChanged: () async -> Void
+    /// Called after the Mac saved a different job limit or different runner labels. A managing host then updates
+    /// the Mac's runners.
+    let registrationsChanged: () async -> Void
     /// Called after the pairing ended and the Mac left the list.
     let removed: () -> Void
     @State private var isConfirmingRemoval = false
@@ -171,7 +172,7 @@ struct PairedMacView<Macs: MacList>: View {
                 if let message = macs.message { ErrorText(message) }
             }
             if let settings, let report {
-                PairedMacSettingsSections(macs: macs, mac: mac, settings: settings, report: report, limitChanged: limitChanged)
+                PairedMacSettingsSections(macs: macs, mac: mac, settings: settings, report: report, registrationsChanged: registrationsChanged)
             }
             Section {
                 HStack {
@@ -260,7 +261,7 @@ private struct PairedMacSettingsSections<Macs: MacList>: View {
     let mac: ListedMac
     @Bindable var settings: PairedMacSettings
     let report: HostSettingsReport
-    let limitChanged: () async -> Void
+    let registrationsChanged: () async -> Void
 
     var body: some View {
         RunnerServicesSection(
@@ -269,12 +270,20 @@ private struct PairedMacSettingsSections<Macs: MacList>: View {
         ) {
             Text("Processes on \(mac.name).")
         }
+        RunnerLabelsSection(
+            labels: $settings.runnerLabelsInput, isSaving: settings.isSavingRunnerLabels,
+            saveError: settings.runnerLabelsError, mac: MacReference(name: mac.name)
+        ) {
+            Task {
+                if await macs.saveRunnerLabels(of: mac.id) { await registrationsChanged() }
+            }
+        }
         XcodeExecutionSection(
             settings: report, draft: $settings.poolDraft, isSaving: settings.isSaving,
             canApply: settings.canApplyPoolConfiguration, saveError: settings.saveError
         ) {
             Task {
-                if await macs.applyPoolConfiguration(of: mac.id) { await limitChanged() }
+                if await macs.applyPoolConfiguration(of: mac.id) { await registrationsChanged() }
             }
         }
         XcodeSection(

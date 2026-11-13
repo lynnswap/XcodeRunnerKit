@@ -133,8 +133,8 @@ private struct HostPaneView: View {
                 if let mac = settings.managedMacs.mac(id) {
                     PairedMacView(
                         macs: settings.managedMacs, mac: mac.listed,
-                        // This Mac registers the Mac's runners, so a changed limit is applied to them here.
-                        limitChanged: { await settings.github.synchronize() },
+                        // This Mac registers the Mac's runners, so a changed limit or label is applied to them here.
+                        registrationsChanged: { await settings.github.synchronize() },
                         removed: { navigation.pane = .mac }
                     )
                 } else {
@@ -526,6 +526,13 @@ private struct XcodeSectionPreview: View {
 }
 
 #Preview("Xcode Section", traits: .fixedLayout(width: 560, height: 360)) { XcodeSectionPreview() }
+#Preview("Runner Labels Section", traits: .fixedLayout(width: 560, height: 260)) {
+    @Previewable @State var labels = "fast, xcode-27"
+    Form {
+        RunnerLabelsSection(labels: $labels, isSaving: false, saveError: nil, mac: MacReference(name: "m1pro")) {}
+    }
+    .formStyle(.grouped)
+}
 #Preview("New Mac", traits: .fixedLayout(width: 760, height: 620)) { previewHostSplitViewController(pane: .overview, isSignedIn: false) }
 #Preview("Overview", traits: .fixedLayout(width: 760, height: 620)) {
     previewHostSplitViewController(pane: .overview, isSignedIn: true, pairing: .managing)

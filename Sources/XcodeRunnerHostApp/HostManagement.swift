@@ -113,10 +113,14 @@ final class HostManagement {
                         // The change is saved, so what follows it does not depend on the reply arriving.
                         let delivery: Result<Void, any Error>
                         do { delivery = .success(try await reply(answer)) } catch { delivery = .failure(error) }
-                        // A managing host registers runners for a changed job limit itself. After a dashboard's
-                        // change this Mac does, as it does after its own Apply.
-                        if role == .dashboard, case .settings = answer, case .configurePool(let changes) = request,
-                           changes.maximumConcurrentJobs != nil {
+                        // A managing host updates this Mac's runners for a changed job limit or changed labels itself.
+                        // After a dashboard's change this Mac does, as it does after its own.
+                        let registrationsChanged = switch request {
+                        case .configurePool(let changes): changes.maximumConcurrentJobs != nil
+                        case .saveRunnerLabels: true
+                        default: false
+                        }
+                        if role == .dashboard, case .settings = answer, registrationsChanged {
                             await settings.github.synchronize()
                         }
                         // The paired Mac has the reply, or its connection is gone.
@@ -148,7 +152,7 @@ final class HostManagement {
                         // The limit is saved, so registering runners for it does not depend on the reply arriving.
                         let delivery: Result<Void, any Error>
                         do { delivery = .success(try await reply(answer.reply)) } catch { delivery = .failure(error) }
-                        if answer.limitChanged { await settings.github.synchronize() }
+                        if answer.registrationsChanged { await settings.github.synchronize() }
                         try delivery.get()
                     case .runners(let request):
                         guard role == .manager, let github = await self.settings?.github else {

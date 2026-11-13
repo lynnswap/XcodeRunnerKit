@@ -166,6 +166,21 @@ struct HostPairingTests {
         #expect(settings.report?.savedXcodeIsMissing == true)
         #expect(settings.xcodeSelectionInput == "/Applications/Removed.app/Contents/Developer")
 
+        // The Mac keeps the labels of its runners, and its managing host reads them with its runner folders and
+        // records those that it put on the runners.
+        settings.runnerLabelsInput = "Fast, xcode-27"
+        #expect(await macs.saveRunnerLabels(of: mac.id))
+        #expect(try managed.installation.runnerLabels() == ["fast", "xcode-27"])
+        #expect(settings.runnerLabelsInput == "fast, xcode-27")
+        #expect(managed.runnerLabelsInput == "fast, xcode-27")
+        settings.runnerLabelsInput = "fast, self-hosted"
+        #expect(await !macs.saveRunnerLabels(of: mac.id))
+        #expect(settings.runnerLabelsError == "Every runner already has the label self-hosted.")
+        let runnerMac = PairedRunnerMac(id: mac.id, macs: macs)
+        #expect(try await runnerMac.runners().labels == ["fast", "xcode-27"])
+        try await runnerMac.markLabelsApplied(["fast"])
+        #expect(try managed.installation.appliedRunnerLabels() == ["fast"])
+
         // A paused Mac keeps that state across launches, and its own window shows it.
         #expect(settings.report?.isPaused == false)
         await macs.setPaused(true, of: mac.id)

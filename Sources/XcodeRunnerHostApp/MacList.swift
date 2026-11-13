@@ -34,6 +34,10 @@ protocol MacList: AnyObject, Observable {
     func saveStorageDirectory(of id: HostPairing.ID) async
     /// Saves the Xcode selected for a Mac's jobs.
     func saveXcodeSelection(of id: HostPairing.ID) async
+    /// Saves the labels edited for a Mac's runners.
+    ///
+    /// - Returns: Whether the Mac saved a different list.
+    @discardableResult func saveRunnerLabels(of id: HostPairing.ID) async -> Bool
     /// Pauses or resumes a Mac, which stops or starts its runner services without changing their registrations.
     func setPaused(_ isPaused: Bool, of id: HostPairing.ID) async
     /// Restarts a Mac's host, which applies its saved storage folder.

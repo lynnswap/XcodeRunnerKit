@@ -107,6 +107,20 @@ struct GitHubClient: Sendable {
         _ = try await self.request(request)
     }
 
+    /// Replaces a runner's custom labels. GitHub keeps the labels that it sets itself, such as `self-hosted`.
+    func setCustomLabels(
+        _ labels: [String], ofRunner id: Int, in repository: GitHubRepository, accessToken: String
+    ) async throws {
+        var request = apiRequest(
+            url: URL(string: "https://api.github.com/")!.appending(path: "repos/\(repository.fullName)/actions/runners/\(id)/labels"),
+            accessToken: accessToken
+        )
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["labels": labels])
+        _ = try await self.request(request)
+    }
+
     func repository(fullName: String, accessToken: String) async throws -> GitHubRepository {
         try await api(path: "repos/\(fullName)", accessToken: accessToken)
     }

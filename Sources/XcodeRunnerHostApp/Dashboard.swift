@@ -214,7 +214,7 @@ private struct DashboardPaneView: View {
                     }
                 case .mac:
                     // The host registers runners for a changed limit itself.
-                    PairedMacView(macs: hosts, mac: host.listed, limitChanged: {}) {
+                    PairedMacView(macs: hosts, mac: host.listed, registrationsChanged: {}) {
                         navigation.pane = hosts.macs.first.map { .overview($0.id) }
                     }
                 case .managedMac(let id, _):
@@ -222,7 +222,7 @@ private struct DashboardPaneView: View {
                     DashboardHostPane(hosts: hosts, host: host) { _, _, _ in
                         if let mac = managed.listedMacs.first(where: { $0.id == id }) {
                             // The host registers the Mac's runners, so it applies a changed limit to them.
-                            PairedMacView(macs: managed, mac: mac, limitChanged: {}) { navigation.pane = .overview(host.id) }
+                            PairedMacView(macs: managed, mac: mac, registrationsChanged: {}) { navigation.pane = .overview(host.id) }
                         } else {
                             ContentUnavailableView("This Mac was removed", systemImage: "desktopcomputer")
                         }

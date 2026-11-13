@@ -31,6 +31,8 @@ struct RunnerProvisionerTests {
         var jobStartedDuringInstallation: (id: Int, repository: GitHubRepository)?
         var folderLockedAfterRemoval: Int?
         var jobStartedBeforeRemoval: Int?
+        var labelChanges: [Int: [String]] = [:]
+        var failsLabelChanges = false
         private var nextIdentifier = 100
 
         init(installation: HostInstallation) { self.installation = installation }
@@ -80,6 +82,22 @@ struct RunnerProvisionerTests {
             }
             removals.append(id)
             remote[repository.id]?.removeAll { $0.id == id }
+        }
+
+        func setCustomLabels(_ labels: [String], ofRunner id: Int, in repository: GitHubRepository, accessToken: String) throws {
+            if failsLabelChanges { throw TestFailure("Label change failed.") }
+            labelChanges[id] = labels
+            guard let index = remote[repository.id]?.firstIndex(where: { $0.id == id }), let runner = remote[repository.id]?[index] else { return }
+            remote[repository.id]?[index] = GitHubRunner(
+                id: runner.id, name: runner.name, status: runner.status, busy: runner.busy,
+                labels: (["self-hosted", "macOS", "ARM64"] + labels).map { GitHubRunnerLabel(name: $0) }
+            )
+        }
+
+        func failLabelChanges(_ fails: Bool) { failsLabelChanges = fails }
+
+        func customLabels(of id: Int, in repository: GitHubRepository) -> [String] {
+            (remote[repository.id]?.first { $0.id == id }?.labels.map(\.name) ?? []).filter { !["self-hosted", "macOS", "ARM64"].contains($0) }
         }
 
         func failRemoval(of id: Int?) { failingRemoval = id }
@@ -187,7 +205,10 @@ struct RunnerProvisionerTests {
                 remote[request.repository.id, default: []].removeAll { $0.name == request.runnerName }
             }
             defer { nextIdentifier += 1 }
-            try addRunner(repository: request.repository, identifier: identifier, name: request.runnerName)
+            try addRunner(
+                repository: request.repository, identifier: identifier, name: request.runnerName,
+                labels: ["self-hosted", "macOS", "ARM64"] + request.labels
+            )
             if shouldFail { throw TestFailure("Installation failed after registration.") }
             if FileManager.default.fileExists(atPath: owner.path(percentEncoded: false)) {
                 try FileManager.default.removeItem(at: owner)
@@ -316,6 +337,40 @@ struct RunnerProvisionerTests {
         let requests = await client.installations
         #expect(requests.count == 4)
         #expect(requests.allSatisfy { $0.labels == ["ci-host", "xcode-runnerkit"] })
+    }
+
+    @Test func aMacsLabelsGoOnItsRunnersAndLeaveThemWithItsList() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root)
+        try await client.addRunner(
+            repository: firstRepository, identifier: 1, name: "existing",
+            labels: ["self-hosted", "macOS", "ARM64", "ci-host", "xcode-runnerkit"]
+        )
+        try installation.saveRunnerLabels(["fast"])
+        _ = try await provisioner.reconcile(repositories: [firstRepository], capacity: 2, token: "access-token")
+        // The existing runner keeps the label that someone gave it, and the new one is registered with the same.
+        #expect(await client.customLabels(of: 1, in: firstRepository) == ["ci-host", "fast", "xcode-runnerkit"])
+        #expect(await client.installations.map(\.labels) == [["ci-host", "fast", "xcode-runnerkit"]])
+        #expect(try installation.appliedRunnerLabels() == ["fast"])
+
+        // A label that left the list stays recorded until every runner lost it.
+        try installation.saveRunnerLabels(["xcode-27"])
+        await client.failLabelChanges(true)
+        let failed = try await provisioner.reconcile(repositories: [firstRepository], capacity: 2, token: "access-token")
+        #expect(failed.first?.errorMessage == "Label change failed.")
+        #expect(try installation.appliedRunnerLabels() == ["fast", "xcode-27"])
+        await client.failLabelChanges(false)
+        let changed = try await provisioner.reconcile(repositories: [firstRepository], capacity: 2, token: "access-token")
+        #expect(changed.first?.errorMessage == nil)
+        #expect(await client.customLabels(of: 1, in: firstRepository) == ["ci-host", "xcode-27", "xcode-runnerkit"])
+        #expect(await client.customLabels(of: 100, in: firstRepository) == ["ci-host", "xcode-27", "xcode-runnerkit"])
+        #expect(try installation.appliedRunnerLabels() == ["xcode-27"])
+
+        // Runners that have the list are left alone.
+        let changes = await client.labelChanges
+        _ = try await provisioner.reconcile(repositories: [firstRepository], capacity: 2, token: "access-token")
+        #expect(await client.labelChanges == changes)
     }
 
     @Test func decreasingCapacityPreservesBusyAndIdleListeners() async throws {

@@ -8,6 +8,7 @@ enum ManagedMacsRequest: Codable, Sendable {
     case configurePool(PoolSettingsDraft.Changes, mac: HostPairing.ID)
     case saveStorage(directory: String, mac: HostPairing.ID)
     case saveXcode(developerDirectory: String?, mac: HostPairing.ID)
+    case saveRunnerLabels([String], mac: HostPairing.ID)
     case setPaused(Bool, mac: HostPairing.ID)
     case restart(mac: HostPairing.ID)
     /// Ends the pairing between the host and a Mac.
@@ -106,12 +107,12 @@ final class ManagedMacsRelay {
     }
 
     /// - Parameter dashboard: The pairing of the dashboard that sent the request.
-    /// - Returns: The reply, and whether a Mac saved an edited job limit, so that this host registers its runners
-    ///   as it does after Apply in its own pane for the Mac.
+    /// - Returns: The reply, and whether a Mac saved an edited job limit or runner labels, so that this host updates
+    ///   its runners as it does after the change in its own pane for the Mac.
     func answer(
         _ request: ManagedMacsRequest, from dashboard: HostPairing.ID
-    ) async -> (reply: HostLinkReply, limitChanged: Bool) {
-        var limitChanged = false
+    ) async -> (reply: HostLinkReply, registrationsChanged: Bool) {
+        var registrationsChanged = false
         do {
             switch request {
             case .read(let refreshing):
@@ -120,11 +121,14 @@ final class ManagedMacsRelay {
                 try await relay(.configurePool(changes), to: mac)
                 // The dashboard sends a limit only when it was edited. This host's last read of the Mac may be older
                 // than the limit that the edit replaced, so it does not decide whether the limit changed.
-                limitChanged = changes.maximumConcurrentJobs != nil
+                registrationsChanged = changes.maximumConcurrentJobs != nil
             case .saveStorage(let directory, let mac):
                 try await relay(.saveStorage(directory: directory), to: mac)
             case .saveXcode(let developerDirectory, let mac):
                 try await relay(.saveXcode(developerDirectory: developerDirectory), to: mac)
+            case .saveRunnerLabels(let labels, let mac):
+                try await relay(.saveRunnerLabels(labels), to: mac)
+                registrationsChanged = true
             case .setPaused(let isPaused, let mac):
                 try await relay(.setPaused(isPaused), to: mac)
             case .restart(let mac):
@@ -163,7 +167,7 @@ final class ManagedMacsRelay {
                 pairing?.cancel()
                 await pairing?.value
             }
-            return (.macs(report(for: dashboard)), limitChanged)
+            return (.macs(report(for: dashboard)), registrationsChanged)
         } catch {
             return (.refused(error.localizedDescription), false)
         }
