@@ -227,6 +227,9 @@ final class PairedMacs: MacList {
     private(set) var discoveryMessage: String?
     private(set) var codeConfirmation: CodeConfirmation?
     private var confirmation: (id: UUID, continuation: CheckedContinuation<Void, any Error>)?
+    /// Whether this Mac is pairing with a Mac. One pairing shows its code at a time.
+    private(set) var isPairing = false
+    static let alreadyPairing = HostLinkError.refused("\(HostPane.macName) is already pairing with a Mac.")
     private var endpoints: [HostPairing.ID: NWEndpoint] = [:]
     /// Every management service found, by pairing ID. A Mac advertises its new pairing before this host saves it.
     private var advertised: [HostPairing.ID: NWEndpoint] = [:]
@@ -354,7 +357,12 @@ final class PairedMacs: MacList {
     /// pairing on the Mac.
     @discardableResult
     func pair(at endpoint: NWEndpoint) async throws -> PairedMac {
-        defer { codeConfirmation = nil }
+        guard !isPairing else { throw Self.alreadyPairing }
+        isPairing = true
+        defer {
+            isPairing = false
+            codeConfirmation = nil
+        }
         let (pairing, hostID) = try await HostLink.requestPairing(
             at: endpoint, pairingID: UUID(), requesterName: name, role: role
         ) { macName, code in
@@ -648,7 +656,7 @@ final class PairedMacs: MacList {
         }
         // The host reads or changes one of its Macs before it answers, within its own time limits.
         let timeout = switch request {
-        case .read(nil), .discover, .pair, .confirmCode, .cancelPairing: HostLink.requestTimeout
+        case .read(refreshing: nil), .discover, .pair, .confirmCode, .cancelPairing: HostLink.requestTimeout
         case .read: HostLink.requestTimeout * 3
         case .configurePool, .saveStorage, .remove: Self.changeTimeout
         }

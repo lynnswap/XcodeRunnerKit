@@ -162,8 +162,9 @@ struct HostOverviewView<Settings: HostSettingsDisplay>: View {
     let settings: Settings
     let github: GitHubReport
     let mac: MacReference
-    /// Why the Mac refused the last GitHub request from a dashboard, or why it did not confirm it.
-    var requestError: String?
+    /// What a dashboard's last requests to the Mac left to tell: a refusal, or a Mac that was removed but could not
+    /// be told.
+    var notices: [String] = []
     let actions: GitHubActions
     /// Shows the GitHub pane, where the sign-in code and the repository selection are.
     let showGitHub: () -> Void
@@ -187,8 +188,8 @@ struct HostOverviewView<Settings: HostSettingsDisplay>: View {
             } footer: {
                 if github.managesMacs { Text("Counts include the Macs that \(mac.object) manages.") }
             }
-            if let requestError {
-                Section { ErrorText(requestError) }
+            if !notices.isEmpty {
+                Section { ForEach(notices, id: \.self) { ErrorText($0) } }
             }
         }
     }

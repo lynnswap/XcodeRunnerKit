@@ -12,10 +12,13 @@ enum ManagedMacsRequest: Codable, Sendable {
     /// Lists the Macs that wait to pair with the host. The host keeps looking while dashboards keep asking.
     case discover
     /// Starts pairing the host with a waiting Mac. Later reads carry the code to confirm, and the result.
-    case pair(waitingMac: WaitingMac.ID)
+    ///
+    /// - Parameter attempt: Names this pairing, so that the dashboard reads and cancels only its own.
+    case pair(waitingMac: WaitingMac.ID, attempt: UUID)
     /// Confirms that the Mac being paired shows the same code as the report.
     case confirmCode
-    case cancelPairing
+    /// Stops the pairing that the dashboard started as `attempt`, if the host is still pairing for it.
+    case cancelPairing(attempt: UUID)
 }
 
 /// The Macs that a host manages, as its own window lists them and as it sends them to a dashboard.
@@ -36,11 +39,13 @@ struct ManagedMacsReport: Codable, Equatable, Sendable {
     let waitingMacs: [WaitingMac]
     let discoveryMessage: String?
     let codeConfirmation: PairedMacs.CodeConfirmation?
-    /// Whether the host is pairing with a Mac for a dashboard.
+    /// The last pairing that a dashboard started.
+    let pairingAttempt: UUID?
+    /// Whether the host is still pairing for `pairingAttempt`.
     let isPairing: Bool
-    /// The Mac that the last pairing for a dashboard added.
+    /// The Mac that `pairingAttempt` added.
     let pairedMac: ListedMac?
-    /// Why the last pairing for a dashboard failed.
+    /// Why `pairingAttempt` failed.
     let pairingError: String?
 }
 
@@ -54,6 +59,7 @@ final class ManagedMacsRelay {
     private let macs: PairedMacs
     private let canAddMacs: @MainActor () -> Bool
     private var pairing: Task<Void, Never>?
+    private var pairingAttempt: UUID?
     private var pairedMac: ListedMac?
     private var pairingError: String?
     private var discovery: Task<Void, Never>?
@@ -73,8 +79,8 @@ final class ManagedMacsRelay {
                 )
             },
             message: macs.message, canAddMacs: canAddMacs(), waitingMacs: macs.waitingMacs,
-            discoveryMessage: macs.discoveryMessage, codeConfirmation: macs.codeConfirmation, isPairing: pairing != nil,
-            pairedMac: pairedMac, pairingError: pairingError
+            discoveryMessage: macs.discoveryMessage, codeConfirmation: macs.codeConfirmation,
+            pairingAttempt: pairingAttempt, isPairing: pairing != nil, pairedMac: pairedMac, pairingError: pairingError
         )
     }
 
@@ -98,11 +104,11 @@ final class ManagedMacsRelay {
                 try requireCanAddMacs()
                 lastDiscoveryRequest = .now
                 discoverWhileAsked()
-            case .pair(let waitingMac):
+            case .pair(let waitingMac, let attempt):
                 try requireCanAddMacs()
-                guard pairing == nil, macs.codeConfirmation == nil else {
-                    throw HostLinkError.refused("\(HostPane.macName) is already pairing with a Mac.")
-                }
+                // This host's own Add Mac sheet, or another dashboard, may be pairing.
+                guard pairing == nil, !macs.isPairing else { throw PairedMacs.alreadyPairing }
+                pairingAttempt = attempt
                 pairedMac = nil
                 pairingError = nil
                 pairing = Task {
@@ -116,7 +122,8 @@ final class ManagedMacsRelay {
                 }
             case .confirmCode:
                 macs.confirmCode()
-            case .cancelPairing:
+            case .cancelPairing(let attempt):
+                guard attempt == pairingAttempt else { break }
                 pairing?.cancel()
                 await pairing?.value
             }

@@ -197,7 +197,9 @@ private struct DashboardPaneView: View {
                     DashboardHostPane(hosts: hosts, host: host) { settings, report, github in
                         HostOverviewView(
                             settings: report, github: github, mac: MacReference(name: host.name),
-                            requestError: settings.githubError, actions: actions(for: host)
+                            // Removing one of the host's Macs returns here, where its notice stays visible.
+                            notices: [settings.githubError, hosts.macsManaged(by: host.id).message].compactMap { $0 },
+                            actions: actions(for: host)
                         ) {
                             navigation.pane = .github(host.id)
                         }

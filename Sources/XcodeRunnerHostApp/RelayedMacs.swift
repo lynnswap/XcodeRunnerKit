@@ -110,21 +110,25 @@ final class RelayedMacs: MacList {
     /// Has the host pair with a waiting Mac. The host pairs while the person confirms the code on the dashboard and
     /// allows the pairing on the Mac.
     func pair(with id: WaitingMac.ID) async throws -> ListedMac {
+        let attempt = UUID()
         do {
-            show(try await hosts.requestManagedMacs(.pair(waitingMac: id), from: host))
+            show(try await hosts.requestManagedMacs(.pair(waitingMac: id, attempt: attempt), from: host))
             while true {
                 try await Task.sleep(for: Self.pairingInterval)
                 let changeCounts = changeCounts
                 let report = try await hosts.requestManagedMacs(.read(refreshing: nil), from: host)
                 show(report, readSince: changeCounts)
+                // Another dashboard's pairing replaces this one's result once this one ended.
+                guard report.pairingAttempt == attempt else { throw HostLinkError.unexpectedReply }
                 if let mac = report.pairedMac { return mac }
                 if let error = report.pairingError { throw HostLinkError.refused(error) }
                 guard report.isPairing else { throw HostLinkError.unexpectedReply }
             }
         } catch {
-            // The host may still be pairing, with no dashboard left to show the code: this sheet was cancelled, or
-            // a request to the host failed. The task that ends here may be cancelled, so another one tells the host.
-            Task { _ = try? await self.hosts.requestManagedMacs(.cancelPairing, from: self.host) }
+            // The host may still be pairing for this attempt, with no dashboard left to show the code: this sheet was
+            // cancelled, or a request to the host failed. The task that ends here may be cancelled, so another one
+            // tells the host.
+            Task { _ = try? await self.hosts.requestManagedMacs(.cancelPairing(attempt: attempt), from: self.host) }
             throw error
         }
     }
