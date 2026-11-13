@@ -102,7 +102,7 @@ final class HostManagement {
                     advertising: advertises ? .bonjour(name: serviceName, type: HostLink.managementService, txtRecord: txtRecord) : nil,
                     ready: { port in await self.listenerIsReady(port, for: pairing.id) },
                     connected: { version in await self.connected(pairing.id, version: version) }
-                ) { request, reply in
+                ) { request, reply, next in
                     switch request {
                     case .settings(let request):
                         guard let settings = await self.settings else {
@@ -158,6 +158,18 @@ final class HostManagement {
                             return
                         }
                         try await reply(await github.answer(request))
+                    case .operation(.start(let operation)):
+                        // A managing host sends this Mac its jobs through the runners that it registers.
+                        guard role == .dashboard, let settings = await self.settings else {
+                            try await reply(.refused(role == .dashboard
+                                ? "\(self.name) cannot run builds for another Mac."
+                                : "\(self.name) runs builds only for a dashboard."))
+                            return
+                        }
+                        try await settings.operations.run(operation, for: pairing.id, next: next, reply: reply)
+                    case .operation:
+                        // These follow a start that this Mac took, on its connection.
+                        try await reply(.refused("\(self.name) has no operation that this message belongs to."))
                     case .unpair:
                         // Replying after the pairing is removed keeps the other Mac from forgetting a Mac that still
                         // accepts it.

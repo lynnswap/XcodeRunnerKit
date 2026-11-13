@@ -29,6 +29,7 @@ enum HostLinkRequest: Codable, Sendable {
     case github(GitHubRequest)
     case macs(ManagedMacsRequest)
     case runners(RunnerRequest)
+    case operation(RemoteOperationRequest)
     /// Asks the Mac to forget this pairing.
     case unpair
 }
@@ -70,10 +71,49 @@ enum RunnerRequest: Codable, Sendable {
     case markRemoved(runner: String)
 }
 
+/// Runs a build or test of a dashboard's checkout on a host. One operation's messages share a connection: the
+/// dashboard sends `start`, the checkout's files, and `filesEnd`, and the host answers with `RemoteOperationEvent`s
+/// until `finished`. The host stops the operation when the connection ends before the dashboard sends `received`.
+enum RemoteOperationRequest: Codable, Sendable {
+    case start(RemoteOperation)
+    /// A piece of a tar archive of the checkout's files.
+    case files(Data)
+    case filesEnd
+    /// The dashboard has every event up to `finished`.
+    case received
+}
+
+/// A build or test that a dashboard asks a host to run.
+struct RemoteOperation: Codable, Equatable, Sendable {
+    /// Identifies the checkout's repository on the dashboard. The host unpacks every checkout of a repository at the
+    /// same path, because compiler cache entries name source files by their paths.
+    let repository: String
+    /// The name of the folder that the host unpacks the checkout into.
+    let name: String
+    /// The directory inside the checkout that the operation runs in, or an empty string for the checkout itself.
+    let directory: String
+    /// The `xcode-runner` command: `build`, `build-for-testing`, or `test`.
+    let action: String
+    /// The command's options, without those that name the host's own folders.
+    let arguments: [String]
+}
+
+enum RemoteOperationEvent: Codable, Sendable {
+    /// The host takes the operation. Its output names the checkout and the operation's output by these folders.
+    case accepted(checkoutDirectory: String, outputDirectory: String)
+    case output(Data)
+    /// The command's exit status. The log and result bundle follow.
+    case exited(Int32)
+    /// A piece of a tar archive of the log and result bundle.
+    case results(Data)
+    case finished
+}
+
 enum HostLinkReply: Codable, Sendable {
     case settings(HostSettingsReport)
     case github(GitHubReport)
     case macs(ManagedMacsReport)
+    case operation(RemoteOperationEvent)
     case hostName(String)
     case runners(RunnerInventory)
     case archive(URL)
@@ -239,7 +279,7 @@ enum HostLink {
     static let versionKeyName = "version"
     /// The version of the messages that paired Macs exchange. Raise it with every change after which a Mac running
     /// the previous version could not read a request, a reply, or a report.
-    static let version = 3
+    static let version = 4
     /// A connection whose key the other Mac rejects keeps waiting instead of failing, so requests stop after this long.
     static let requestTimeout = Duration.seconds(10)
 
@@ -285,17 +325,42 @@ enum HostLink {
         _ request: HostLinkRequest, to endpoint: NWEndpoint, key: SymmetricKey, identity: String,
         version: Int = version, timeout: Duration = requestTimeout
     ) async throws -> HostLinkReply {
+        try await exchange(with: endpoint, key: key, identity: identity, version: version) { exchange in
+            try await within(timeout) {
+                try await exchange.send(request)
+                return try await exchange.receive()
+            }
+        }
+    }
+
+    /// One connection's messages, for a request that takes several.
+    struct Exchange: Sendable {
+        let send: @Sendable (HostLinkRequest) async throws -> Void
+        /// Throws `HostLinkError.incompatible` when the Mac answers with another version.
+        let receive: @Sendable () async throws -> HostLinkReply
+    }
+
+    /// Connects to a paired Mac for `body`, failing promptly when the Mac rejects the key or cannot be reached. The
+    /// connection ends when `body` returns.
+    ///
+    /// - Parameter version: The version of this Mac's messages.
+    static func exchange<Result: Sendable>(
+        with endpoint: NWEndpoint, key: SymmetricKey, identity: String, version: Int = version,
+        _ body: @escaping @Sendable (Exchange) async throws -> Result
+    ) async throws -> Result {
         let connection = NetworkConnection(to: endpoint, using: clientParameters(key: key, identity: identity))
         return try await whileConnected(connection) { connection in
-            try await within(timeout) {
-                try await connection.send(Versioned(request, version: version))
-                let reply = try await connection.receive().content
-                guard reply.version == version else {
-                    throw HostLinkError.incompatible(VersionMismatch(theirs: reply.version, own: version))
+            try await body(Exchange(
+                send: { try await connection.send(Versioned($0, version: version)) },
+                receive: {
+                    let reply = try await connection.receive().content
+                    guard reply.version == version else {
+                        throw HostLinkError.incompatible(VersionMismatch(theirs: reply.version, own: version))
+                    }
+                    guard let payload = reply.payload else { throw HostLinkError.unexpectedReply }
+                    return payload
                 }
-                guard let payload = reply.payload else { throw HostLinkError.unexpectedReply }
-                return payload
-            }
+            ))
         }
     }
 
@@ -307,12 +372,16 @@ enum HostLink {
     ///   - version: The version of this Mac's messages.
     ///   - ready: Called with the listening port once the listener is ready.
     ///   - connected: Called with the version of each request's sender.
-    ///   - handle: Answers a request through `reply`, and can act after replying.
+    ///   - handle: Answers a request through `reply`, and can act after replying. `next` waits for the following
+    ///     message of a request that takes several, and throws when the connection ends.
     static func listen(
         key: SymmetricKey, identity: String, version: Int = version, advertising service: BonjourListenerProvider?,
         ready: @escaping @Sendable (NWEndpoint.Port) async -> Void,
         connected: @escaping @Sendable (_ version: Int) async -> Void,
-        handle: @escaping @Sendable (HostLinkRequest, _ reply: (HostLinkReply) async throws -> Void) async throws -> Void
+        handle: @escaping @Sendable (
+            HostLinkRequest, _ reply: @escaping @Sendable (HostLinkReply) async throws -> Void,
+            _ next: @escaping @Sendable () async throws -> HostLinkRequest
+        ) async throws -> Void
     ) async throws {
         let listener = try NetworkListener(for: service, using: serverParameters(key: key, identity: identity))
         listener.onStateUpdate { listener, state in
@@ -321,14 +390,22 @@ enum HostLink {
         }
         try await listener.run { connection in
             do {
-                for try await message in connection.messages {
-                    await connected(message.content.version)
-                    guard message.content.version == version, let request = message.content.payload else {
+                // Receiving throws when the connection ends.
+                while true {
+                    let message = try await connection.receive().content
+                    await connected(message.version)
+                    guard message.version == version, let request = message.payload else {
                         // The sender reads this reply's version and not its payload.
                         try await connection.send(Versioned(HostLinkReply.refused("The Macs run different versions."), version: version))
                         continue
                     }
-                    try await handle(request) { try await connection.send(Versioned($0, version: version)) }
+                    try await handle(request, { try await connection.send(Versioned($0, version: version)) }) {
+                        let following = try await connection.receive().content
+                        guard following.version == version, let request = following.payload else {
+                            throw HostLinkError.unexpectedReply
+                        }
+                        return request
+                    }
                 }
             } catch {
                 // One connection's failure, such as a wrong key, does not stop the listener.
@@ -547,7 +624,8 @@ enum HostLink {
         }
     }
 
-    private static func within<Result: Sendable>(
+    /// Runs `operation`, and throws `HostLinkError.timedOut` when it takes longer than `timeout`.
+    static func within<Result: Sendable>(
         _ timeout: Duration, _ operation: @escaping @Sendable () async throws -> Result
     ) async throws -> Result {
         try await withThrowingTaskGroup { group in

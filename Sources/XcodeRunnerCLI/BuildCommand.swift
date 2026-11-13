@@ -47,6 +47,8 @@ struct BuildOptions: ParsableArguments {
     @Option var scheme: String
     @Option(help: "xcodebuild destination specifier (default: platform=macOS). Not used with Simulator options.")
     var destination: String?
+    @Option(help: "Run on a host Mac that XcodeHomeRunner on this Mac shows, with the files of the Git checkout that contains the current directory. The log and result bundle are copied to --output-directory on this Mac. Relative paths in other options are resolved in the host's copy of the current directory, and absolute paths, as for --developer-directory, name the host's files.")
+    var host: String?
     @Option var outputDirectory: String?
     @Option var derivedData: String?
     @Option var developerDirectory: String?
@@ -76,6 +78,7 @@ struct BuildOptions: ParsableArguments {
     var additionalArguments: [String] = []
 
     func run(_ action: XcodeBuildAction) async throws {
+        if let host { try run(action, onHostNamed: host) }
         let host = try HostInstallation.hostedConfiguration()
         let sources: [XcodeBuildSource] = [
             workspace.map { .workspace(Self.url($0)) },
@@ -169,6 +172,70 @@ struct BuildOptions: ParsableArguments {
             }
             throw ExitCode(exitCode)
         }
+    }
+
+    /// Replaces this process with the app, which sends the checkout to the host and shows the operation's output.
+    ///
+    /// The pairings with hosts are in the app's Keychain item, and macOS gives it to the app alone.
+    private func run(_ action: XcodeBuildAction, onHostNamed host: String) throws -> Never {
+        guard action != .testWithoutBuilding else {
+            throw ValidationError("A host keeps no build products after an operation. Use test with --host.")
+        }
+        let localFolders = [
+            ("--derived-data", derivedData), ("--compilation-cache", compilationCache), ("--pool-directory", poolDirectory),
+            ("--build-service-path", buildServicePath),
+        ].filter { $0.1 != nil }.map(\.0)
+        guard localFolders.isEmpty else {
+            throw ValidationError("\(localFolders.joined(separator: ", ")) cannot be used with --host. The host uses its own folders and build service.")
+        }
+        let sources = [workspace, project, package].compactMap { $0 }
+        guard sources.count == 1, let source = sources.first else {
+            throw ValidationError("Specify exactly one of --workspace, --project, or --package.")
+        }
+        // The host runs the operation in its copy of the current directory.
+        guard !source.hasPrefix("/") else {
+            throw ValidationError("With --host, name the workspace, project, or package relative to the current directory.")
+        }
+        _ = try requestedDestination()
+        guard let tool = Bundle.main.executableURL?.resolvingSymlinksInPath() else {
+            throw ValidationError("Cannot locate the xcode-runner executable.")
+        }
+        let app = tool.deletingLastPathComponent().deletingLastPathComponent().appending(path: "MacOS/XcodeHomeRunner")
+        guard FileManager.default.isExecutableFile(atPath: app.path(percentEncoded: false)) else {
+            throw ValidationError("--host needs the xcode-runner inside XcodeHomeRunner.app, at Contents/Helpers/xcode-runner.")
+        }
+        let arguments = [
+            app.path(percentEncoded: false), "--run-on-host", host,
+            "--output-directory", Self.url(outputDirectory ?? "XcodeRunnerOutput").path(percentEncoded: false),
+            "--", action.rawValue,
+        ] + hostArguments
+        let values = arguments.map { strdup($0) } + [nil]
+        execv(values[0], values)
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSURLErrorKey: app])
+    }
+
+    /// The options that a host takes: every option except `--host` and those that name this Mac's folders.
+    private var hostArguments: [String] {
+        var arguments: [String] = []
+        func add(_ name: String, _ value: String?) {
+            if let value { arguments.append("--\(name)=\(value)") }
+        }
+        add("workspace", workspace)
+        add("project", project)
+        add("package", package)
+        add("scheme", scheme)
+        add("destination", destination)
+        add("developer-directory", developerDirectory)
+        if cacheDiagnostics { arguments.append("--cache-diagnostics") }
+        if mapSourceDirectory { arguments.append("--map-source-directory") }
+        for mapping in prefixMappings { add("prefix-mapping", mapping) }
+        add("simulator-runtime", simulatorRuntime)
+        add("simulator-device-type", simulatorDeviceType)
+        if freshSimulator { arguments.append("--fresh-simulator") }
+        for setting in settings { add("setting", setting) }
+        for value in environment { add("environment", value) }
+        if !additionalArguments.isEmpty { arguments += ["--"] + additionalArguments }
+        return arguments
     }
 
     private static func writeError(_ line: String) {

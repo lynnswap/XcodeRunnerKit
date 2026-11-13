@@ -79,6 +79,10 @@ Use repeated `--setting NAME=VALUE` and `--environment NAME=VALUE` options
 for build settings and environment values. `--developer-directory` selects
 Xcode without changing `xcode-select`.
 
+`--host` runs `build`, `build-for-testing`, or `test` on another Mac's host
+with the files of the current checkout. See
+[Build or test on a host from another Mac](Documentation/NativeHost.md#build-or-test-on-a-host-from-another-mac).
+
 ### Automatic Xcode components
 
 If xcodebuild reports that the Metal Toolchain is missing, the runner downloads

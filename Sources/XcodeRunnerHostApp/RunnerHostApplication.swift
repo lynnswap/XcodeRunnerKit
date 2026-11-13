@@ -21,6 +21,14 @@ struct HostOptions: ParsableCommand {
     @Option(help: .hidden) var parentProcessID: Int32?
     @Option(help: .hidden) var ownershipDescriptor: Int32?
 
+    /// The host that runs `operation`. `xcode-runner` starts the app with this for its `--host` option, because macOS
+    /// gives the pairings in the app's Keychain item to the app alone.
+    @Option(help: .hidden) var runOnHost: String?
+    /// This Mac's folder for the operation's log and result bundle.
+    @Option(help: .hidden) var outputDirectory: String?
+    /// An `xcode-runner` command and its options, after `--`.
+    @Argument(parsing: .remaining, help: .hidden) var operation: [String] = []
+
     var installation: HostInstallation {
         HostInstallation(homeDirectory: homeDirectory.map { URL(filePath: $0) } ?? HostInstallation.defaultHomeDirectory)
     }
@@ -31,14 +39,18 @@ struct HostOptions: ParsableCommand {
         if settingsService && !host {
             throw ValidationError("--settings-service requires --host. Run the installer in this app to update the LaunchAgent.")
         }
+        if (runOnHost == nil) != operation.isEmpty || (runOnHost == nil) != (outputDirectory == nil) {
+            throw ValidationError("--run-on-host requires --output-directory and a command after --.")
+        }
     }
 }
 
 /// The host app's entry point. The app target calls `main()` from its `main.swift`.
 public enum RunnerHostApplication {
-    /// Runs the menu bar host when launched with `--host`, and a runner service helper when launched with
-    /// `--service-directory`. Opened without either, the app starts the host that the installer set up on this Mac,
-    /// or shows a dashboard of hosts on other Macs when this Mac has none.
+    /// Runs the menu bar host when launched with `--host`, a runner service helper when launched with
+    /// `--service-directory`, and a build or test on another Mac's host when launched with `--run-on-host`. Opened
+    /// without them, the app starts the host that the installer set up on this Mac, or shows a dashboard of hosts on
+    /// other Macs when this Mac has none.
     @MainActor public static func main() {
         do {
             let options = try HostOptions.parse()
@@ -55,6 +67,23 @@ public enum RunnerHostApplication {
                 withExtendedLifetime(service) { dispatchMain() }
             }
             let installation = options.installation
+            if let hostName = options.runOnHost, let outputDirectory = options.outputDirectory {
+                let command = Task {
+                    await RemoteOperationClient.run(
+                        options.operation, onHostNamed: hostName, installation: installation,
+                        outputDirectory: URL(filePath: outputDirectory)
+                    )
+                }
+                let signals = [SIGINT, SIGTERM].map { number in
+                    signal(number, SIG_IGN)
+                    let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+                    source.setEventHandler { command.cancel() }
+                    source.resume()
+                    return source
+                }
+                Task { Darwin.exit(await command.value) }
+                withExtendedLifetime(signals) { dispatchMain() }
+            }
             let application = NSApplication.shared
             if !options.host {
                 guard let label = Bundle.main.bundleIdentifier, hasInstalledHost(label, in: installation) else {

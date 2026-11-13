@@ -245,6 +245,58 @@ under **Dashboards** on the host ends it there; the dashboard then shows the
 host as not found until you remove it. Dashboards find hosts with Bonjour on the
 local network, as pairing Macs does.
 
+## Build or test on a host from another Mac
+
+A Mac that shows a host as a dashboard can run a build or test of a checkout on
+that host without GitHub. The repository needs no runners, GitHub App
+installation, or selection on the host, so a repository that should not register
+self-hosted runners can use the host too.
+
+In the checkout on the dashboard's Mac, run the `xcode-runner` inside the app
+with `--host` and the host's name as the dashboard lists it:
+
+```sh
+/Applications/XcodeHomeRunner.app/Contents/Helpers/xcode-runner test \
+  --host "Build Mac" --package . --scheme PackageName
+```
+
+`build`, `build-for-testing`, and `test` take `--host` with their other
+options. The command sends the checkout, shows the operation's output as it
+runs, and exits with the operation's status. Interrupting the command stops the
+operation on the host.
+
+- **Files.** The command sends the Git checkout that contains the current
+  directory: tracked files as they are in the working tree, and untracked files
+  that Git does not ignore, including those of submodules. It sends them again
+  for every operation, and does not send the Git history. The host runs the
+  operation in its copy of the current directory, so name the workspace,
+  project, or package relative to that directory.
+- **Host settings.** The operation uses the host's storage, its saved Xcode, and
+  its build service, and takes a place in its job limit together with the jobs
+  from GitHub, waiting in arrival order. An absolute path in an option, such as
+  `--developer-directory` or the source of a `--prefix-mapping`, names a file on
+  the host. The operation runs with the host app's environment, not with the
+  shell's.
+- **Results.** The log and result bundle are copied to `--output-directory` on
+  the dashboard's Mac, `XcodeRunnerOutput` by default. In the output and the
+  copied log, the host's copy of the checkout and its output folder appear as
+  the matching folders on the dashboard's Mac, so the paths in compiler messages
+  open there. The result bundle keeps the host's paths. The host removes its
+  copy of the checkout and the build products when the operation ends.
+- **Compiler cache.** Operations from dashboards share one cache on the host,
+  apart from the caches of the repositories that run jobs from GitHub. The host
+  unpacks every worktree of a repository at the same path, so a later operation
+  reuses the entries of earlier ones, also from another worktree.
+
+`--derived-data`, `--compilation-cache`, `--pool-directory`,
+`--build-service-path`, and `test-without-building` cannot be used with `--host`,
+because the host uses its own folders and keeps no build products after an
+operation.
+
+The command starts the app that contains it to reach the host, because macOS
+gives the pairings in the app's Keychain item to the app alone. It finds the
+host with Bonjour on the local network, as the dashboard does.
+
 ## Settings from CLI and MCP
 
 The GUI, CLI, and MCP server use the same settings operations. Read the catalog
