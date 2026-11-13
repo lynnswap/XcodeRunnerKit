@@ -429,7 +429,8 @@ final class HostSettingsModel: HostSettingsDisplay {
     /// Saves the labels for this Mac's runners, from this Mac's window or from a Mac paired with it.
     private func saveRunnerLabels(_ labels: [String]) throws(HostSettingsError) {
         let labels = try RunnerLabels.validated(labels)
-        guard hostState != .stopping, !hasAcceptedRestart else {
+        // A synchronization that already read the list would leave the runners with the earlier one.
+        guard hostState != .stopping, !hasAcceptedRestart, !github.isBusy else {
             throw HostSettingsError("\(HostPane.macName) cannot save runner labels now. Try again in a moment.")
         }
         let shown = RunnerLabels.text(runnerLabels)

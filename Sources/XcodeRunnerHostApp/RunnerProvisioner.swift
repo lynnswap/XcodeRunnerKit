@@ -276,6 +276,8 @@ actor RunnerProvisioner {
             }
         }
         var everyRunnerHasItsLabels = labelProblems.isEmpty
+        /// The runners whose labels this call compared with the list.
+        var runnersWithTheirLabels: Set<String> = []
         var authenticationError: GitHubError?
 
         for repository in repositories {
@@ -300,6 +302,7 @@ actor RunnerProvisioner {
                     try await client.setCustomLabels(next.sorted(), ofRunner: runner.id, in: repository, accessToken: token)
                 }
                 hasItsLabels = true
+                runnersWithTheirLabels.formUnion(knownRunners.map(\.name))
                 let inheritedLabels = knownRunners.isEmpty ? sharedLabels : Self.commonCustomLabels(of: knownRunners)
                 let labels = Set(inheritedLabels).subtracting(retiredLabels).union(macLabels).union(["xcode-runnerkit"]).sorted()
                 let individualCount = local.count(where: { $0.hasIndividualService })
@@ -377,9 +380,14 @@ actor RunnerProvisioner {
             }
             statuses.append(Self.status(repository: repository, capacity: capacity, runners: knownRunners, problems: problems))
         }
-        // Once every runner has the list, the labels that left it are on no runner. If this record is not written,
-        // the next call finds nothing to change on the runners and writes it then.
-        if everyRunnerHasItsLabels, !retiredLabels.isEmpty { try? await mac.markLabelsApplied(macLabels.sorted()) }
+        // Once every runner has the list, the labels that left it are on no runner. A runner that this call could
+        // not compare can still have one: its registration could not be read, or its repository was not reconciled.
+        // If this record is not written, the next call finds nothing to change on the runners and writes it then.
+        let hostedRunners = Set(initialLocal.filter { $0.isHosted && !$0.hasIndividualService }.map(\.name))
+        if everyRunnerHasItsLabels, initialScan.problems.isEmpty, hostedRunners.isSubset(of: runnersWithTheirLabels),
+           !retiredLabels.isEmpty {
+            try? await mac.markLabelsApplied(macLabels.sorted())
+        }
 
         for repository in unlinked {
             var remaining = 0
