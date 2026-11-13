@@ -187,6 +187,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private var storagePreparation: Task<Void, Never>?
     private var signals: [any DispatchSourceSignal] = []
     private var stopping = false
+    private var restartsAfterStopping = false
     private var stopped = false
     private var terminationReplyPending = false
 
@@ -216,7 +217,15 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             ])
         }
         super.init()
-        if settingsService { settingsServer = HostSettingsServer(github: settings.github) }
+        if settingsService {
+            settingsServer = HostSettingsServer(github: settings.github)
+            // Only the installed LaunchAgent starts the host with its settings service, and launchd starts that host
+            // again after it exits unsuccessfully.
+            settings.restartHost = { [unowned self] in
+                restartsAfterStopping = true
+                beginShutdown()
+            }
+        }
     }
 
     deinit { close(lockDescriptor) }
@@ -367,6 +376,11 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             await githubMonitoring?.value
             for runner in runners.values { await runner.task.value }
             stopped = true
+            if restartsAfterStopping {
+                print("Runner host stopped to restart.")
+                fflush(nil)
+                Darwin.exit(EXIT_FAILURE)
+            }
             print("Runner host stopped.")
             if terminationReplyPending {
                 NSApplication.shared.reply(toApplicationShouldTerminate: true)

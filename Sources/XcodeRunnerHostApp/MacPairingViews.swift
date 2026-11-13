@@ -274,7 +274,8 @@ private struct PairedMacSettingsSections<Macs: MacList>: View {
         }
         StorageSection(
             settings: report, directory: $settings.storageDirectoryInput, isSaving: settings.isSavingStorage,
-            saveError: settings.storageSaveError, choose: nil
+            saveError: settings.storageSaveError, mac: MacReference(name: mac.name), isRestarting: settings.isRestarting,
+            restartError: settings.restartError, choose: nil, restart: { Task { await macs.restart(mac.id) } }
         ) {
             Task { await macs.saveStorageDirectory(of: mac.id) }
         }

@@ -133,6 +133,8 @@ protocol HostSettingsDisplay {
     var storageError: String? { get }
     var canApplyPoolConfiguration: Bool { get }
     var canEditStorage: Bool { get }
+    /// Whether the host can restart itself. A host that launchd did not start cannot.
+    var canRestart: Bool { get }
 }
 
 extension HostSettingsDisplay {
@@ -159,6 +161,9 @@ extension HostSettingsDisplay {
         }
         return "New jobs can start while slots are available."
     }
+
+    /// Whether a saved storage folder waits for the next host launch.
+    var storageChangeIsPending: Bool { savedStorageDirectory != nil && savedStorageDirectory != activeStorageDirectory }
 
     var storageMessage: String {
         if hostState == .waitingForStorage {
@@ -188,6 +193,7 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
     let storageError: String?
     let canApplyPoolConfiguration: Bool
     let canEditStorage: Bool
+    let canRestart: Bool
 
     @MainActor init(_ settings: some HostSettingsDisplay) {
         hostState = settings.hostState
@@ -203,6 +209,7 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
         storageError = settings.storageError
         canApplyPoolConfiguration = settings.canApplyPoolConfiguration
         canEditStorage = settings.canEditStorage
+        canRestart = settings.canRestart
     }
 }
 
@@ -239,6 +246,11 @@ final class HostSettingsModel: HostSettingsDisplay {
     private(set) var savedStorageDirectory: URL?
     private(set) var isSavingStorage = false
     var storageDirectoryInput = ""
+    /// Stops the host and has launchd start it again. `nil` for a host that launchd did not start.
+    var restartHost: (@MainActor () -> Void)?
+    /// Whether this Mac accepted a paired Mac's request to restart. It then takes no other change, whatever state the
+    /// host reaches before it stops.
+    private var hasAcceptedRestart = false
 
     init(
         installation: HostInstallation, github: GitHubHostSettings? = nil,
@@ -290,7 +302,18 @@ final class HostSettingsModel: HostSettingsDisplay {
     }
 
     /// Whether the storage folder can be edited and saved. It stays available while the host needs attention.
-    var canEditStorage: Bool { !isSavingStorage && hostState != .stopping }
+    var canEditStorage: Bool { !isSavingStorage && hostState != .stopping && !hasAcceptedRestart }
+
+    /// A restart waits for a save in progress, whose folder or limit the next launch would otherwise not have.
+    var canRestart: Bool {
+        restartHost != nil && hostState != .stopping && !hasAcceptedRestart && !isSaving && !isSavingStorage
+    }
+
+    /// Restarts the host, which applies a saved storage folder. Runner services stop until it has started again.
+    func restart() {
+        guard canRestart else { return }
+        restartHost?()
+    }
 
     func saveStorageSelection() async {
         guard canEditStorage else { return }
@@ -407,7 +430,9 @@ final class HostSettingsModel: HostSettingsDisplay {
         }
     }
 
-    var canApplyPoolConfiguration: Bool { hasLoadedPoolStatus && !isSaving && !github.isBusy && hostState != .stopping }
+    var canApplyPoolConfiguration: Bool {
+        hasLoadedPoolStatus && !isSaving && !github.isBusy && hostState != .stopping && !hasAcceptedRestart
+    }
 
     func applyPoolConfiguration() async {
         guard canApplyPoolConfiguration else { return }
@@ -439,6 +464,7 @@ final class HostSettingsModel: HostSettingsDisplay {
             case .read: break
             case .configurePool(let changes): try await applyPairedMacChanges(changes)
             case .saveStorage(let directory): try await savePairedMacStorage(directory)
+            case .restart: try acceptRestart()
             }
             return .settings(HostSettingsReport(self))
         } catch {
@@ -461,6 +487,22 @@ final class HostSettingsModel: HostSettingsDisplay {
         }
         await refreshPoolStatus()
     }
+
+    /// Takes a paired Mac's request to restart. From here on this Mac takes no other change, so that none starts
+    /// between the reply and the restart, which the caller performs with `performAcceptedRestart()`.
+    private func acceptRestart() throws(HostSettingsError) {
+        guard restartHost != nil else {
+            throw HostSettingsError("\(HostPane.macName) cannot restart XcodeHomeRunner by itself. Restart it on that Mac.")
+        }
+        // The pane that asked may show settings from before a save started here.
+        guard canRestart else {
+            throw HostSettingsError("\(HostPane.macName) cannot restart now. Try again in a moment.")
+        }
+        hasAcceptedRestart = true
+    }
+
+    /// Restarts the host once the paired Mac that asked has the reply.
+    func performAcceptedRestart() { restartHost?() }
 
     // With this guard's `throw` inline in `answer(_:)`, the Xcode 27.1 optimizer crashes while compiling it for Release.
     private func savePairedMacStorage(_ directory: String) async throws(HostSettingsError) {
@@ -504,7 +546,8 @@ struct HostMacSettingsView: View {
             }
             StorageSection(
                 settings: model, directory: $model.storageDirectoryInput, isSaving: model.isSavingStorage,
-                saveError: model.storageSaveError, choose: { Task { await model.chooseStorageDirectory() } }
+                saveError: model.storageSaveError, mac: .thisMac, isRestarting: model.hostState == .stopping, restartError: nil,
+                choose: { Task { await model.chooseStorageDirectory() } }, restart: { model.restart() }
             ) {
                 Task { await model.saveStorageSelection() }
             }
@@ -594,9 +637,15 @@ struct StorageSection<Settings: HostSettingsDisplay>: View {
     @Binding var directory: String
     let isSaving: Bool
     let saveError: String?
+    let mac: MacReference
+    let isRestarting: Bool
+    /// Why the Mac refused to restart for a paired Mac, or why it did not confirm that it restarts.
+    let restartError: String?
     /// Chooses a folder on this Mac. A paired Mac's pane has no folder panel for another Mac.
     let choose: (() -> Void)?
+    let restart: () -> Void
     let save: () -> Void
+    @State private var isConfirmingRestart = false
 
     var body: some View {
         Section {
@@ -614,12 +663,38 @@ struct StorageSection<Settings: HostSettingsDisplay>: View {
             }
             .disabled(!canEdit)
             Text(settings.storageMessage).foregroundStyle(.secondary)
+            // A host that launchd did not start is restarted by whoever started it.
+            if settings.storageChangeIsPending, settings.canRestart || isRestarting || isSaving {
+                HStack {
+                    Spacer()
+                    Button(isRestarting ? "Restarting…" : "Restart to Apply…") { isConfirmingRestart = true }
+                        .disabled(isRestarting || isSaving || !settings.canRestart)
+                        .accessibilityIdentifier("restart-host")
+                }
+            }
             if let error = settings.storageError { ErrorText(error) }
             if let saveError { ErrorText(saveError) }
+            if let restartError { ErrorText(restartError) }
         } header: {
             Text("Storage")
         } footer: {
             Text("A changed folder is applied before runners start on the next launch. Existing data is copied and its original files are kept. Stop other tools that use these files before restarting the host.")
+        }
+        .confirmationDialog("Restart XcodeHomeRunner on \(mac.object)?", isPresented: $isConfirmingRestart) {
+            Button("Restart", role: .destructive, action: restart)
+        } message: {
+            Text("\(runningJobs) Restarting stops \(mac.possessive) runner services until the host has started again, with the jobs that they run, and the saved storage folder is applied then.")
+        }
+    }
+
+    /// The Xcode jobs counted at the last read. The count includes jobs that other tools started in the same
+    /// execution pool, which a restart leaves running, and a job can have started since.
+    private var runningJobs: String {
+        switch settings.poolStatus?.activeJobCount {
+        case nil: "The Xcode jobs running on \(mac.object) are unknown."
+        case 0?: "No Xcode jobs were running on \(mac.object) at the last read."
+        case 1?: "1 Xcode job was running on \(mac.object) at the last read."
+        case let count?: "\(count) Xcode jobs were running on \(mac.object) at the last read."
         }
     }
 
