@@ -125,7 +125,7 @@ final class PairedMacSettings {
     ///
     /// - Parameter send: Asks the Mac named `macName` to restart and returns the settings it answers with first.
     func restart(on macName: String, send: () async throws -> HostSettingsReport) async {
-        guard report?.canRestart == true, !isRestarting else { return }
+        guard report?.canRestart == true, !isRestarting, !isSaving, !isSavingStorage else { return }
         isRestarting = true
         beginChange()
         defer {

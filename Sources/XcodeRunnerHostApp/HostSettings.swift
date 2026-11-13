@@ -301,7 +301,8 @@ final class HostSettingsModel: HostSettingsDisplay {
     /// Whether the storage folder can be edited and saved. It stays available while the host needs attention.
     var canEditStorage: Bool { !isSavingStorage && hostState != .stopping }
 
-    var canRestart: Bool { restartHost != nil && hostState != .stopping }
+    /// A restart waits for a save in progress, whose folder or limit the next launch would otherwise not have.
+    var canRestart: Bool { restartHost != nil && hostState != .stopping && !isSaving && !isSavingStorage }
 
     /// Restarts the host, which applies a saved storage folder. Runner services stop until it has started again.
     func restart() {
@@ -647,11 +648,11 @@ struct StorageSection<Settings: HostSettingsDisplay>: View {
             .disabled(!canEdit)
             Text(settings.storageMessage).foregroundStyle(.secondary)
             // A host that launchd did not start is restarted by whoever started it.
-            if settings.storageChangeIsPending, settings.canRestart || isRestarting {
+            if settings.storageChangeIsPending, settings.canRestart || isRestarting || isSaving {
                 HStack {
                     Spacer()
                     Button(isRestarting ? "Restarting…" : "Restart to Apply…") { isConfirmingRestart = true }
-                        .disabled(isRestarting)
+                        .disabled(isRestarting || isSaving || !settings.canRestart)
                         .accessibilityIdentifier("restart-host")
                 }
             }
@@ -666,17 +667,18 @@ struct StorageSection<Settings: HostSettingsDisplay>: View {
         .confirmationDialog("Restart XcodeHomeRunner on \(mac.object)?", isPresented: $isConfirmingRestart) {
             Button("Restart", role: .destructive, action: restart)
         } message: {
-            Text("\(runningJobs) Restarting stops \(mac.possessive) runner services until the host has started again, and the saved storage folder is applied then.")
+            Text("\(runningJobs) Restarting stops \(mac.possessive) runner services until the host has started again, with the jobs that they run, and the saved storage folder is applied then.")
         }
     }
 
-    /// The jobs that a restart would stop.
+    /// The Xcode jobs counted at the last read. The count includes jobs that other tools started in the same
+    /// execution pool, which a restart leaves running, and a job can have started since.
     private var runningJobs: String {
         switch settings.poolStatus?.activeJobCount {
-        case nil: "The running Xcode jobs on \(mac.object) are unknown."
-        case 0?: "No Xcode jobs are running on \(mac.object)."
-        case 1?: "1 Xcode job is running on \(mac.object), and restarting stops it."
-        case let count?: "\(count) Xcode jobs are running on \(mac.object), and restarting stops them."
+        case nil: "The Xcode jobs running on \(mac.object) are unknown."
+        case 0?: "No Xcode jobs were running on \(mac.object) at the last read."
+        case 1?: "1 Xcode job was running on \(mac.object) at the last read."
+        case let count?: "\(count) Xcode jobs were running on \(mac.object) at the last read."
         }
     }
 
