@@ -243,6 +243,8 @@ final class HostSettingsModel: HostSettingsDisplay {
     /// Answers a dashboard's requests about the Macs that this host manages.
     @ObservationIgnored private(set) lazy var managedMacsRelay = ManagedMacsRelay(macs: managedMacs) { [unowned self] in canAddMacs }
     let settingsService: HostSettingsService
+    /// Runs the builds and tests that dashboards send to this Mac.
+    let operations: RemoteOperations
     var hostState = HostState.starting
     var runners: [RunnerSettingsRow] = []
     var runnerScanError: String?
@@ -277,13 +279,18 @@ final class HostSettingsModel: HostSettingsDisplay {
     /// host reaches before it stops.
     private var hasAcceptedRestart = false
 
-    /// - Parameter installedXcodes: Lists the Xcode apps on this Mac. Tests pass a list in place of Launch Services.
+    /// - Parameters:
+    ///   - installedXcodes: Lists the Xcode apps on this Mac. Tests pass a list in place of Launch Services.
+    ///   - operationTool: The command-line tool that runs a dashboard's build or test. Tests pass a script in place
+    ///     of the app's `xcode-runner`.
     init(
         installation: HostInstallation, github: GitHubHostSettings? = nil,
         management: HostManagement? = nil, managedMacs: PairedMacs? = nil,
-        installedXcodes: @escaping @Sendable () -> [InstalledXcode] = InstalledXcode.installed
+        installedXcodes: @escaping @Sendable () -> [InstalledXcode] = InstalledXcode.installed,
+        operationTool: URL = Bundle.main.bundleURL.appending(path: "Contents/Helpers/xcode-runner")
     ) {
         self.installation = installation
+        self.operations = RemoteOperations(installation: installation, tool: operationTool)
         // Reading status leaves an unconfigured pool unchanged.
         self.pool = HostExecutionPool(directory: installation.poolDirectory)
         self.settingsService = HostSettingsService(installation: installation, pool: pool, installedXcodes: installedXcodes)
@@ -309,6 +316,7 @@ final class HostSettingsModel: HostSettingsDisplay {
 
     func storageDidBecomeAvailable(_ storage: HostInstallation.Storage) {
         activeStorageDirectory = storage.directory
+        operations.storage = storage
         github.storageIsReady = true
         storageError = nil
         if savedStorageDirectory == nil {

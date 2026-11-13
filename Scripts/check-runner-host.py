@@ -134,6 +134,12 @@ with tempfile.TemporaryDirectory(prefix='Dashboard test ') as temporary:
             watched.process.kill()
             watched.process.wait()
             watched.close()
+    # The bundled CLI hands an operation for a host to the app, which has the pairings. This Mac paired with no host.
+    sent = subprocess.run(
+        [str(app/'Contents/Helpers/xcode-runner'), 'build', '--host', 'Missing Host', '--package', '.', '--scheme', 'Probe'],
+        env={**os.environ, 'HOME': str(home)}, cwd=temporary, capture_output=True, text=True)
+    assert sent.returncode == 1 and sent.stderr.startswith('Error: '), f'The app did not take the operation: {sent}'
+    assert not any(home.iterdir()), f'An operation for a host created host files: {sorted(home.rglob("*"))}'
 
 
 with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as temporary:
@@ -492,4 +498,4 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost storage change ') as tempora
         finally:
             stop_host(host, runners)
 
-print('PASS: dashboard launch without host files, runner lifecycle, hidden runner discovery, removal of runners unregistered from GitHub, prompt shutdown while storage is locked, recovery when unavailable storage returns, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')
+print('PASS: dashboard launch without host files, an operation for a host handed to the app, runner lifecycle, hidden runner discovery, removal of runners unregistered from GitHub, prompt shutdown while storage is locked, recovery when unavailable storage returns, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')

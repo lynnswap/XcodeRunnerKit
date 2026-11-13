@@ -2,6 +2,7 @@ import CryptoKit
 import Foundation
 import Network
 import Security
+import Synchronization
 import Testing
 import XcodeRunnerHostSupport
 import XcodeRunnerKit
@@ -50,14 +51,14 @@ struct HostPairingTests {
 
     private func managedMac(
         named name: String = "Managed", store: MemorySecretStore = MemorySecretStore(), at root: URL,
-        github: ((HostInstallation) -> GitHubHostSettings)? = nil
+        github: ((HostInstallation) -> GitHubHostSettings)? = nil, operationTool: URL = URL(filePath: "/usr/bin/false")
     ) -> HostSettingsModel {
         let installation = HostInstallation(homeDirectory: root.appending(path: "Home"))
         return HostSettingsModel(
             installation: installation, github: github?(installation),
             management: HostManagement(store: store, name: name, advertises: false),
             managedMacs: PairedMacs(store: MemorySecretStore(), name: name, role: .manager, browses: false),
-            installedXcodes: { [xcode] in [xcode] }
+            installedXcodes: { [xcode] in [xcode] }, operationTool: operationTool
         )
     }
 
@@ -602,6 +603,147 @@ struct HostPairingTests {
         await dashboard.shutDown()
     }
 
+    /// Stands in for `xcode-runner` on a host: prints how the host ran it and leaves a log and a result bundle. `test`
+    /// runs until the host stops it.
+    private func operationTool(at root: URL) throws -> URL {
+        let tool = root.appending(path: "xcode-runner")
+        try Data(#"""
+        #!/bin/bash
+        output=${2#--output-directory=}
+        mkdir -p "$output/Job/Results.xcresult"
+        echo "the log" > "$output/Job/xcodebuild.log"
+        echo "the results" > "$output/Job/Results.xcresult/Info.plist"
+        echo "arguments: $*"
+        echo "directory: $PWD"
+        echo "folder: $(basename "$(dirname "$PWD")")"
+        echo "files: $(find . \( -type f -o -type l \) | sort | tr '\n' ' ')"
+        if [ -L link ]; then echo "link: $(readlink link)"; fi
+        if [ "$1" = test ]; then
+            trap 'touch "$XCODE_RUNNER_HOST_ROOT/stopped"; exit 143' TERM
+            echo started
+            sleep 600 &
+            wait $!
+        fi
+        echo "Log: $output/Job/xcodebuild.log"
+        exit 3
+        """#.utf8).write(to: tool)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path(percentEncoded: false))
+        return tool
+    }
+
+    private func git(_ arguments: String..., in directory: URL) throws {
+        let git = Process()
+        git.executableURL = URL(filePath: "/usr/bin/git")
+        git.arguments = ["-C", directory.path(percentEncoded: false), "-c", "user.name=Test", "-c", "user.email=test@example.com"] + arguments
+        git.standardOutput = FileHandle.nullDevice
+        try git.run()
+        git.waitUntilExit()
+        #expect(git.terminationStatus == 0)
+    }
+
+    /// A host that a dashboard paired with, and a checkout on the dashboard with a file for each state that Git
+    /// knows.
+    private func hostAndCheckout(
+        at root: URL
+    ) async throws -> (host: HostSettingsModel, storage: HostInstallation.Storage, shown: PairedMac, endpoint: NWEndpoint, checkout: URL) {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let host = managedMac(at: root, operationTool: try operationTool(at: root))
+        let storage = try HostInstallation(homeDirectory: root.appending(path: "Home")).initializeStorage()
+        host.storageDidBecomeAvailable(storage)
+        let dashboard = PairedMacs(store: MemorySecretStore(), name: "Dashboard", role: .dashboard, browses: false)
+        let shown = try await pair(dashboard, with: host.management)
+        try await waitUntil { host.management.ports[shown.id] != nil }
+
+        let checkout = root.appending(path: "Project")
+        try FileManager.default.createDirectory(at: checkout.appending(path: "App"), withIntermediateDirectories: true)
+        try git("init", "--quiet", in: checkout)
+        for name in ["App/committed", "App/changed", "App/deleted", ".gitignore"] {
+            try Data((name == ".gitignore" ? "ignored\n" : "committed\n").utf8).write(to: checkout.appending(path: name))
+        }
+        try FileManager.default.createSymbolicLink(atPath: checkout.appending(path: "App/link").path(percentEncoded: false), withDestinationPath: "committed")
+        try git("add", ".", in: checkout)
+        try git("commit", "--quiet", "--message", "Files", in: checkout)
+        try Data("changed\n".utf8).write(to: checkout.appending(path: "App/changed"))
+        try FileManager.default.removeItem(at: checkout.appending(path: "App/deleted"))
+        try Data().write(to: checkout.appending(path: "App/untracked"))
+        try Data().write(to: checkout.appending(path: "App/ignored"))
+        return (host, storage, shown, try local(host.management.ports[shown.id]), checkout)
+    }
+
+    /// The folders that operations leave on a host.
+    private func remoteFolders(in storage: HostInstallation.Storage) -> [String] {
+        [storage.workDirectory, storage.buildDirectory].flatMap {
+            (try? FileManager.default.contentsOfDirectory(atPath: $0.appending(path: "Remote").path(percentEncoded: false))) ?? []
+        }
+    }
+
+    @Test func aDashboardRunsABuildOfItsCheckoutOnAHost() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (host, storage, shown, endpoint, directory) = try await hostAndCheckout(at: root)
+        let checkout = try await Checkout.containing(directory.appending(path: "App"))
+        #expect(checkout.directory == "App")
+        #expect(checkout.name == "Project")
+        let outputDirectory = root.appending(path: "Output")
+
+        let received = Output()
+        let status = try await RemoteOperationClient.run(
+            "build", arguments: ["--scheme=App", "--", "-quiet"], in: checkout, on: shown, at: endpoint,
+            outputDirectory: outputDirectory
+        ) { received.append($0) }
+        let lines = received.text.split(separator: "\n").map(String.init)
+
+        #expect(status == 3)
+        // The working tree is sent as it is, without what Git ignores.
+        #expect(lines.contains("files: ./changed ./committed ./link ./untracked "))
+        #expect(lines.contains("link: committed"))
+        // The host's folders are shown as this Mac's.
+        let local = checkout.root.path(percentEncoded: false)
+        #expect(lines.contains("directory: \(local)/App"))
+        #expect(lines.contains("Log: \(outputDirectory.path(percentEncoded: false))/Job/xcodebuild.log"))
+        let cache = storage.compilationCacheDirectory.appending(path: "remote").path(percentEncoded: false)
+        #expect(lines.contains("arguments: build --output-directory=\(outputDirectory.path(percentEncoded: false)) --compilation-cache=\(cache) --scheme=App -- -quiet"))
+        #expect(try String(contentsOf: outputDirectory.appending(path: "Job/xcodebuild.log"), encoding: .utf8) == "the log\n")
+        #expect(try String(contentsOf: outputDirectory.appending(path: "Job/Results.xcresult/Info.plist"), encoding: .utf8) == "the results\n")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: outputDirectory.path(percentEncoded: false)).sorted() == ["Job"])
+        // The host keeps the compiler cache and nothing else.
+        try await waitUntil { remoteFolders(in: storage).isEmpty }
+
+        await host.management.shutDown()
+    }
+
+    @Test func aHostStopsAnOperationWhenTheDashboardLeaves() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (host, storage, shown, endpoint, directory) = try await hostAndCheckout(at: root)
+        let checkout = try await Checkout.containing(directory)
+        let outputDirectory = root.appending(path: "Output")
+
+        let received = Output()
+        let test = Task {
+            try await RemoteOperationClient.run(
+                "test", arguments: [], in: checkout, on: shown, at: endpoint, outputDirectory: outputDirectory
+            ) { received.append($0) }
+        }
+        try await waitUntil { received.text.contains("started\n") }
+        #expect(received.text.contains("folder: 0\n"))
+
+        // A second operation on the repository gets a folder of its own while the first one runs.
+        let overlapping = Output()
+        _ = try await RemoteOperationClient.run(
+            "build", arguments: [], in: checkout, on: shown, at: endpoint, outputDirectory: outputDirectory
+        ) { overlapping.append($0) }
+        #expect(overlapping.text.contains("folder: 1\n"))
+
+        test.cancel()
+        await #expect(throws: (any Error).self) { try await test.value }
+        let stopped = root.appending(path: "Home/Library/Application Support/XcodeRunnerKit/stopped")
+        try await waitUntil { FileManager.default.fileExists(atPath: stopped.path(percentEncoded: false)) }
+        try await waitUntil { remoteFolders(in: storage).isEmpty }
+
+        await host.management.shutDown()
+    }
+
     @Test func macsThatRunDifferentVersionsSayWhichOneToUpdate() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -848,4 +990,13 @@ private actor Installs {
         try Data(registration.utf8).write(to: directory.appending(path: ".runner"))
         try Data().write(to: directory.appending(path: ".xcode-runner-host"))
     }
+}
+
+/// An operation's output as the dashboard received it.
+private final class Output: Sendable {
+    private let data = Mutex(Data())
+
+    func append(_ output: Data) { data.withLock { $0.append(output) } }
+
+    var text: String { data.withLock { String(decoding: $0, as: UTF8.self) } }
 }
