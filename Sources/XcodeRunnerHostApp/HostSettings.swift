@@ -457,7 +457,7 @@ final class HostSettingsModel: HostSettingsDisplay {
             case .read: break
             case .configurePool(let changes): try await applyPairedMacChanges(changes)
             case .saveStorage(let directory): try await savePairedMacStorage(directory)
-            case .restart: try requireCanRestart()
+            case .restart: try acceptRestart()
             }
             return .settings(HostSettingsReport(self))
         } catch {
@@ -481,12 +481,17 @@ final class HostSettingsModel: HostSettingsDisplay {
         await refreshPoolStatus()
     }
 
-    /// The caller restarts the host with `restart()` once the paired Mac has the reply.
-    private func requireCanRestart() throws(HostSettingsError) {
+    /// Takes a paired Mac's request to restart. From here on this Mac takes no other change, so that none starts
+    /// between the reply and the restart, which the caller performs with `performAcceptedRestart()`.
+    private func acceptRestart() throws(HostSettingsError) {
         guard canRestart else {
             throw HostSettingsError("\(HostPane.macName) cannot restart XcodeHomeRunner by itself. Restart it on that Mac.")
         }
+        hostState = .stopping
     }
+
+    /// Restarts the host once the paired Mac that asked has the reply.
+    func performAcceptedRestart() { restartHost?() }
 
     // With this guard's `throw` inline in `answer(_:)`, the Xcode 27.1 optimizer crashes while compiling it for Release.
     private func savePairedMacStorage(_ directory: String) async throws(HostSettingsError) {

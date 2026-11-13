@@ -120,7 +120,7 @@ final class HostManagement {
                             await settings.github.synchronize()
                         }
                         // The paired Mac has the reply, or its connection is gone.
-                        if case .restart = request, case .settings = answer { await settings.restart() }
+                        if case .restart = request, case .settings = answer { await settings.performAcceptedRestart() }
                         try delivery.get()
                     case .github(let request):
                         // A managing host registers this Mac's runners from its own sign-in and selection.

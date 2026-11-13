@@ -136,7 +136,13 @@ struct HostPairingTests {
 
         // The saved folder waits for the Mac's next launch. A host that launchd started restarts itself when asked.
         #expect(settings.report?.storageChangeIsPending == true)
+        // A host that someone started another way is restarted by them.
         #expect(settings.report?.canRestart == false)
+        guard case .refused(let refusal) = await managed.answer(.restart) else {
+            Issue.record("A host that launchd did not start accepted a restart.")
+            return
+        }
+        #expect(refusal == "\(HostPane.macName) cannot restart XcodeHomeRunner by itself. Restart it on that Mac.")
         var restarts = 0
         managed.restartHost = { restarts += 1 }
         await macs.checkStatus(of: mac.id, at: endpoint)
@@ -144,11 +150,8 @@ struct HostPairingTests {
         await macs.restart(mac.id)
         #expect(settings.restartError == nil)
         try await waitUntil { restarts == 1 }
-        // A host that someone started another way is restarted by them.
-        managed.restartHost = nil
-        await macs.restart(mac.id)
-        #expect(settings.restartError == "\(HostPane.macName) cannot restart XcodeHomeRunner by itself. Restart it on that Mac.")
-        #expect(restarts == 1)
+        // From the accepted request on, the Mac takes no change that the restart would lose.
+        #expect(!managed.canEditStorage)
 
         // A Mac that stops answering keeps only when its settings were last read.
         let readAt = settings.readAt
