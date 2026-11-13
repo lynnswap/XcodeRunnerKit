@@ -205,6 +205,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         var state: RunnerServiceState
         /// The process group of the runner's service, once it started.
         var processGroup: Int32?
+        /// Stops the service of a paused runner when the worker of its job ends.
+        var jobWatch: (worker: Int32, source: any DispatchSourceProcess)?
     }
     private var runners: [URL: HostedRunner] = [:]
     private let settings: HostSettingsModel
@@ -448,10 +450,16 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             var stopping: [(directory: URL, task: Task<Void, Never>)] = []
             for (directory, runner) in runners {
                 // A service that just ended has no processes to list, and no job.
-                if runner.state == .running, let group = runner.processGroup, (try? Self.groupRunsJob(group)) == true {
+                if runner.state == .running, let group = runner.processGroup,
+                   let worker = (try? Self.jobWorker(inGroup: group)) ?? nil {
                     finishing.insert(directory)
+                    if runner.jobWatch?.worker != worker {
+                        runner.jobWatch?.source.cancel()
+                        runners[directory]?.jobWatch = (worker, stopService(of: directory, after: worker))
+                    }
                     continue
                 }
+                runner.jobWatch?.source.cancel()
                 runners[directory] = nil
                 // Every idle runner is asked to stop before any of them is waited for, so none takes a job meanwhile.
                 runner.task.cancel()
@@ -485,9 +493,24 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Whether the official runner in a service's process group runs a job, for which it starts a worker process.
-    private nonisolated static func groupRunsJob(_ identifier: Int32) throws -> Bool {
-        try groupMembers(identifier).contains { member in
+    /// Stops a paused runner's service as soon as its job's worker ends. A runner whose repository has jobs waiting
+    /// takes the next one before the next scan of the runners.
+    private func stopService(of directory: URL, after worker: Int32) -> any DispatchSourceProcess {
+        let source = DispatchSource.makeProcessSource(identifier: worker, eventMask: .exit, queue: .main)
+        source.setEventHandler {
+            source.cancel()
+            guard let runner = self.runners[directory], runner.jobWatch?.worker == worker else { return }
+            self.runners[directory]?.jobWatch = nil
+            // The Mac can have resumed while the job ran. The next scan removes a service that stops here.
+            if self.settings.isPaused { runner.task.cancel() }
+        }
+        source.resume()
+        return source
+    }
+
+    /// The worker process that the official runner in a service's process group started for the job that it runs.
+    private nonisolated static func jobWorker(inGroup identifier: Int32) throws -> Int32? {
+        try groupMembers(identifier).first { member in
             var info = proc_bsdshortinfo()
             let size = Int32(MemoryLayout<proc_bsdshortinfo>.size)
             // A worker that ended stays listed until the runner collects its status.

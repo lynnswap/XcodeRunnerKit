@@ -295,8 +295,17 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost pause ') as temporary:
     # The host finds the worker by its executable's name, which a script or a link to another tool does not have.
     subprocess.run(['xcrun', 'clang', '-x', 'c', '-', '-o', str(busy/'Runner.Worker')], check=True,
                    input=b'#include <unistd.h>\nint main(void) { sleep(600); return 0; }\n')
-    (busy/'runsvc.sh').write_text((busy/'runsvc.sh').read_text().replace(
-        'python3 worker.py &', './Runner.Worker &\necho $! > job.pid\npython3 worker.py &'))
+    # A runner whose repository has jobs waiting takes the next one as soon as a job ends.
+    (busy/'runsvc.sh').write_text('''#!/bin/bash
+trap 'kill -INT "$PID"' TERM INT
+./Runner.Worker &
+echo $! > job.pid
+(while ps -o stat= -p $(cat job.pid) | grep -qv Z; do sleep 0.02; done; ./Runner.Worker) &
+python3 worker.py &
+PID=$!
+# Waiting also returns when another child ends, as the first job does.
+while kill -0 "$PID" 2>/dev/null; do wait "$PID"; done
+''')
     with (root/'host.log').open('wb') as log:
         watched = HostOutput([executable, '--host', '--home-directory', str(home)], log, env={**os.environ, 'HOME':str(home)})
         try:
