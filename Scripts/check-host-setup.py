@@ -374,6 +374,25 @@ int main(int argc, char **argv) {
                                     env=environment, check=True, capture_output=True, text=True).stdout)["configuration"]["maximumConcurrentJobs"] == 1
     assert service_markers[1].read_text()
     assert service_markers[0].read_text() == saved_service_launches
+    # A saved Xcode is for hosted operations that name none. DEVELOPER_DIR and --developer-directory come first.
+    missing_xcode = root / "Missing Xcode/Contents/Developer"
+    settings_command = [str(executable), "host", "settings"]
+    saved_xcode = json.loads(subprocess.run(
+        settings_command + ["update", json.dumps({"scope": "xcode", "developerDirectory": str(missing_xcode)})],
+        env=environment, check=True, capture_output=True, text=True, timeout=HANG_LIMIT).stdout)
+    assert saved_xcode["settings"][0]["value"] == str(missing_xcode), saved_xcode
+    unnamed_environment = {key: value for key, value in hosted_environment.items() if key != "DEVELOPER_DIR"}
+    unnamed = subprocess.run(build, env=unnamed_environment, capture_output=True, text=True, timeout=300)
+    assert unnamed.returncode != 0 and str(missing_xcode) in unnamed.stdout + unnamed.stderr, (
+        unnamed.stdout[-2000:], unnamed.stderr[-2000:])
+    subprocess.run(build, env={**unnamed_environment, "DEVELOPER_DIR": str(developer)},
+                   check=True, capture_output=True, text=True, timeout=300)
+    subprocess.run(build[:-3] + ["--developer-directory", str(developer), *build[-3:]], env=unnamed_environment,
+                   check=True, capture_output=True, text=True, timeout=300)
+    cleared_xcode = json.loads(subprocess.run(
+        settings_command + ["update", json.dumps({"scope": "xcode", "developerDirectory": None})],
+        env=environment, check=True, capture_output=True, text=True, timeout=HANG_LIMIT).stdout)
+    assert cleared_xcode["settings"][0]["value"] is None, cleared_xcode
     assert json.loads(subprocess.run(service_command + ["status", "--json"], env=environment,
                                     check=True, capture_output=True, text=True, timeout=HANG_LIMIT).stdout) == configured_service_status
     assert json.loads(subprocess.run(service_command + ["configure", "--json"], env=environment,
@@ -835,4 +854,4 @@ with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
     assert failure.returncode != 0 and b"certificate signing identity" in failure.stderr
     assert (applications / "XcodeHomeRunner.app/Contents/MacOS/XcodeHomeRunner").read_text() == "updated executable"
 
-print("PASS: unified storage, serialized initial selection and runner registration/startup migration, unavailable parent rejection at setup and admitted execution, saved and per-operation build service selection, explicit overrides, managed directory recovery and permissions, existing data preservation, cleanup, physical runner work paths, common-host opt-in, app and bundled CLI installation, migration from the previous host name and a separate CLI, and signature requirements")
+print("PASS: unified storage, serialized initial selection and runner registration/startup migration, unavailable parent rejection at setup and admitted execution, saved and per-operation build service selection, a saved Xcode behind DEVELOPER_DIR and --developer-directory, explicit overrides, managed directory recovery and permissions, existing data preservation, cleanup, physical runner work paths, common-host opt-in, app and bundled CLI installation, migration from the previous host name and a separate CLI, and signature requirements")

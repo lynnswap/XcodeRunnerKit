@@ -131,6 +131,10 @@ protocol HostSettingsDisplay {
     var savedStorageDirectory: URL? { get }
     var activeStorageDirectory: URL? { get }
     var storageError: String? { get }
+    /// The Xcode that the Mac's jobs use when they name none, or `nil` for the Xcode that `xcode-select` names.
+    var savedDeveloperDirectory: URL? { get }
+    var installedXcodes: [InstalledXcode] { get }
+    var xcodeError: String? { get }
     var canApplyPoolConfiguration: Bool { get }
     var canEditStorage: Bool { get }
     /// Whether the host can restart itself. A host that launchd did not start cannot.
@@ -162,6 +166,11 @@ extension HostSettingsDisplay {
         return "New jobs can start while slots are available."
     }
 
+    /// Whether the saved Xcode is not among the installed ones, so that jobs that name no Xcode fail.
+    var savedXcodeIsMissing: Bool {
+        savedDeveloperDirectory.map { saved in !installedXcodes.contains { $0.developerDirectory == saved } } ?? false
+    }
+
     /// Whether a saved storage folder waits for the next host launch.
     var storageChangeIsPending: Bool { savedStorageDirectory != nil && savedStorageDirectory != activeStorageDirectory }
 
@@ -191,6 +200,9 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
     let savedStorageDirectory: URL?
     let activeStorageDirectory: URL?
     let storageError: String?
+    let savedDeveloperDirectory: URL?
+    let installedXcodes: [InstalledXcode]
+    let xcodeError: String?
     let canApplyPoolConfiguration: Bool
     let canEditStorage: Bool
     let canRestart: Bool
@@ -207,6 +219,9 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
         savedStorageDirectory = settings.savedStorageDirectory
         activeStorageDirectory = settings.activeStorageDirectory
         storageError = settings.storageError
+        savedDeveloperDirectory = settings.savedDeveloperDirectory
+        installedXcodes = settings.installedXcodes
+        xcodeError = settings.xcodeError
         canApplyPoolConfiguration = settings.canApplyPoolConfiguration
         canEditStorage = settings.canEditStorage
         canRestart = settings.canRestart
@@ -246,20 +261,32 @@ final class HostSettingsModel: HostSettingsDisplay {
     private(set) var savedStorageDirectory: URL?
     private(set) var isSavingStorage = false
     var storageDirectoryInput = ""
+    private(set) var savedDeveloperDirectory: URL?
+    private(set) var installedXcodes: [InstalledXcode] = []
+    private(set) var xcodeError: String?
+    private(set) var xcodeSaveError: String?
+    private(set) var isSavingXcode = false
+    /// The selected Xcode's `Contents/Developer` directory, or an empty string for the system selection.
+    var xcodeSelectionInput = ""
+    /// The installed Xcodes are listed again after this long, because listing them reads every Xcode's version.
+    private static let xcodeListLifetime = Duration.seconds(30)
+    private var xcodesListedAt: ContinuousClock.Instant?
     /// Stops the host and has launchd start it again. `nil` for a host that launchd did not start.
     var restartHost: (@MainActor () -> Void)?
     /// Whether this Mac accepted a paired Mac's request to restart. It then takes no other change, whatever state the
     /// host reaches before it stops.
     private var hasAcceptedRestart = false
 
+    /// - Parameter installedXcodes: Lists the Xcode apps on this Mac. Tests pass a list in place of Launch Services.
     init(
         installation: HostInstallation, github: GitHubHostSettings? = nil,
-        management: HostManagement? = nil, managedMacs: PairedMacs? = nil
+        management: HostManagement? = nil, managedMacs: PairedMacs? = nil,
+        installedXcodes: @escaping @Sendable () -> [InstalledXcode] = InstalledXcode.installed
     ) {
         self.installation = installation
         // Reading status leaves an unconfigured pool unchanged.
         self.pool = HostExecutionPool(directory: installation.poolDirectory)
-        self.settingsService = HostSettingsService(installation: installation, pool: pool)
+        self.settingsService = HostSettingsService(installation: installation, pool: pool, installedXcodes: installedXcodes)
         self.github = github ?? GitHubHostSettings(installation: installation, pool: pool)
         self.management = management ?? HostManagement(
             store: KeychainSecretStore.managingHost(hostRoot: installation.hostRoot), name: HostPane.macName
@@ -273,6 +300,7 @@ final class HostSettingsModel: HostSettingsDisplay {
         } catch {
             storageSaveError = "Could not read the saved storage folder: \(error.localizedDescription)"
         }
+        refreshXcodes()
         // The Macs paired with this Mac read and change its settings through the owner of this Mac's window.
         self.management.settings = self
         self.github.pairedMacs = self.managedMacs
@@ -390,8 +418,50 @@ final class HostSettingsModel: HostSettingsDisplay {
         }
     }
 
+    /// Reads the saved Xcode, which the CLI and MCP can change, and lists the installed ones when the list is old.
+    private func refreshXcodes() {
+        let previousInput = savedDeveloperDirectory?.path(percentEncoded: false) ?? ""
+        do {
+            savedDeveloperDirectory = try installation.developerDirectory()
+            xcodeError = nil
+            if xcodeSelectionInput == previousInput {
+                xcodeSelectionInput = savedDeveloperDirectory?.path(percentEncoded: false) ?? ""
+            }
+        } catch {
+            xcodeError = "Could not read the saved Xcode: \(error.localizedDescription)"
+        }
+        if let xcodesListedAt, xcodesListedAt.duration(to: .now) < Self.xcodeListLifetime { return }
+        installedXcodes = settingsService.installedXcodes()
+        xcodesListedAt = .now
+    }
+
+    func saveXcodeSelection() async {
+        guard !isSavingXcode else { return }
+        do {
+            try saveDeveloperDirectory(xcodeSelectionInput.isEmpty ? nil : xcodeSelectionInput)
+            xcodeSaveError = nil
+        } catch {
+            xcodeSaveError = error.localizedDescription
+        }
+    }
+
+    /// Saves the Xcode for this Mac's jobs from this Mac's window or from a Mac paired with it.
+    private func saveDeveloperDirectory(_ path: String?) throws(HostSettingsError) {
+        if let path, !path.hasPrefix("/") { throw HostSettingsError("Enter an absolute path to an Xcode's Contents/Developer folder.") }
+        let previous = savedDeveloperDirectory?.path(percentEncoded: false) ?? ""
+        isSavingXcode = true
+        defer { isSavingXcode = false }
+        do {
+            savedDeveloperDirectory = try settingsService.saveDeveloperDirectory(path.map { URL(filePath: $0) })
+            if xcodeSelectionInput == previous { xcodeSelectionInput = savedDeveloperDirectory?.path(percentEncoded: false) ?? "" }
+        } catch {
+            throw HostSettingsError("Could not save the Xcode: \(error.localizedDescription)")
+        }
+    }
+
     func refreshPoolStatus() async {
         refreshStorageSelection()
+        refreshXcodes()
         do {
             let status = try await pool.status()
             poolStatus = status
@@ -464,6 +534,7 @@ final class HostSettingsModel: HostSettingsDisplay {
             case .read: break
             case .configurePool(let changes): try await applyPairedMacChanges(changes)
             case .saveStorage(let directory): try await savePairedMacStorage(directory)
+            case .saveXcode(let developerDirectory): try saveDeveloperDirectory(developerDirectory)
             case .restart: try acceptRestart()
             }
             return .settings(HostSettingsReport(self))
@@ -543,6 +614,12 @@ struct HostMacSettingsView: View {
                 saveError: model.saveError
             ) {
                 Task { await model.applyPoolConfiguration() }
+            }
+            XcodeSection(
+                settings: model, selection: $model.xcodeSelectionInput, isSaving: model.isSavingXcode,
+                saveError: model.xcodeSaveError, mac: .thisMac
+            ) {
+                Task { await model.saveXcodeSelection() }
             }
             StorageSection(
                 settings: model, directory: $model.storageDirectoryInput, isSaving: model.isSavingStorage,
@@ -628,6 +705,52 @@ struct XcodeExecutionSection<Settings: HostSettingsDisplay>: View {
             Text("The limit is shared by all repositories, and each repository registers that many runners. Running jobs finish before a lower limit applies. Idle Simulators stay booted for reuse until their retention ends.")
         }
     }
+}
+
+/// The Xcode that a Mac's jobs use when they name none, in its own window or in a paired Mac's pane for it.
+@MainActor
+struct XcodeSection<Settings: HostSettingsDisplay>: View {
+    let settings: Settings
+    /// The selected Xcode's `Contents/Developer` directory, or an empty string for the system selection.
+    @Binding var selection: String
+    let isSaving: Bool
+    let saveError: String?
+    let mac: MacReference
+    let save: () -> Void
+
+    var body: some View {
+        Section {
+            Picker("Xcode for jobs", selection: $selection) {
+                Text("System selection").tag("")
+                ForEach(settings.installedXcodes) { xcode in
+                    Text(xcode.name).tag(xcode.developerDirectory.path(percentEncoded: false))
+                }
+                // The saved Xcode stays selectable, so that the selection shows what is saved.
+                if settings.savedXcodeIsMissing, let saved {
+                    Text("Not installed: \(saved)").tag(saved)
+                }
+            }
+            .disabled(isSaving)
+            .accessibilityIdentifier("xcode-for-jobs")
+            HStack {
+                Spacer()
+                Button(isSaving ? "Saving…" : "Save", action: save)
+                    .disabled(isSaving || selection == saved ?? "")
+                    .accessibilityIdentifier("save-xcode")
+            }
+            if settings.savedXcodeIsMissing, let saved {
+                ErrorText("The saved Xcode at \(saved) is no longer installed on \(mac.object). Jobs that name no Xcode fail until another one is saved.")
+            }
+            if let error = settings.xcodeError { ErrorText(error) }
+            if let saveError { ErrorText(saveError) }
+        } header: {
+            Text("Xcode")
+        } footer: {
+            Text("Jobs on \(mac.object) use this Xcode unless their workflow passes --developer-directory or DEVELOPER_DIR. With System selection, they use the Xcode that xcode-select names.")
+        }
+    }
+
+    private var saved: String? { settings.savedDeveloperDirectory?.path(percentEncoded: false) }
 }
 
 /// A Mac's storage folder, in its own window or in a paired Mac's pane for it.

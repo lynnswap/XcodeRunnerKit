@@ -26,6 +26,10 @@ final class PairedMacSettings {
     private(set) var isSavingStorage = false
     private(set) var saveError: String?
     private(set) var storageSaveError: String?
+    /// The selected Xcode's `Contents/Developer` directory, or an empty string for the system selection.
+    var xcodeSelectionInput = ""
+    private(set) var isSavingXcode = false
+    private(set) var xcodeSaveError: String?
     private(set) var isRestarting = false
     /// Why the Mac refused to restart, or why it did not confirm that it restarts.
     private(set) var restartError: String?
@@ -42,7 +46,7 @@ final class PairedMacSettings {
 
     var canApplyPoolConfiguration: Bool { report?.canApplyPoolConfiguration == true && !isSaving }
 
-    var isChanging: Bool { isSaving || isSavingStorage || isRestarting || isChangingGitHub }
+    var isChanging: Bool { isSaving || isSavingStorage || isSavingXcode || isRestarting || isChangingGitHub }
 
     /// Shows newly read GitHub settings, with the saved selection in a selection that was not edited.
     fileprivate func show(_ github: GitHubReport) {
@@ -57,6 +61,9 @@ final class PairedMacSettings {
         if report.hasLoadedPoolStatus, report.poolError == nil { poolDraft.update(from: report.poolStatus?.configuration) }
         if storageDirectoryInput == self.report?.savedStorageDirectory?.path(percentEncoded: false) ?? "" {
             storageDirectoryInput = report.savedStorageDirectory?.path(percentEncoded: false) ?? ""
+        }
+        if xcodeSelectionInput == self.report?.savedDeveloperDirectory?.path(percentEncoded: false) ?? "" {
+            xcodeSelectionInput = report.savedDeveloperDirectory?.path(percentEncoded: false) ?? ""
         }
         self.report = report
         self.readAt = readAt
@@ -118,6 +125,28 @@ final class PairedMacSettings {
             storageDirectoryInput = report.savedStorageDirectory?.path(percentEncoded: false) ?? ""
         } catch {
             storageSaveError = Self.changeFailure(error, on: macName)
+        }
+    }
+
+    /// Saves the selected Xcode for the Mac's jobs.
+    ///
+    /// - Parameter send: Sends the selection to the Mac named `macName`, as a `Contents/Developer` directory or `nil`
+    ///   for the system selection, and returns the settings it answers with.
+    func saveXcodeSelection(on macName: String, send: (String?) async throws -> HostSettingsReport) async {
+        guard report != nil, !isSavingXcode else { return }
+        isSavingXcode = true
+        beginChange()
+        defer {
+            isSavingXcode = false
+            endChange()
+        }
+        do {
+            let report = try await send(xcodeSelectionInput.isEmpty ? nil : xcodeSelectionInput)
+            xcodeSaveError = nil
+            show(report)
+            xcodeSelectionInput = report.savedDeveloperDirectory?.path(percentEncoded: false) ?? ""
+        } catch {
+            xcodeSaveError = Self.changeFailure(error, on: macName)
         }
     }
 
@@ -575,6 +604,13 @@ final class PairedMacs: MacList {
         }
     }
 
+    func saveXcodeSelection(of id: HostPairing.ID) async {
+        guard let mac = mac(id), let settings = settings[id] else { return }
+        await settings.saveXcodeSelection(on: mac.name) { developerDirectory in
+            try await self.requestSettings(.saveXcode(developerDirectory: developerDirectory), from: mac)
+        }
+    }
+
     func restart(_ id: HostPairing.ID) async {
         guard let mac = mac(id), let settings = settings[id] else { return }
         await settings.restart(on: mac.name) { try await self.requestSettings(.restart, from: mac) }
@@ -717,7 +753,7 @@ final class PairedMacs: MacList {
         let timeout = switch request {
         case .read(refreshing: nil), .discover, .pair, .confirmCode, .cancelPairing: HostLink.requestTimeout
         case .read: HostLink.requestTimeout * 3
-        case .configurePool, .saveStorage, .restart, .remove: Self.changeTimeout
+        case .configurePool, .saveStorage, .saveXcode, .restart, .remove: Self.changeTimeout
         }
         let reply = try await send(.macs(request), to: mac, at: endpoint, timeout: timeout)
         switch reply {

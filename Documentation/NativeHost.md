@@ -284,6 +284,7 @@ Available scopes and when they take effect:
 | --- | --- | --- |
 | `pool` | `maximumConcurrentJobs`, `simulatorRetention` | Next admission or Simulator maintenance; active jobs continue |
 | `buildService` | `path` (absolute path or `null` to clear) | Next CLI operation |
+| `xcode` | `developerDirectory` (an Xcode's `Contents/Developer` path, or `null` for the system selection) | Next CLI operation that names no Xcode |
 | `storage` | `directory` (absolute path to an existing folder) | Next host launch, after migration succeeds |
 | `githubRepositories` | `selectedRepositoryIDs` | Saved by the running app, then runner registrations synchronize |
 
@@ -348,6 +349,19 @@ To select a custom build service for hosted jobs, save its executable path:
 "$HOME/Library/Application Support/XcodeRunnerKit/bin/xcode-runner" \
   host build-service configure \
   --path /path/to/SWBBuildServiceBundle
+```
+
+To choose the Xcode for a Mac's jobs, select it under **Xcode** in the Mac's
+pane and choose **Save**. The pane lists the Xcode apps installed on that Mac,
+also when it is shown on the managing Mac or a dashboard. Jobs use the saved
+Xcode when they name none: `--developer-directory` and `DEVELOPER_DIR` come
+first, and with **System selection** jobs use the Xcode that `xcode-select`
+names. If the saved Xcode is removed, the pane says so, and jobs that name no
+Xcode fail until another one is saved. From the CLI or MCP:
+
+```sh
+xcode-runner host settings update \
+  '{"scope":"xcode","developerDirectory":"/Applications/Xcode.app/Contents/Developer"}'
 ```
 
 The next job reads the saved path directly. No host restart or login-time

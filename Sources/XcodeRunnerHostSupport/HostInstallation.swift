@@ -39,6 +39,39 @@ package struct HostInstallation: Sendable {
     }
     private var storageRecord: URL { hostRoot.appending(path: "storage-directory") }
     private var buildServiceRecord: URL { hostRoot.appending(path: "build-service-path") }
+    private var developerDirectoryRecord: URL { Self.developerDirectoryRecord(hostRoot: hostRoot) }
+
+    /// The Xcode that hosted operations use when they name none, as its `Contents/Developer` directory.
+    package func developerDirectory() throws -> URL? {
+        try Self.developerDirectory(hostRoot: hostRoot)
+    }
+
+    private static func developerDirectoryRecord(hostRoot: URL) -> URL { hostRoot.appending(path: "developer-directory") }
+
+    private static func developerDirectory(hostRoot: URL) throws -> URL? {
+        let record = developerDirectoryRecord(hostRoot: hostRoot)
+        let data: Data
+        do { data = try Data(contentsOf: record) }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile { return nil }
+        guard let path = String(data: data, encoding: .utf8), !path.isEmpty, path.hasPrefix("/") else {
+            throw ConfigurationError.invalidDeveloperDirectoryRecord(record)
+        }
+        return URL(filePath: path)
+    }
+
+    /// - Parameter url: The Xcode's `Contents/Developer` directory, or `nil` for the Xcode that `xcode-select` names.
+    @discardableResult
+    package func saveDeveloperDirectory(_ url: URL?) throws -> URL? {
+        guard let url else {
+            do { try FileManager.default.removeItem(at: developerDirectoryRecord) }
+            catch let error as CocoaError where error.code == .fileNoSuchFile { }
+            return nil
+        }
+        let directory = url.standardizedFileURL
+        try FileManager.default.createDirectory(at: hostRoot, withIntermediateDirectories: true)
+        try Data(directory.path(percentEncoded: false).utf8).write(to: developerDirectoryRecord, options: .atomic)
+        return directory
+    }
 
     package func buildServiceExecutableURL() throws -> URL? {
         try Self.buildServiceExecutableURL(hostRoot: hostRoot)
@@ -208,12 +241,13 @@ package struct HostInstallation: Sendable {
 
     package static func hostedConfiguration(
         environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> (storage: Storage, poolDirectory: URL, buildServiceExecutableURL: URL?)? {
+    ) throws -> (storage: Storage, poolDirectory: URL, buildServiceExecutableURL: URL?, developerDirectory: URL?)? {
         guard let hosted = try hostedLocations(environment) else { return nil }
         return (
             Storage(directory: hosted.storageDirectory),
             poolDirectory(hostRoot: hosted.hostRoot),
-            try buildServiceExecutableURL(hostRoot: hosted.hostRoot)
+            try buildServiceExecutableURL(hostRoot: hosted.hostRoot),
+            try developerDirectory(hostRoot: hosted.hostRoot)
         )
     }
 
@@ -239,6 +273,7 @@ package struct HostInstallation: Sendable {
     package enum ConfigurationError: LocalizedError {
         case invalidStorageRecord(URL)
         case invalidBuildServiceRecord(URL)
+        case invalidDeveloperDirectoryRecord(URL)
         case alreadyConfigured(URL)
         case incompleteHostEnvironment
 
@@ -246,6 +281,7 @@ package struct HostInstallation: Sendable {
             switch self {
             case .invalidStorageRecord(let url): "Invalid host storage configuration at \(url.path(percentEncoded: false))."
             case .invalidBuildServiceRecord(let url): "Invalid host build service configuration at \(url.path(percentEncoded: false))."
+            case .invalidDeveloperDirectoryRecord(let url): "Invalid host Xcode configuration at \(url.path(percentEncoded: false))."
             case .alreadyConfigured(let url): "Host storage is already configured at \(url.path(percentEncoded: false)). Change existing storage through the host settings."
             case .incompleteHostEnvironment: "The installed host must supply both its active storage directory and host root."
             }

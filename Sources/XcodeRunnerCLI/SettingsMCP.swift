@@ -87,13 +87,13 @@ struct SettingsMCP: AsyncParsableCommand {
             Tool(
                 name: "get_settings", description: "List current host settings, value types, defaults, choices, constraints, and application timing. Read failures are reported per setting. GitHub edits require the running host app.",
                 inputSchema: try schema(#"""
-                {"type":"object","additionalProperties":false,"properties":{"scope":{"enum":["pool","buildService","storage","githubRepositories"]}}}
+                {"type":"object","additionalProperties":false,"properties":{"scope":{"enum":["pool","buildService","xcode","storage","githubRepositories"]}}}
                 """#),
                 annotations: .init(readOnlyHint: true, openWorldHint: false),
                 outputSchema: .object(["type": .string("object"), "oneOf": .array([snapshotSchema, errorSchema])])
             ),
             Tool(
-                name: "update_settings", description: "Update one settings group, preserving unspecified fields. Pool maximum and retention are saved together. Running jobs continue. Returns saved values, application timing, and any cleanup or repository synchronization errors. Storage applies on the next host launch. Does not restart the host.",
+                name: "update_settings", description: "Update one settings group, preserving unspecified fields. Pool maximum and retention are saved together. Running jobs continue. Returns saved values, application timing, and any cleanup or repository synchronization errors. The build service and Xcode apply to the next xcode-runner operation that names none. Storage applies on the next host launch. Does not restart the host.",
                 inputSchema: try schema(#"""
                 {
                   "type":"object",
@@ -106,6 +106,7 @@ struct SettingsMCP: AsyncParsableCommand {
                       ]}
                     }},
                     {"type":"object","additionalProperties":false,"required":["scope","path"],"properties":{"scope":{"const":"buildService"},"path":{"type":["string","null"],"pattern":"^/"}}},
+                    {"type":"object","additionalProperties":false,"required":["scope","developerDirectory"],"properties":{"scope":{"const":"xcode"},"developerDirectory":{"type":["string","null"],"pattern":"^/"}}},
                     {"type":"object","additionalProperties":false,"required":["scope","directory"],"properties":{"scope":{"const":"storage"},"directory":{"type":"string","pattern":"^/"}}},
                     {"type":"object","additionalProperties":false,"required":["scope","selectedRepositoryIDs"],"properties":{"scope":{"const":"githubRepositories"},"selectedRepositoryIDs":{"type":"array","uniqueItems":true,"items":{"type":"integer","minimum":1}}}}
                   ]
