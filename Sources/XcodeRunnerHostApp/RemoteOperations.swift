@@ -83,9 +83,7 @@ final class RemoteOperations {
         let environment = installation.environment(for: storage)
         // Operations from every dashboard share one cache, apart from the repositories that run jobs from GitHub.
         let cache = storage.compilationCacheDirectory.appending(path: "remote")
-        try await reply(.operation(.accepted(
-            checkoutDirectory: checkout.path(percentEncoded: false), outputDirectory: output.path(percentEncoded: false)
-        )))
+        // The dashboard sends the whole checkout once this Mac accepts, so what can refuse the operation comes first.
         do {
             // Creating the folders of storage that is not mounted would run the operation on the startup volume.
             for location in [storage.workDirectory, storage.buildDirectory] {
@@ -99,6 +97,14 @@ final class RemoteOperations {
             }
             // An operation that the host did not finish, as when it quit, left its checkout.
             try await Self.remove(folder)
+        } catch {
+            try await reply(.refused(error.localizedDescription))
+            return
+        }
+        try await reply(.operation(.accepted(
+            checkoutDirectory: checkout.path(percentEncoded: false), outputDirectory: output.path(percentEncoded: false)
+        )))
+        do {
             try await Self.receiveCheckout(into: checkout, archive: folder.appending(path: "files.tar"), next: next)
         } catch let left as DashboardLeft {
             for message in await Self.removeAll([folder]) { print(message) }
