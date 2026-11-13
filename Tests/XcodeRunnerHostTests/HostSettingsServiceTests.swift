@@ -90,7 +90,8 @@ struct HostSettingsServiceTests {
         #expect(unset.choices.map(\.label) == ["Xcode 27.2 (27B48)"])
         #expect(unset.choices.map(\.value) == [.string("/Applications/Xcode.app/Contents/Developer")])
 
-        let saved = try await service.update(.xcode(developerDirectory: "/Applications/Xcode.app/Contents/Developer"))
+        // A trailing slash names the same Xcode.
+        let saved = try await service.update(.xcode(developerDirectory: "/Applications/Xcode.app/Contents/Developer/"))
         #expect(saved.settings.first?.value == .string("/Applications/Xcode.app/Contents/Developer"))
         #expect(try installation.developerDirectory() == xcode.developerDirectory)
         // Hosted operations read the saved Xcode from the host root that their job names.

@@ -18,7 +18,8 @@ package struct InstalledXcode: Codable, Equatable, Identifiable, Sendable {
         self.build = build
     }
 
-    /// The Xcode apps that Launch Services knows on this Mac, newest first.
+    /// The Xcode apps on this Mac, newest first: the ones in the Applications folders, and the ones that Launch
+    /// Services knows elsewhere.
     package static func installed() -> [InstalledXcode] {
         struct Version: Decodable {
             let version: String
@@ -28,16 +29,30 @@ package struct InstalledXcode: Codable, Equatable, Identifiable, Sendable {
                 case version = "CFBundleShortVersionString", build = "ProductBuildVersion"
             }
         }
-        return NSWorkspace.shared.urlsForApplications(withBundleIdentifier: "com.apple.dt.Xcode").compactMap { app in
+        let identifier = "com.apple.dt.Xcode"
+        // Launch Services leaves out an Xcode that this macOS no longer opens as an app, although xcodebuild still
+        // builds with it.
+        let folders = [URL(filePath: "/Applications"), URL.homeDirectory.appending(path: "Applications")]
+        let inFolders = folders.flatMap { folder in
+            // A user may have no Applications folder.
+            (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+        }
+        .filter { $0.pathExtension == "app" && Bundle(url: $0)?.bundleIdentifier == identifier }
+        var found: [URL: InstalledXcode] = [:]
+        for app in inFolders + NSWorkspace.shared.urlsForApplications(withBundleIdentifier: identifier) {
             // An app that cannot be read, such as one on a volume being ejected, is not offered.
             guard let data = try? Data(contentsOf: app.appending(path: "Contents/version.plist")),
-                  let version = try? PropertyListDecoder().decode(Version.self, from: data) else { return nil }
-            return InstalledXcode(
-                developerDirectory: app.appending(path: "Contents/Developer").standardizedFileURL,
-                version: version.version, build: version.build
+                  let version = try? PropertyListDecoder().decode(Version.self, from: data) else { continue }
+            // The same spelling as a saved directory, which has no trailing slash.
+            let developerDirectory = URL(
+                filePath: app.standardizedFileURL.appending(path: "Contents/Developer").path(percentEncoded: false),
+                directoryHint: .notDirectory
+            )
+            found[developerDirectory] = InstalledXcode(
+                developerDirectory: developerDirectory, version: version.version, build: version.build
             )
         }
-        .sorted {
+        return found.values.sorted {
             let order = $0.version.compare($1.version, options: .numeric)
             return order == .orderedSame ? $0.developerDirectory.path < $1.developerDirectory.path : order == .orderedDescending
         }

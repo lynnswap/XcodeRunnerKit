@@ -56,7 +56,7 @@ package struct HostInstallation: Sendable {
         guard let path = String(data: data, encoding: .utf8), !path.isEmpty, path.hasPrefix("/") else {
             throw ConfigurationError.invalidDeveloperDirectoryRecord(record)
         }
-        return URL(filePath: path)
+        return URL(filePath: path, directoryHint: .notDirectory)
     }
 
     /// - Parameter url: The Xcode's `Contents/Developer` directory, or `nil` for the Xcode that `xcode-select` names.
@@ -67,10 +67,12 @@ package struct HostInstallation: Sendable {
             catch let error as CocoaError where error.code == .fileNoSuchFile { }
             return nil
         }
-        let directory = url.standardizedFileURL
+        // One spelling, without a trailing slash, so that a saved directory compares with a listed Xcode's.
+        var path = url.standardizedFileURL.path(percentEncoded: false)
+        while path.count > 1, path.hasSuffix("/") { path.removeLast() }
         try FileManager.default.createDirectory(at: hostRoot, withIntermediateDirectories: true)
-        try Data(directory.path(percentEncoded: false).utf8).write(to: developerDirectoryRecord, options: .atomic)
-        return directory
+        try Data(path.utf8).write(to: developerDirectoryRecord, options: .atomic)
+        return URL(filePath: path, directoryHint: .notDirectory)
     }
 
     package func buildServiceExecutableURL() throws -> URL? {
