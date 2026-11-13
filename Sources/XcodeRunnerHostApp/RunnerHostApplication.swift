@@ -443,17 +443,18 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             try FileManager.default.removeItem(at: directory.url)
             print("Removed \(directory.name).")
         }
-        let isPaused = settings.isPaused
-        // A paused host lets each runner finish the job that it runs, and stops the others. The official runner has
-        // no way to refuse jobs while it runs, so a job that it takes in the instant before its service stops is
-        // cancelled, as when the host quits.
-        var finishing: Set<URL> = []
         // A service that stopped when its job ended is removed even if the Mac resumed since, so that it starts again.
         for (directory, runner) in runners where runner.stoppedAfterJob {
             runners[directory] = nil
             await runner.task.value
             print("Paused \(directory.lastPathComponent).")
         }
+        // Read after the waits above, during which the Mac can be paused or resumed.
+        let isPaused = settings.isPaused
+        // A paused host lets each runner finish the job that it runs, and stops the others. The official runner has
+        // no way to refuse jobs while it runs, so a job that it takes in the instant before its service stops is
+        // cancelled, as when the host quits.
+        var finishing: Set<URL> = []
         if isPaused {
             var stopping: [(directory: URL, task: Task<Void, Never>)] = []
             for (directory, runner) in runners {
