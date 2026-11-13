@@ -82,18 +82,28 @@ enum DashboardPane: Hashable {
     case github(HostPairing.ID)
     /// The host's runner services and execution settings.
     case mac(HostPairing.ID)
+    /// A Mac that the host manages, which the dashboard reaches through the host.
+    case managedMac(HostPairing.ID, host: HostPairing.ID)
 
     var host: HostPairing.ID {
         switch self {
-        case .overview(let host), .github(let host), .mac(let host): host
+        case .overview(let host), .github(let host), .mac(let host), .managedMac(_, let host): host
         }
     }
 }
 
 @MainActor @Observable
 final class DashboardNavigation {
+    /// What the Add Mac sheet pairs: this dashboard with a host, or a host with a Mac for it to manage.
+    enum Addition: Hashable, Identifiable {
+        case host
+        case mac(managedBy: HostPairing.ID)
+
+        var id: Self { self }
+    }
+
     var pane: DashboardPane?
-    var isAddingMac = false
+    var addition: Addition?
 }
 
 /// Creates the dashboard window: a sidebar of paired hosts and their panes beside the selected pane.
@@ -140,20 +150,35 @@ private struct DashboardSidebar: View {
                     Label("Overview", systemImage: "gauge.with.dots.needle.50percent").tag(DashboardPane.overview(host.id))
                     Label { Text("GitHub") } icon: { Image("github-mark", bundle: .module) }.tag(DashboardPane.github(host.id))
                     Label(host.name, systemImage: "desktopcomputer").tag(DashboardPane.mac(host.id))
+                    ForEach(hosts.macsManaged(by: host.id).listedMacs) { mac in
+                        Label(mac.name, systemImage: "desktopcomputer").tag(DashboardPane.managedMac(mac.id, host: host.id))
+                    }
                 }
             }
         }
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
             HStack {
-                Button("Add Mac…", systemImage: "plus.circle") { navigation.isAddingMac = true }
-                    .buttonStyle(.borderless)
-                    .help("Pair with a Mac that runs XcodeHomeRunner on the local network to show it here.")
-                    .accessibilityIdentifier("add-mac")
+                Menu("Add Mac…", systemImage: "plus.circle") {
+                    Button("Show a Mac on This Dashboard…") { navigation.addition = .host }
+                    ForEach(hosts.macs) { host in
+                        Button("Add a Mac for \(host.name) to Manage…") { navigation.addition = .mac(managedBy: host.id) }
+                            .disabled(!canAddMac(to: host))
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Pair with a Mac that runs XcodeHomeRunner to show it here, or pair one of the Macs shown here with a Mac for it to manage.")
+                .accessibilityIdentifier("add-mac")
                 Spacer()
             }
             .padding(10)
         }
+    }
+
+    /// Whether the host answers and can pair with another Mac. A host that another Mac manages cannot.
+    private func canAddMac(to host: PairedMac) -> Bool {
+        hosts.status(of: host.id) == .online && hosts.macsManaged(by: host.id).canAddMacs
     }
 }
 
@@ -187,8 +212,18 @@ private struct DashboardPaneView: View {
                     }
                 case .mac:
                     // The host registers runners for a changed limit itself.
-                    PairedMacView(macs: hosts, mac: host, limitChanged: {}) {
+                    PairedMacView(macs: hosts, mac: host.listed, limitChanged: {}) {
                         navigation.pane = hosts.macs.first.map { .overview($0.id) }
+                    }
+                case .managedMac(let id, _):
+                    let managed = hosts.macsManaged(by: host.id)
+                    DashboardHostPane(hosts: hosts, host: host) { _, _, _ in
+                        if let mac = managed.listedMacs.first(where: { $0.id == id }) {
+                            // The host registers the Mac's runners, so it applies a changed limit to them.
+                            PairedMacView(macs: managed, mac: mac, limitChanged: {}) { navigation.pane = .overview(host.id) }
+                        } else {
+                            ContentUnavailableView("This Mac was removed", systemImage: "desktopcomputer")
+                        }
                     }
                 }
             } else {
@@ -200,19 +235,29 @@ private struct DashboardPaneView: View {
                     // here but could not be told, and pairings that could not be read.
                     if let message = hosts.message { ErrorText(message) }
                 } actions: {
-                    Button("Add Mac…") { navigation.isAddingMac = true }
+                    Button("Add Mac…") { navigation.addition = .host }
                 }
             }
         }
         .formStyle(.grouped)
         .navigationTitle(title(of: navigation.pane, host: host))
         .frame(minWidth: 440, minHeight: 420)
-        .sheet(isPresented: $navigation.isAddingMac) {
-            AddMacView(macs: hosts) { host in
-                navigation.isAddingMac = false
-                navigation.pane = .overview(host.id)
-            } cancel: {
-                navigation.isAddingMac = false
+        .sheet(item: $navigation.addition) { addition in
+            switch addition {
+            case .host:
+                AddMacView(macs: hosts) { host in
+                    navigation.addition = nil
+                    navigation.pane = .overview(host.id)
+                } cancel: {
+                    navigation.addition = nil
+                }
+            case .mac(let host):
+                AddMacView(macs: hosts.macsManaged(by: host)) { mac in
+                    navigation.addition = nil
+                    navigation.pane = .managedMac(mac.id, host: host)
+                } cancel: {
+                    navigation.addition = nil
+                }
             }
         }
     }
@@ -223,6 +268,7 @@ private struct DashboardPaneView: View {
         case .overview: "Overview"
         case .github: "GitHub"
         case .mac: host.name
+        case .managedMac(let id, _): hosts.macsManaged(by: host.id).listedMacs.first { $0.id == id }?.name ?? "Mac"
         }
     }
 
@@ -249,13 +295,13 @@ private struct DashboardHostPane<Content: View>: View {
 
     var body: some View {
         Group {
-            if hosts.status(of: host.id) == .online, let settings = hosts.settings[host.id],
+            if hosts.status(of: host.id) == .online, let settings = hosts.settings(of: host.id),
                let report = settings.report, let github = settings.github {
                 content(settings, report, github)
             } else {
                 Form {
                     Section {
-                        PairedMacConnectionRows(macs: hosts, mac: host)
+                        PairedMacConnectionRows(macs: hosts, mac: host.listed)
                         if let message = hosts.message { ErrorText(message) }
                     }
                 }
@@ -266,6 +312,9 @@ private struct DashboardHostPane<Content: View>: View {
 }
 
 #if DEBUG
+/// The Mac that the preview host manages.
+private let previewManagedMac = PairedMac(pairing: HostPairing(id: UUID(), name: "m1pro", key: Data(count: 32)), hostID: UUID())
+
 /// A dashboard that shows the preview host, which answers over the loopback interface unless it is `notFound`.
 @MainActor
 private func previewDashboardSplitViewController(
@@ -275,7 +324,7 @@ private func previewDashboardSplitViewController(
     let host = PairedMac(pairing: HostPairing(id: UUID(), name: "m6mini", key: Data(count: 32)), hostID: UUID())
     if hasHost { try? store.write(JSONEncoder().encode([host])) }
     let hosts = PairedMacs(store: store, name: HostPane.macName, role: .dashboard, browses: false)
-    if hasHost, !notFound { connectPreviewMac(host, to: hosts, stopsAnswering: false) }
+    if hasHost, !notFound { connectPreviewMac(host, to: hosts, stopsAnswering: false, managing: previewManagedMac) }
     let navigation = DashboardNavigation()
     if hasHost { navigation.pane = pane(host.id) }
     return makeDashboardSplitViewController(hosts: hosts, navigation: navigation)
@@ -287,6 +336,9 @@ private func previewDashboardSplitViewController(
 }
 #Preview("Dashboard Mac", traits: .fixedLayout(width: 760, height: 620)) {
     previewDashboardSplitViewController(hasHost: true, pane: { .mac($0) })
+}
+#Preview("Dashboard Managed Mac", traits: .fixedLayout(width: 760, height: 620)) {
+    previewDashboardSplitViewController(hasHost: true, pane: { .managedMac(previewManagedMac.id, host: $0) })
 }
 #Preview("Dashboard Host Not Found", traits: .fixedLayout(width: 760, height: 620)) {
     previewDashboardSplitViewController(hasHost: true, notFound: true)

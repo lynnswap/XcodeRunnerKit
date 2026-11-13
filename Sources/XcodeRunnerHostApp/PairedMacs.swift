@@ -11,6 +11,7 @@ struct PairedMac: Codable, Equatable, Identifiable, Sendable {
 
     var id: HostPairing.ID { pairing.id }
     var name: String { pairing.name }
+    var listed: ListedMac { ListedMac(id: id, name: name) }
 }
 
 /// The settings that this Mac last read from a Mac paired with it, and the changes being edited for that Mac.
@@ -21,10 +22,10 @@ final class PairedMacSettings {
     private(set) var readAt: Date?
     var poolDraft = PoolSettingsDraft()
     var storageDirectoryInput = ""
-    fileprivate(set) var isSaving = false
-    fileprivate(set) var isSavingStorage = false
-    fileprivate(set) var saveError: String?
-    fileprivate(set) var storageSaveError: String?
+    private(set) var isSaving = false
+    private(set) var isSavingStorage = false
+    private(set) var saveError: String?
+    private(set) var storageSaveError: String?
     /// The host's GitHub settings, which a dashboard reads with the settings above.
     private(set) var github: GitHubReport?
     /// The repository selection being edited.
@@ -34,11 +35,11 @@ final class PairedMacSettings {
     fileprivate(set) var githubError: String?
     /// Changes when a change to the Mac starts or ends, so that a read that overlaps a change does not show the
     /// settings from before it.
-    fileprivate var changeCount = 0
+    private(set) var changeCount = 0
 
     var canApplyPoolConfiguration: Bool { report?.canApplyPoolConfiguration == true && !isSaving }
 
-    fileprivate var isChanging: Bool { isSaving || isSavingStorage || isChangingGitHub }
+    var isChanging: Bool { isSaving || isSavingStorage || isChangingGitHub }
 
     /// Shows newly read GitHub settings, with the saved selection in a selection that was not edited.
     fileprivate func show(_ github: GitHubReport) {
@@ -47,17 +48,81 @@ final class PairedMacSettings {
     }
 
     /// Shows a newly read report, with its settings in the inputs that were not edited, as the Mac's own window does.
-    fileprivate func show(_ report: HostSettingsReport) {
+    ///
+    /// - Parameter readAt: When the report was read, if another Mac read it.
+    func show(_ report: HostSettingsReport, readAt: Date = .now) {
         if report.hasLoadedPoolStatus, report.poolError == nil { poolDraft.update(from: report.poolStatus?.configuration) }
         if storageDirectoryInput == self.report?.savedStorageDirectory?.path(percentEncoded: false) ?? "" {
             storageDirectoryInput = report.savedStorageDirectory?.path(percentEncoded: false) ?? ""
         }
         self.report = report
-        readAt = .now
+        self.readAt = readAt
     }
 
     fileprivate func beginChange() { changeCount += 1 }
     fileprivate func endChange() { changeCount += 1 }
+
+    /// Applies the edited job limit and Simulator retention, after the checks that the Mac's own window makes.
+    ///
+    /// - Parameter send: Sends the changes to the Mac named `macName` and returns the settings it answers with.
+    /// - Returns: Whether the Mac saved a different job limit, so that its runner registrations need updating.
+    func applyPoolConfiguration(
+        on macName: String, send: (PoolSettingsDraft.Changes) async throws -> HostSettingsReport
+    ) async -> Bool {
+        guard let report, canApplyPoolConfiguration else { return false }
+        let changes: PoolSettingsDraft.Changes
+        do {
+            changes = try poolDraft.changes(isNewPool: report.isNewPool)
+        } catch {
+            saveError = error.localizedDescription
+            return false
+        }
+        let previousCapacity = report.poolStatus?.configuration.maximumConcurrentJobs
+        isSaving = true
+        beginChange()
+        defer {
+            isSaving = false
+            endChange()
+        }
+        do {
+            let report = try await send(changes)
+            saveError = nil
+            show(report)
+            guard let saved = report.poolStatus?.configuration else { return false }
+            poolDraft.reset(to: saved)
+            return saved.maximumConcurrentJobs != previousCapacity
+        } catch {
+            saveError = Self.changeFailure(error, on: macName)
+            return false
+        }
+    }
+
+    /// Saves the edited storage folder.
+    ///
+    /// - Parameter send: Sends the folder to the Mac named `macName` and returns the settings it answers with.
+    func saveStorageDirectory(on macName: String, send: (String) async throws -> HostSettingsReport) async {
+        guard report?.canEditStorage == true, !isSavingStorage else { return }
+        isSavingStorage = true
+        beginChange()
+        defer {
+            isSavingStorage = false
+            endChange()
+        }
+        do {
+            let report = try await send(storageDirectoryInput)
+            storageSaveError = nil
+            show(report)
+            storageDirectoryInput = report.savedStorageDirectory?.path(percentEncoded: false) ?? ""
+        } catch {
+            storageSaveError = Self.changeFailure(error, on: macName)
+        }
+    }
+
+    /// The Mac's own message when it refused the change. Otherwise the change may or may not have been applied.
+    static func changeFailure(_ error: any Error, on macName: String) -> String {
+        if case .refused(let message) = error as? HostLinkError { return message }
+        return "\(macName) did not confirm the change: \(error.localizedDescription)"
+    }
 }
 
 /// The runner folders of a Mac that this host manages, read and changed over the pairing connection.
@@ -104,8 +169,8 @@ struct PairedRunnerMac: RunnerMac {
 /// The Macs that this Mac paired with, and whether each one can be reached: the Macs that a host manages, or the
 /// hosts that a dashboard shows.
 @MainActor @Observable
-final class PairedMacs {
-    enum Status: Equatable {
+final class PairedMacs: MacList {
+    enum Status: Codable, Equatable, Sendable {
         /// The Mac does not advertise this pairing's service on the local network.
         case notFound
         case checking
@@ -123,7 +188,7 @@ final class PairedMacs {
     }
 
     /// The code that the person compares with the one the Mac shows while pairing.
-    struct CodeConfirmation: Equatable {
+    struct CodeConfirmation: Codable, Equatable, Sendable {
         let macName: String
         let code: String
         var isConfirmed = false
@@ -152,6 +217,10 @@ final class PairedMacs {
     /// Kept while a Mac is not found, so that its pane can show when the settings were last read.
     private(set) var settings: [HostPairing.ID: PairedMacSettings] = [:]
     private(set) var pairableMacs: [PairableMac] = []
+    /// Whether this Mac lists the Macs that wait to pair.
+    private(set) var isDiscovering = false
+    /// The Macs that each host manages, which a dashboard reaches through that host.
+    private var relayed: [HostPairing.ID: RelayedMacs] = [:]
     private(set) var message: String?
     private(set) var discoveryMessage: String?
     private(set) var codeConfirmation: CodeConfirmation?
@@ -185,6 +254,18 @@ final class PairedMacs {
 
     func mac(_ id: HostPairing.ID) -> PairedMac? { macs.first { $0.id == id } }
     func status(of id: HostPairing.ID) -> Status { statuses[id] ?? .notFound }
+    func settings(of id: HostPairing.ID) -> PairedMacSettings? { settings[id] }
+    var pairedWith: MacReference { .thisMac }
+    var listedMacs: [ListedMac] { macs.map(\.listed) }
+    var waitingMacs: [WaitingMac] { pairableMacs.map { WaitingMac(id: $0.id, name: $0.name) } }
+
+    /// The Macs that a host manages, for the dashboard that shows the host.
+    func macsManaged(by host: HostPairing.ID) -> RelayedMacs {
+        if let macs = relayed[host] { return macs }
+        let macs = RelayedMacs(hosts: self, host: host)
+        relayed[host] = macs
+        return macs
+    }
 
     /// Finds the paired Macs on the local network. Browsing waits for the first pairing, so a Mac that paired with
     /// no Macs does not ask for local network access.
@@ -221,8 +302,10 @@ final class PairedMacs {
 
     /// Lists Macs that wait to pair with a Mac of this role until `stopDiscoveringPairableMacs()`.
     func discoverPairableMacs() {
-        guard browses, pairableBrowsing == nil else { return }
+        guard !isDiscovering else { return }
+        isDiscovering = true
         discoveryMessage = nil
+        guard browses else { return }
         pairableBrowsing = Task {
             // The browser calls these handlers on the main actor, where they are created.
             let browser = NetworkBrowser(for: .bonjour(HostLink.pairingService, includeTxtRecord: true))
@@ -231,7 +314,12 @@ final class PairedMacs {
                     self.showDiscoveryWaiting(error)
                 }
             do {
-                try await browser.run { found in self.pairableMacsChanged(found) }
+                try await browser.run { found in
+                    // A Mac waits for one role, and refuses a request for the other.
+                    self.pairableMacsChanged(found.filter { $0.txtRecord[HostLink.roleKeyName] == self.role.rawValue }.map {
+                        PairableMac(id: $0.id, name: $0.name, endpoint: $0.nwEndpoint)
+                    })
+                }
             } catch is CancellationError {
             } catch {
                 showDiscoveryWaiting(error)
@@ -242,8 +330,17 @@ final class PairedMacs {
     func stopDiscoveringPairableMacs() {
         pairableBrowsing?.cancel()
         pairableBrowsing = nil
+        isDiscovering = false
         pairableMacs = []
         discoveryMessage = nil
+    }
+
+    /// Pairs with a Mac that `pairableMacs` lists.
+    func pair(with id: WaitingMac.ID) async throws -> ListedMac {
+        guard let mac = pairableMacs.first(where: { $0.id == id }) else {
+            throw HostLinkError.unreachable("The Mac is no longer waiting to pair.")
+        }
+        return try await pair(at: mac.endpoint).listed
     }
 
     /// Pairs with the Mac at `endpoint`, replacing an earlier pairing with the same Mac.
@@ -281,7 +378,7 @@ final class PairedMacs {
                 if case .unpaired? = reply {} else { keepsEarlierPairing = true }
             }
             forgetStatus(of: mac.id)
-            settings[mac.id] = nil
+            forgetSettings(of: mac.id)
         }
         macs = next
         settings[mac.id] = PairedMacSettings()
@@ -344,7 +441,7 @@ final class PairedMacs {
         }
         macs = next
         forgetStatus(of: id)
-        settings[id] = nil
+        forgetSettings(of: id)
         message = notice
         if macs.isEmpty {
             browsing?.cancel()
@@ -365,10 +462,14 @@ final class PairedMacs {
         let status: Status
         var report: HostSettingsReport?
         var github: GitHubReport?
+        var managed: ManagedMacsReport?
         do {
             report = try await requestSettings(.read, from: mac, at: endpoint)
-            // A dashboard shows the host's GitHub settings too. A managing host has its own.
-            if role == .dashboard { github = try await requestGitHub(.read, from: mac, at: endpoint) }
+            // A dashboard shows the host's GitHub settings and the Macs it manages too. A managing host has its own.
+            if role == .dashboard {
+                github = try await requestGitHub(.read, from: mac, at: endpoint)
+                managed = try await requestManagedMacs(.read(refreshing: nil), from: mac, at: endpoint)
+            }
             status = .online
         } catch HostLinkError.rejected {
             status = .rejected
@@ -383,6 +484,7 @@ final class PairedMacs {
             settings.show(report)
             if let github { settings.show(github) }
         }
+        if let managed { macsManaged(by: id).show(managed) }
     }
 
     /// Reads a Mac's settings every `settingsInterval` until the task is cancelled.
@@ -399,52 +501,34 @@ final class PairedMacs {
     /// - Returns: Whether the Mac saved a different job limit, so that its runner registrations need updating.
     @discardableResult
     func applyPoolConfiguration(of id: HostPairing.ID) async -> Bool {
-        guard let mac = mac(id), let settings = settings[id], let report = settings.report, settings.canApplyPoolConfiguration
-        else { return false }
-        let changes: PoolSettingsDraft.Changes
-        do {
-            changes = try settings.poolDraft.changes(isNewPool: report.isNewPool)
-        } catch {
-            settings.saveError = error.localizedDescription
-            return false
-        }
-        let previousCapacity = report.poolStatus?.configuration.maximumConcurrentJobs
-        settings.isSaving = true
-        settings.beginChange()
-        defer {
-            settings.isSaving = false
-            settings.endChange()
-        }
-        do {
-            let report = try await requestSettings(.configurePool(changes), from: mac)
-            settings.saveError = nil
-            settings.show(report)
-            guard let saved = report.poolStatus?.configuration else { return false }
-            settings.poolDraft.reset(to: saved)
-            return saved.maximumConcurrentJobs != previousCapacity
-        } catch {
-            settings.saveError = Self.changeFailure(error, on: mac)
-            return false
+        guard let mac = mac(id), let settings = settings[id] else { return false }
+        return await settings.applyPoolConfiguration(on: mac.name) { changes in
+            try await self.requestSettings(.configurePool(changes), from: mac)
         }
     }
 
     func saveStorageDirectory(of id: HostPairing.ID) async {
-        guard let mac = mac(id), let settings = settings[id], settings.report?.canEditStorage == true, !settings.isSavingStorage
-        else { return }
-        settings.isSavingStorage = true
+        guard let mac = mac(id), let settings = settings[id] else { return }
+        await settings.saveStorageDirectory(on: mac.name) { directory in
+            try await self.requestSettings(.saveStorage(directory: directory), from: mac)
+        }
+    }
+
+    /// Changes a Mac's settings for a dashboard, and shows the result in this host's pane for the Mac as well.
+    func relay(_ request: HostSettingsRequest, to id: HostPairing.ID) async throws -> HostSettingsReport {
+        guard let mac = mac(id), let settings = settings[id] else {
+            throw HostLinkError.unreachable("The Mac is no longer paired.")
+        }
         settings.beginChange()
-        defer {
-            settings.isSavingStorage = false
-            settings.endChange()
-        }
-        do {
-            let report = try await requestSettings(.saveStorage(directory: settings.storageDirectoryInput), from: mac)
-            settings.storageSaveError = nil
-            settings.show(report)
-            settings.storageDirectoryInput = report.savedStorageDirectory?.path(percentEncoded: false) ?? ""
-        } catch {
-            settings.storageSaveError = Self.changeFailure(error, on: mac)
-        }
+        defer { settings.endChange() }
+        let report = try await requestSettings(request, from: mac)
+        settings.show(report)
+        return report
+    }
+
+    /// Reads a Mac's settings now, if it is found on the network.
+    func refresh(_ id: HostPairing.ID) async {
+        if let endpoint = endpoints[id] { await checkStatus(of: id, at: endpoint) }
     }
 
     private func requestSettings(
@@ -477,7 +561,7 @@ final class PairedMacs {
             } catch is CancellationError {
                 return
             } catch {
-                settings.githubError = Self.changeFailure(error, on: mac)
+                settings.githubError = PairedMacSettings.changeFailure(error, on: mac.name)
                 return
             }
             // A change made meanwhile, such as cancelling, already showed newer settings than this read.
@@ -522,7 +606,7 @@ final class PairedMacs {
             settings.show(report)
             return report
         } catch {
-            settings.githubError = Self.changeFailure(error, on: mac)
+            settings.githubError = PairedMacSettings.changeFailure(error, on: mac.name)
             return nil
         }
     }
@@ -539,6 +623,34 @@ final class PairedMacs {
         )
         switch reply {
         case .github(let report): return report
+        case .refused(let message): throw HostLinkError.refused(message)
+        default: throw HostLinkError.unexpectedReply
+        }
+    }
+
+    /// Sends a request about the Macs that a host manages, for the dashboard that shows the host.
+    func requestManagedMacs(_ request: ManagedMacsRequest, from id: HostPairing.ID) async throws -> ManagedMacsReport {
+        guard let mac = mac(id) else { throw HostLinkError.unreachable("The Mac is no longer paired.") }
+        return try await requestManagedMacs(request, from: mac)
+    }
+
+    private func requestManagedMacs(
+        _ request: ManagedMacsRequest, from mac: PairedMac, at endpoint: NWEndpoint? = nil
+    ) async throws -> ManagedMacsReport {
+        guard let endpoint = endpoint ?? endpoints[mac.id] else {
+            throw HostLinkError.unreachable("\(mac.name) was not found on the local network.")
+        }
+        // The host reads or changes one of its Macs before it answers, within its own time limits.
+        let timeout = switch request {
+        case .read(nil), .discover, .stopDiscovering, .pair, .confirmCode, .cancelPairing: HostLink.requestTimeout
+        case .read: HostLink.requestTimeout * 3
+        case .configurePool, .saveStorage, .remove: Self.changeTimeout
+        }
+        let reply = try await HostLink.send(
+            .macs(request), to: endpoint, key: mac.pairing.symmetricKey, identity: mac.id.uuidString, timeout: timeout
+        )
+        switch reply {
+        case .macs(let report): return report
         case .refused(let message): throw HostLinkError.refused(message)
         default: throw HostLinkError.unexpectedReply
         }
@@ -568,12 +680,6 @@ final class PairedMacs {
         return reply
     }
 
-    /// The Mac's own message when it refused the change. Otherwise the change may or may not have been applied.
-    private static func changeFailure(_ error: any Error, on mac: PairedMac) -> String {
-        if case .refused(let message) = error as? HostLinkError { return message }
-        return "\(mac.name) did not confirm the change: \(error.localizedDescription)"
-    }
-
     /// How the person ends this pairing on the other Mac.
     private func endingInstruction(on macName: String) -> String {
         switch role {
@@ -596,6 +702,12 @@ final class PairedMacs {
     private func forgetStatus(of id: HostPairing.ID) {
         statuses[id] = nil
         endpoints[id] = nil
+    }
+
+    /// Forgets what was read from a Mac that left the list.
+    private func forgetSettings(of id: HostPairing.ID) {
+        settings[id] = nil
+        relayed[id] = nil
     }
 
     private func managementServicesChanged(_ found: [Bonjour.Endpoint]) {
@@ -626,12 +738,11 @@ final class PairedMacs {
         }
     }
 
-    private func pairableMacsChanged(_ found: [Bonjour.Endpoint]) {
-        guard pairableBrowsing != nil else { return }
+    /// Lists the Macs found waiting to pair. Browsing calls this, and tests call it in place of Bonjour.
+    func pairableMacsChanged(_ found: [PairableMac]) {
+        guard isDiscovering else { return }
         discoveryMessage = nil
-        // A Mac waits for one role, and refuses a request for the other.
-        pairableMacs = found.filter { $0.txtRecord[HostLink.roleKeyName] == role.rawValue }.map { PairableMac(id: $0.id, name: $0.name, endpoint: $0.nwEndpoint) }
-            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        pairableMacs = found.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
     private func showDiscoveryWaiting(_ error: any Error) {

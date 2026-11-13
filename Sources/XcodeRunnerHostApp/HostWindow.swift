@@ -132,7 +132,7 @@ private struct HostPaneView: View {
             case .managedMac(let id):
                 if let mac = settings.managedMacs.mac(id) {
                     PairedMacView(
-                        macs: settings.managedMacs, mac: mac,
+                        macs: settings.managedMacs, mac: mac.listed,
                         // This Mac registers the Mac's runners, so a changed limit is applied to them here.
                         limitChanged: { await settings.github.synchronize() },
                         removed: { navigation.pane = .mac }
@@ -439,8 +439,10 @@ private func previewGitHubSettings(installation: HostInstallation, isSignedIn: B
 }
 
 /// Answers as `mac` over the loopback interface with its own settings, and has `macs` read them as browsing does.
+///
+/// - Parameter managing: A Mac that the answering Mac manages, which a dashboard then lists under it.
 @MainActor
-func connectPreviewMac(_ mac: PairedMac, to macs: PairedMacs, stopsAnswering: Bool) {
+func connectPreviewMac(_ mac: PairedMac, to macs: PairedMacs, stopsAnswering: Bool, managing managed: PairedMac? = nil) {
     let store = PreviewSecretStore()
     let pairing = HostPairing(id: mac.id, name: HostPane.macName, key: mac.pairing.key)
     let record = switch macs.role {
@@ -449,11 +451,14 @@ func connectPreviewMac(_ mac: PairedMac, to macs: PairedMacs, stopsAnswering: Bo
     }
     try? store.write(JSONEncoder().encode(record))
     let installation = HostInstallation(homeDirectory: .temporaryDirectory.appending(path: UUID().uuidString))
+    let managedMacs = PreviewSecretStore()
+    if let managed { try? managedMacs.write(JSONEncoder().encode([managed])) }
     let settings = HostSettingsModel(
         installation: installation, github: previewGitHubSettings(installation: installation, isSignedIn: true),
         management: HostManagement(store: store, name: mac.name, advertises: false),
-        managedMacs: PairedMacs(store: PreviewSecretStore(), name: mac.name, role: .manager, browses: false)
+        managedMacs: PairedMacs(store: managedMacs, name: mac.name, role: .manager, browses: false)
     )
+    if let managed { connectPreviewMac(managed, to: settings.managedMacs, stopsAnswering: false) }
     settings.hostState = .running
     settings.storageDidBecomeAvailable(HostInstallation.Storage(directory: installation.hostRoot.appending(path: "Storage")))
     settings.runners = [

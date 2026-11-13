@@ -43,14 +43,14 @@ struct HostPairingTests {
 
     /// A Mac whose settings and runners answer the managing host, as in the app.
     private func managedMac(
-        store: MemorySecretStore = MemorySecretStore(), at root: URL,
+        named name: String = "Managed", store: MemorySecretStore = MemorySecretStore(), at root: URL,
         github: ((HostInstallation) -> GitHubHostSettings)? = nil
     ) -> HostSettingsModel {
         let installation = HostInstallation(homeDirectory: root.appending(path: "Home"))
         return HostSettingsModel(
             installation: installation, github: github?(installation),
-            management: HostManagement(store: store, name: "Managed", advertises: false),
-            managedMacs: PairedMacs(store: MemorySecretStore(), name: "Managed", role: .manager, browses: false)
+            management: HostManagement(store: store, name: name, advertises: false),
+            managedMacs: PairedMacs(store: MemorySecretStore(), name: name, role: .manager, browses: false)
         )
     }
 
@@ -463,6 +463,90 @@ struct HostPairingTests {
         #expect(await transport.requests.count == 5)
 
         await host.management.shutDown()
+        await dashboard.shutDown()
+    }
+
+    @Test func aDashboardReachesAHostsMacsThroughTheHost() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = managedMac(named: "Host", at: root.appending(path: "Host"))
+        let runner = managedMac(named: "Runner", at: root.appending(path: "Runner"))
+        await runner.configureDefaultPool()
+        await runner.refreshPoolStatus()
+        let managed = try await pair(host.managedMacs, with: runner.management)
+        try await waitUntil { runner.management.managementPort != nil }
+        await host.managedMacs.checkStatus(of: managed.id, at: try local(runner.management.managementPort))
+
+        // The dashboard pairs with the host only, and lists the Mac that the host manages.
+        let dashboard = PairedMacs(store: MemorySecretStore(), name: "Dashboard", role: .dashboard, browses: false)
+        let shown = try await pair(dashboard, with: host.management)
+        try await waitUntil { host.management.ports[shown.id] != nil }
+        let endpoint = try local(host.management.ports[shown.id])
+        await dashboard.checkStatus(of: shown.id, at: endpoint)
+        let macs = dashboard.macsManaged(by: shown.id)
+        #expect(macs.listedMacs == [managed.listed])
+        #expect(macs.status(of: managed.id) == .online)
+        #expect(runner.management.dashboards.isEmpty)
+
+        // It changes the Mac through the host, with the checks of the Mac's own window.
+        let settings = try #require(macs.settings(of: managed.id))
+        #expect(settings.poolDraft.capacityInput == String(HostInstallation.defaultMaximumConcurrentJobs))
+        settings.poolDraft.capacityInput = "0"
+        await macs.applyPoolConfiguration(of: managed.id)
+        #expect(settings.saveError == "Enter a positive whole number of concurrent jobs.")
+        settings.poolDraft.capacityInput = "2"
+        #expect(await macs.applyPoolConfiguration(of: managed.id))
+        #expect(try runner.pool.configuration()?.maximumConcurrentJobs == 2)
+        // The host's own pane for the Mac shows the change as well.
+        #expect(host.managedMacs.settings[managed.id]?.report?.poolStatus?.configuration.maximumConcurrentJobs == 2)
+        settings.storageDirectoryInput = "Storage"
+        await macs.saveStorageDirectory(of: managed.id)
+        #expect(settings.storageSaveError == "Enter an absolute folder path.")
+
+        // The host pairs with a waiting Mac, and the person compares the code on the dashboard.
+        let other = HostManagement(store: MemorySecretStore(), name: "Other", advertises: false)
+        let waiting = try await waitToPair(other)
+        macs.discoverPairableMacs()
+        try await waitUntil { host.managedMacs.isDiscovering }
+        host.managedMacs.pairableMacsChanged([.init(id: "other", name: "Other", endpoint: waiting)])
+        try await waitUntil { macs.waitingMacs == [WaitingMac(id: "other", name: "Other")] }
+        let adding = Task { try await macs.pair(with: "other") }
+        try await waitUntil { macs.codeConfirmation != nil && other.pairingWindow?.request?.code != nil }
+        #expect(macs.codeConfirmation?.code == other.pairingWindow?.request?.code)
+        #expect(other.pairingWindow?.request?.requesterName == "Host")
+        macs.confirmCode()
+        other.allowPairing()
+        let added = try await adding.value
+        #expect(added.name == "Other")
+        #expect(host.managedMacs.macs.map(\.id) == [managed.id, added.id])
+        #expect(other.manager?.name == "Host")
+        macs.stopDiscoveringPairableMacs()
+        try await waitUntil { !host.managedMacs.isDiscovering }
+
+        // Removing a Mac on the dashboard ends its pairing with the host.
+        try await waitUntil { other.managementPort != nil }
+        await host.managedMacs.checkStatus(of: added.id, at: try local(other.managementPort))
+        await macs.remove(added.id)
+        #expect(macs.message == nil)
+        #expect(macs.listedMacs == [managed.listed])
+        #expect(host.managedMacs.macs.map(\.id) == [managed.id])
+        try await waitUntil { other.manager == nil }
+
+        // A Mac that the host cannot reach appears that way, with the time the host last read it.
+        await dashboard.checkStatus(of: shown.id, at: endpoint)
+        let readAt = try #require(settings.readAt)
+        await runner.management.shutDown()
+        let watching = Task { await macs.watchSettings(of: managed.id) }
+        try await waitUntil {
+            if case .unreachable = macs.status(of: managed.id) { true } else { false }
+        }
+        watching.cancel()
+        #expect(settings.readAt == readAt)
+
+        await host.management.shutDown()
+        await host.managedMacsRelay.shutDown()
+        await host.managedMacs.shutDown()
+        await other.shutDown()
         await dashboard.shutDown()
     }
 

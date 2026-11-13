@@ -219,6 +219,8 @@ final class HostSettingsModel: HostSettingsDisplay {
     let management: HostManagement
     /// The Macs that this host manages.
     let managedMacs: PairedMacs
+    /// Answers a dashboard's requests about the Macs that this host manages.
+    @ObservationIgnored private(set) lazy var managedMacsRelay = ManagedMacsRelay(macs: managedMacs) { [unowned self] in canAddMacs }
     let settingsService: HostSettingsService
     var hostState = HostState.starting
     var runners: [RunnerSettingsRow] = []
