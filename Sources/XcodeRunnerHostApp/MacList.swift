@@ -32,6 +32,8 @@ protocol MacList: AnyObject, Observable {
     /// - Returns: Whether the Mac saved a different job limit.
     @discardableResult func applyPoolConfiguration(of id: HostPairing.ID) async -> Bool
     func saveStorageDirectory(of id: HostPairing.ID) async
+    /// Saves the Xcode selected for a Mac's jobs.
+    func saveXcodeSelection(of id: HostPairing.ID) async
     /// Restarts a Mac's host, which applies its saved storage folder.
     func restart(_ id: HostPairing.ID) async
     /// Ends the pairing with a Mac.

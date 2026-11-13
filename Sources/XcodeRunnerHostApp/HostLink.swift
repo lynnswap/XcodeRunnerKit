@@ -38,6 +38,9 @@ enum HostSettingsRequest: Codable, Sendable {
     case read
     case configurePool(PoolSettingsDraft.Changes)
     case saveStorage(directory: String)
+    /// Saves the Xcode that the Mac's jobs use when they name none, as its `Contents/Developer` directory, or `nil`
+    /// for the Xcode that `xcode-select` names.
+    case saveXcode(developerDirectory: String?)
     /// Restarts the Mac's host after it answered, which applies a saved storage folder and stops its runner services
     /// meanwhile.
     case restart
@@ -236,7 +239,7 @@ enum HostLink {
     static let versionKeyName = "version"
     /// The version of the messages that paired Macs exchange. Raise it with every change after which a Mac running
     /// the previous version could not read a request, a reply, or a report.
-    static let version = 2
+    static let version = 3
     /// A connection whose key the other Mac rejects keeps waiting instead of failing, so requests stop after this long.
     static let requestTimeout = Duration.seconds(10)
 

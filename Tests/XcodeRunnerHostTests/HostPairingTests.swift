@@ -42,6 +42,12 @@ struct HostPairingTests {
     private func publicKey() -> Data { Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation }
 
     /// A Mac whose settings and runners answer the managing host, as in the app.
+    /// The Xcode that the Macs in these tests list, in place of the ones on the Mac that runs the tests. Its folder
+    /// exists wherever Xcode is installed.
+    private let xcode = InstalledXcode(
+        developerDirectory: URL(filePath: "/Library/Developer", directoryHint: .notDirectory), version: "27.2", build: "27B48"
+    )
+
     private func managedMac(
         named name: String = "Managed", store: MemorySecretStore = MemorySecretStore(), at root: URL,
         github: ((HostInstallation) -> GitHubHostSettings)? = nil
@@ -50,7 +56,8 @@ struct HostPairingTests {
         return HostSettingsModel(
             installation: installation, github: github?(installation),
             management: HostManagement(store: store, name: name, advertises: false),
-            managedMacs: PairedMacs(store: MemorySecretStore(), name: name, role: .manager, browses: false)
+            managedMacs: PairedMacs(store: MemorySecretStore(), name: name, role: .manager, browses: false),
+            installedXcodes: { [xcode] in [xcode] }
         )
     }
 
@@ -133,6 +140,22 @@ struct HostPairingTests {
         #expect(settings.storageSaveError == nil)
         #expect(managed.savedStorageDirectory == (try managed.installation.requestedStorageDirectory()))
         #expect(settings.report?.savedStorageDirectory == managed.savedStorageDirectory)
+
+        // The Mac lists its own Xcodes, and saves the one that its jobs use when they name none.
+        #expect(settings.report?.installedXcodes == [xcode])
+        #expect(settings.xcodeSelectionInput == "")
+        settings.xcodeSelectionInput = xcode.developerDirectory.path(percentEncoded: false)
+        await macs.saveXcodeSelection(of: mac.id)
+        #expect(settings.xcodeSaveError == nil)
+        #expect(try managed.installation.developerDirectory() == xcode.developerDirectory)
+        #expect(settings.report?.savedXcodeIsMissing == false)
+        // The Mac's own window shows the selection, and an Xcode that is no longer installed is reported.
+        #expect(managed.xcodeSelectionInput == settings.xcodeSelectionInput)
+        try managed.installation.saveDeveloperDirectory(URL(filePath: "/Applications/Removed.app/Contents/Developer"))
+        await managed.refreshPoolStatus()
+        await macs.checkStatus(of: mac.id, at: endpoint)
+        #expect(settings.report?.savedXcodeIsMissing == true)
+        #expect(settings.xcodeSelectionInput == "/Applications/Removed.app/Contents/Developer")
 
         // The saved folder waits for the Mac's next launch. A host that launchd started restarts itself when asked.
         #expect(settings.report?.storageChangeIsPending == true)

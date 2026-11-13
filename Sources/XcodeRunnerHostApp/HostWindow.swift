@@ -487,6 +487,42 @@ func connectPreviewMac(_ mac: PairedMac, to macs: PairedMacs, stopsAnswering: Bo
     }
 }
 
+/// The Xcode section of a Mac whose saved Xcode was removed.
+@MainActor
+private struct XcodeSectionPreview: View {
+    @Bindable var model: HostSettingsModel
+
+    init() {
+        let installation = HostInstallation(homeDirectory: .temporaryDirectory.appending(path: UUID().uuidString))
+        try? installation.saveDeveloperDirectory(URL(filePath: "/Applications/Xcode_26.5.app/Contents/Developer"))
+        model = HostSettingsModel(
+            installation: installation, github: previewGitHubSettings(installation: installation, isSignedIn: false),
+            management: HostManagement(store: PreviewSecretStore(), name: HostPane.macName, advertises: false),
+            managedMacs: PairedMacs(store: PreviewSecretStore(), name: HostPane.macName, role: .manager, browses: false),
+            installedXcodes: {
+                [("27.2", "27B48", "Xcode_27.2"), ("26.6", "17F42", "Xcode_26.6")].map { version, build, name in
+                    InstalledXcode(
+                        developerDirectory: URL(filePath: "/Applications/\(name).app/Contents/Developer"), version: version, build: build
+                    )
+                }
+            }
+        )
+    }
+
+    var body: some View {
+        Form {
+            XcodeSection(
+                settings: model, selection: $model.xcodeSelectionInput, isSaving: model.isSavingXcode,
+                saveError: model.xcodeSaveError, mac: .thisMac
+            ) {
+                Task { await model.saveXcodeSelection() }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+#Preview("Xcode Section", traits: .fixedLayout(width: 560, height: 360)) { XcodeSectionPreview() }
 #Preview("New Mac", traits: .fixedLayout(width: 760, height: 620)) { previewHostSplitViewController(pane: .overview, isSignedIn: false) }
 #Preview("Overview", traits: .fixedLayout(width: 760, height: 620)) {
     previewHostSplitViewController(pane: .overview, isSignedIn: true, pairing: .managing)

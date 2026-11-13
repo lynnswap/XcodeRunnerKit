@@ -79,6 +79,33 @@ struct HostSettingsServiceTests {
         #expect(try service.pool.configuration() == nil)
     }
 
+    @Test func xcodePatchSavesTheDeveloperDirectoryAndNullClearsIt() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root)
+        let xcode = InstalledXcode(developerDirectory: URL(filePath: "/Applications/Xcode.app/Contents/Developer"), version: "27.2", build: "27B48")
+        let service = HostSettingsService(installation: installation, installedXcodes: { [xcode] })
+        let unset = try #require(await service.getSettings(scope: .xcode).settings.first)
+        #expect(unset.value == .null)
+        #expect(unset.choices.map(\.label) == ["Xcode 27.2 (27B48)"])
+        #expect(unset.choices.map(\.value) == [.string("/Applications/Xcode.app/Contents/Developer")])
+
+        // A trailing slash names the same Xcode.
+        let saved = try await service.update(.xcode(developerDirectory: "/Applications/Xcode.app/Contents/Developer/"))
+        #expect(saved.settings.first?.value == .string("/Applications/Xcode.app/Contents/Developer"))
+        #expect(try installation.developerDirectory() == xcode.developerDirectory)
+        // Hosted operations read the saved Xcode from the host root that their job names.
+        let hosted = try HostInstallation.hostedConfiguration(environment: [
+            "XCODE_RUNNER_HOST_ROOT": installation.hostRoot.path(percentEncoded: false),
+            "XCODE_RUNNER_HOST_STORAGE_DIRECTORY": root.appending(path: "Storage").path(percentEncoded: false),
+        ])
+        #expect(hosted?.developerDirectory == xcode.developerDirectory)
+
+        _ = try await service.update(.xcode(developerDirectory: nil))
+        #expect(try installation.developerDirectory() == nil)
+        #expect(try service.pool.configuration() == nil)
+    }
+
     @Test func unavailableAppReturnsSavedRepositorySelectionWithoutAllowingEdits() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -100,6 +127,8 @@ struct HostSettingsServiceTests {
         #"{"scope":"pool","simulatorRetention":{"mode":"forever","minutes":20}}"#,
         #"{"scope":"pool","maximumConcurrentJobs":null}"#,
         #"{"scope":"buildService"}"#,
+        #"{"scope":"xcode"}"#,
+        #"{"scope":"xcode","developerDirectory":"Xcode.app/Contents/Developer"}"#,
         #"{"scope":"githubRepositories","selectedRepositoryIDs":[7,7]}"#,
     ])
     func rejectsFieldsThatDoNotBelongToTypedPatch(_ json: String) {

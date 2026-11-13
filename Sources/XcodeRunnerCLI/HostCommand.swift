@@ -73,7 +73,7 @@ struct Host: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Inspect or update host settings as JSON.", subcommands: [Get.self, Update.self])
 
         struct Get: AsyncParsableCommand {
-            @Option(help: "Return only this scope: pool, buildService, storage, or githubRepositories.")
+            @Option(help: "Return only this scope: pool, buildService, xcode, storage, or githubRepositories.")
             var scope: String?
 
             mutating func run() async throws {

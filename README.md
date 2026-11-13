@@ -88,7 +88,8 @@ the job log.
 
 Component downloads use the operation's selected Xcode, including
 `developerDirectory` in Swift, `--developer-directory` in the CLI, or inherited
-`DEVELOPER_DIR`. Xcode installation and setup that requires administrator access
+`DEVELOPER_DIR`. On an installed host, an operation that names none uses
+[the Xcode saved for that Mac](Documentation/NativeHost.md#configure-a-workflow). Xcode installation and setup that requires administrator access
 remain manual.
 
 ### Custom build service

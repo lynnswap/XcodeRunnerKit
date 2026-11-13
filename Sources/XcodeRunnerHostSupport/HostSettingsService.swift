@@ -34,7 +34,7 @@ package enum HostSettingValue: Codable, Sendable, Equatable {
 }
 
 package enum HostSettingsScope: String, Codable, Sendable, CaseIterable {
-    case pool, buildService, storage, githubRepositories
+    case pool, buildService, xcode, storage, githubRepositories
 }
 
 package struct HostSettingChoice: Codable, Sendable {
@@ -71,6 +71,8 @@ package struct HostSettingsUpdateResult: Codable, Sendable {
 package enum HostSettingsUpdate: Codable, Sendable {
     case pool(maximumConcurrentJobs: Int?, simulatorRetention: HostExecutionPool.SimulatorRetention?)
     case buildService(path: String?)
+    /// - Parameter developerDirectory: An Xcode's `Contents/Developer` directory, or `nil` for the system selection.
+    case xcode(developerDirectory: String?)
     case storage(directory: String)
     case githubRepositories(selectedRepositoryIDs: [Int])
 
@@ -78,13 +80,14 @@ package enum HostSettingsUpdate: Codable, Sendable {
         switch self {
         case .pool: .pool
         case .buildService: .buildService
+        case .xcode: .xcode
         case .storage: .storage
         case .githubRepositories: .githubRepositories
         }
     }
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
-        case scope, maximumConcurrentJobs, simulatorRetention, path, directory, selectedRepositoryIDs
+        case scope, maximumConcurrentJobs, simulatorRetention, path, developerDirectory, directory, selectedRepositoryIDs
     }
     private struct AnyKey: CodingKey {
         let stringValue: String
@@ -118,6 +121,12 @@ package enum HostSettingsUpdate: Codable, Sendable {
             guard container.contains(.path) else { throw HostSettingsError("Specify path, or null to clear the build service override.") }
             let path = try container.decodeIfPresent(String.self, forKey: .path)
             self = .buildService(path: path)
+        case .xcode:
+            fields = ["scope", "developerDirectory"]
+            guard container.contains(.developerDirectory) else {
+                throw HostSettingsError("Specify developerDirectory, or null to use the system's selected Xcode.")
+            }
+            self = .xcode(developerDirectory: try container.decodeIfPresent(String.self, forKey: .developerDirectory))
         case .storage:
             fields = ["scope", "directory"]
             let directory = try container.decode(String.self, forKey: .directory)
@@ -143,6 +152,7 @@ package enum HostSettingsUpdate: Codable, Sendable {
             try container.encodeIfPresent(retention, forKey: .simulatorRetention)
         case .buildService(let path):
             try container.encode(path, forKey: .path)
+        case .xcode(let developerDirectory): try container.encode(developerDirectory, forKey: .developerDirectory)
         case .storage(let directory): try container.encode(directory, forKey: .directory)
         case .githubRepositories(let ids): try container.encode(ids, forKey: .selectedRepositoryIDs)
         }
@@ -161,6 +171,7 @@ package enum HostSettingsUpdate: Codable, Sendable {
                 throw HostSettingsError("Simulator idle timeout minutes must be positive.")
             }
         case .buildService(let path): if let path { try Self.requireAbsolutePath(path) }
+        case .xcode(let developerDirectory): if let developerDirectory { try Self.requireAbsolutePath(developerDirectory) }
         case .storage(let directory): try Self.requireAbsolutePath(directory)
         case .githubRepositories(let ids):
             guard ids.allSatisfy({ $0 > 0 }), Set(ids).count == ids.count else {
@@ -173,15 +184,24 @@ package enum HostSettingsUpdate: Codable, Sendable {
 package struct HostSettingsService: Sendable {
     package let installation: HostInstallation
     package let pool: HostExecutionPool
+    /// Lists the Xcode apps on this Mac.
+    package let installedXcodes: @Sendable () -> [InstalledXcode]
     private let githubRequest: @Sendable (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse
 
     package init(
         installation: HostInstallation = .init(), pool: HostExecutionPool? = nil,
+        installedXcodes: @escaping @Sendable () -> [InstalledXcode] = InstalledXcode.installed,
         githubRequest: @escaping @Sendable (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = HostSettingsBridge.request
     ) {
         self.installation = installation
         self.pool = pool ?? HostExecutionPool(directory: installation.poolDirectory)
+        self.installedXcodes = installedXcodes
         self.githubRequest = githubRequest
+    }
+
+    @discardableResult
+    package func saveDeveloperDirectory(_ url: URL?) throws -> URL? {
+        try installation.saveDeveloperDirectory(url)
     }
 
     @discardableResult
@@ -204,6 +224,7 @@ package struct HostSettingsService: Sendable {
         var settings: [HostSetting] = []
         if scope == nil || scope == .pool { settings += poolSettings() }
         if scope == nil || scope == .buildService { settings.append(buildServiceSetting()) }
+        if scope == nil || scope == .xcode { settings.append(xcodeSetting()) }
         if scope == nil || scope == .storage { settings.append(storageSetting()) }
         if scope == nil || scope == .githubRepositories { settings.append(await repositorySetting()) }
         return HostSettingsSnapshot(settings: settings)
@@ -218,6 +239,8 @@ package struct HostSettingsService: Sendable {
             catch let failure as HostExecutionPool.ConfigurationCleanupFailure { errors.append(failure.localizedDescription) }
         case .buildService(let path):
             try saveBuildServiceExecutableURL(path.map { URL(filePath: $0) })
+        case .xcode(let developerDirectory):
+            try saveDeveloperDirectory(developerDirectory.map { URL(filePath: $0) })
         case .storage(let directory):
             _ = try await requestStorageDirectory(URL(filePath: directory))
         case .githubRepositories(let ids):
@@ -263,6 +286,20 @@ package struct HostSettingsService: Sendable {
             constraints: ["absolutePath": .bool(true)], choices: [], appliesAt: "nextCLIInvocation"
         )
         do { item.value = try installation.buildServiceExecutableURL().map { .string($0.path(percentEncoded: false)) } ?? .null }
+        catch { item.readError = error.localizedDescription }
+        return item
+    }
+
+    private func xcodeSetting() -> HostSetting {
+        var item = HostSetting(
+            key: "developerDirectory", scope: .xcode, type: "stringOrNull", defaultValue: .null,
+            constraints: ["absolutePath": .bool(true)],
+            choices: installedXcodes().map {
+                .init(value: .string($0.developerDirectory.path(percentEncoded: false)), label: $0.name)
+            },
+            appliesAt: "nextCLIInvocation"
+        )
+        do { item.value = try installation.developerDirectory().map { .string($0.path(percentEncoded: false)) } ?? .null }
         catch { item.readError = error.localizedDescription }
         return item
     }

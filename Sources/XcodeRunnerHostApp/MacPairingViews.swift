@@ -272,6 +272,12 @@ private struct PairedMacSettingsSections<Macs: MacList>: View {
                 if await macs.applyPoolConfiguration(of: mac.id) { await limitChanged() }
             }
         }
+        XcodeSection(
+            settings: report, selection: $settings.xcodeSelectionInput, isSaving: settings.isSavingXcode,
+            saveError: settings.xcodeSaveError, mac: MacReference(name: mac.name)
+        ) {
+            Task { await macs.saveXcodeSelection(of: mac.id) }
+        }
         StorageSection(
             settings: report, directory: $settings.storageDirectoryInput, isSaving: settings.isSavingStorage,
             saveError: settings.storageSaveError, mac: MacReference(name: mac.name), isRestarting: settings.isRestarting,
