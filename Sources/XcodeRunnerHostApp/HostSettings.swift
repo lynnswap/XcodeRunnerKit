@@ -134,6 +134,8 @@ protocol HostSettingsDisplay {
     /// The Xcode that the Mac's jobs use when they name none, or `nil` for the Xcode that `xcode-select` names.
     var savedDeveloperDirectory: URL? { get }
     var installedXcodes: [InstalledXcode] { get }
+    /// Whether the saved Xcode's folder no longer exists on the Mac, so that jobs that name no Xcode fail.
+    var savedXcodeIsMissing: Bool { get }
     var xcodeError: String? { get }
     var canApplyPoolConfiguration: Bool { get }
     var canEditStorage: Bool { get }
@@ -164,11 +166,6 @@ extension HostSettingsDisplay {
             return "New jobs wait for an available slot."
         }
         return "New jobs can start while slots are available."
-    }
-
-    /// Whether the saved Xcode is not among the installed ones, so that jobs that name no Xcode fail.
-    var savedXcodeIsMissing: Bool {
-        savedDeveloperDirectory.map { saved in !installedXcodes.contains { $0.developerDirectory == saved } } ?? false
     }
 
     /// Whether a saved storage folder waits for the next host launch.
@@ -202,6 +199,7 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
     let storageError: String?
     let savedDeveloperDirectory: URL?
     let installedXcodes: [InstalledXcode]
+    let savedXcodeIsMissing: Bool
     let xcodeError: String?
     let canApplyPoolConfiguration: Bool
     let canEditStorage: Bool
@@ -221,6 +219,7 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
         storageError = settings.storageError
         savedDeveloperDirectory = settings.savedDeveloperDirectory
         installedXcodes = settings.installedXcodes
+        savedXcodeIsMissing = settings.savedXcodeIsMissing
         xcodeError = settings.xcodeError
         canApplyPoolConfiguration = settings.canApplyPoolConfiguration
         canEditStorage = settings.canEditStorage
@@ -263,6 +262,7 @@ final class HostSettingsModel: HostSettingsDisplay {
     var storageDirectoryInput = ""
     private(set) var savedDeveloperDirectory: URL?
     private(set) var installedXcodes: [InstalledXcode] = []
+    private(set) var savedXcodeIsMissing = false
     private(set) var xcodeError: String?
     private(set) var xcodeSaveError: String?
     private(set) var isSavingXcode = false
@@ -430,6 +430,10 @@ final class HostSettingsModel: HostSettingsDisplay {
         } catch {
             xcodeError = "Could not read the saved Xcode: \(error.localizedDescription)"
         }
+        // The saved Xcode can be one that is not listed, such as a path through a symbolic link.
+        savedXcodeIsMissing = savedDeveloperDirectory.map {
+            !FileManager.default.fileExists(atPath: $0.path(percentEncoded: false))
+        } ?? false
         if let xcodesListedAt, xcodesListedAt.duration(to: .now) < Self.xcodeListLifetime { return }
         installedXcodes = settingsService.installedXcodes()
         xcodesListedAt = .now
@@ -454,6 +458,7 @@ final class HostSettingsModel: HostSettingsDisplay {
         do {
             savedDeveloperDirectory = try settingsService.saveDeveloperDirectory(path.map { URL(filePath: $0) })
             if xcodeSelectionInput == previous { xcodeSelectionInput = savedDeveloperDirectory?.path(percentEncoded: false) ?? "" }
+            refreshXcodes()
         } catch {
             throw HostSettingsError("Could not save the Xcode: \(error.localizedDescription)")
         }
@@ -725,9 +730,9 @@ struct XcodeSection<Settings: HostSettingsDisplay>: View {
                 ForEach(settings.installedXcodes) { xcode in
                     Text(xcode.name).tag(xcode.developerDirectory.path(percentEncoded: false))
                 }
-                // The saved Xcode stays selectable, so that the selection shows what is saved.
-                if settings.savedXcodeIsMissing, let saved {
-                    Text("Not installed: \(saved)").tag(saved)
+                // A saved Xcode that is not listed stays selectable, so that the selection shows what is saved.
+                if let saved, !settings.installedXcodes.contains(where: { $0.developerDirectory.path(percentEncoded: false) == saved }) {
+                    Text(settings.savedXcodeIsMissing ? "Not installed: \(saved)" : saved).tag(saved)
                 }
             }
             .disabled(isSaving)

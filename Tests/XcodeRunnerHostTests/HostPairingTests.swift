@@ -42,9 +42,10 @@ struct HostPairingTests {
     private func publicKey() -> Data { Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation }
 
     /// A Mac whose settings and runners answer the managing host, as in the app.
-    /// The Xcode that the Macs in these tests list, in place of the ones on the Mac that runs the tests.
+    /// The Xcode that the Macs in these tests list, in place of the ones on the Mac that runs the tests. Its folder
+    /// exists wherever Xcode is installed.
     private let xcode = InstalledXcode(
-        developerDirectory: URL(filePath: "/Applications/Xcode.app/Contents/Developer"), version: "27.2", build: "27B48"
+        developerDirectory: URL(filePath: "/Library/Developer", directoryHint: .notDirectory), version: "27.2", build: "27B48"
     )
 
     private func managedMac(
