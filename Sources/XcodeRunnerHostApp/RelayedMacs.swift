@@ -34,6 +34,9 @@ final class RelayedMacs: MacList {
     var discoveryMessage: String? { discoveryError ?? report?.discoveryMessage }
     var codeConfirmation: PairedMacs.CodeConfirmation? { report?.codeConfirmation }
 
+    /// Each Mac's change count, to read before a request whose answer `show(_:readSince:)` then checks.
+    var changeCounts: [HostPairing.ID: Int] { settings.mapValues(\.changeCount) }
+
     func status(of id: HostPairing.ID) -> PairedMacs.Status { report?.macs.first { $0.id == id }?.status ?? .notFound }
     func settings(of id: HostPairing.ID) -> PairedMacSettings? { settings[id] }
 
@@ -82,16 +85,18 @@ final class RelayedMacs: MacList {
         guard discovering == nil else { return }
         discoveryError = nil
         discovering = Task {
-            do {
-                show(try await hosts.requestManagedMacs(.discover, from: host))
-            } catch {
-                discoveryError = PairedMacSettings.changeFailure(error, on: hostName ?? "The host")
-                return
-            }
-            // The host lists the Macs that it finds, and stops looking once these reads stop.
+            // The host lists the Macs that it finds, and stops looking once it is no longer asked.
             while true {
+                let changeCounts = changeCounts
+                do {
+                    show(try await hosts.requestManagedMacs(.discover, from: host), readSince: changeCounts)
+                    discoveryError = nil
+                } catch is CancellationError {
+                    return
+                } catch {
+                    discoveryError = PairedMacSettings.changeFailure(error, on: hostName ?? "The host")
+                }
                 do { try await Task.sleep(for: Self.pairingInterval) } catch { return }
-                await read()
             }
         }
     }
@@ -100,24 +105,27 @@ final class RelayedMacs: MacList {
         discovering?.cancel()
         discovering = nil
         discoveryError = nil
-        Task { await send(.stopDiscovering) }
     }
 
     /// Has the host pair with a waiting Mac. The host pairs while the person confirms the code on the dashboard and
     /// allows the pairing on the Mac.
     func pair(with id: WaitingMac.ID) async throws -> ListedMac {
-        show(try await hosts.requestManagedMacs(.pair(waitingMac: id), from: host))
-        return try await withTaskCancellationHandler {
+        do {
+            show(try await hosts.requestManagedMacs(.pair(waitingMac: id), from: host))
             while true {
                 try await Task.sleep(for: Self.pairingInterval)
+                let changeCounts = changeCounts
                 let report = try await hosts.requestManagedMacs(.read(refreshing: nil), from: host)
-                show(report)
+                show(report, readSince: changeCounts)
                 if let mac = report.pairedMac { return mac }
                 if let error = report.pairingError { throw HostLinkError.refused(error) }
                 guard report.isPairing else { throw HostLinkError.unexpectedReply }
             }
-        } onCancel: {
-            Task { @MainActor in await self.send(.cancelPairing) }
+        } catch {
+            // The host may still be pairing, with no dashboard left to show the code: this sheet was cancelled, or
+            // a request to the host failed. The task that ends here may be cancelled, so another one tells the host.
+            Task { _ = try? await self.hosts.requestManagedMacs(.cancelPairing, from: self.host) }
+            throw error
         }
     }
 
@@ -128,7 +136,7 @@ final class RelayedMacs: MacList {
     private var hostName: String? { hosts.mac(host)?.name }
 
     private func read(refreshing id: HostPairing.ID? = nil) async {
-        let changeCounts = settings.mapValues(\.changeCount)
+        let changeCounts = changeCounts
         // The host's own panes show whether it answers.
         guard let report = try? await hosts.requestManagedMacs(.read(refreshing: id), from: host) else { return }
         show(report, readSince: changeCounts)

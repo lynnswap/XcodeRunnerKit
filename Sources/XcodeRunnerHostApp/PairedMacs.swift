@@ -217,8 +217,10 @@ final class PairedMacs: MacList {
     /// Kept while a Mac is not found, so that its pane can show when the settings were last read.
     private(set) var settings: [HostPairing.ID: PairedMacSettings] = [:]
     private(set) var pairableMacs: [PairableMac] = []
+    /// How many sheets and dashboards look for Macs that wait to pair.
+    private var discoveryUsers = 0
     /// Whether this Mac lists the Macs that wait to pair.
-    private(set) var isDiscovering = false
+    var isDiscovering: Bool { discoveryUsers > 0 }
     /// The Macs that each host manages, which a dashboard reaches through that host.
     private var relayed: [HostPairing.ID: RelayedMacs] = [:]
     private(set) var message: String?
@@ -300,10 +302,11 @@ final class PairedMacs: MacList {
         for task in tasks { await task?.value }
     }
 
-    /// Lists Macs that wait to pair with a Mac of this role until `stopDiscoveringPairableMacs()`.
+    /// Lists Macs that wait to pair with a Mac of this role until `stopDiscoveringPairableMacs()`. This Mac keeps
+    /// looking until everyone who started has stopped.
     func discoverPairableMacs() {
-        guard !isDiscovering else { return }
-        isDiscovering = true
+        discoveryUsers += 1
+        guard discoveryUsers == 1 else { return }
         discoveryMessage = nil
         guard browses else { return }
         pairableBrowsing = Task {
@@ -328,9 +331,11 @@ final class PairedMacs: MacList {
     }
 
     func stopDiscoveringPairableMacs() {
+        guard discoveryUsers > 0 else { return }
+        discoveryUsers -= 1
+        guard discoveryUsers == 0 else { return }
         pairableBrowsing?.cancel()
         pairableBrowsing = nil
-        isDiscovering = false
         pairableMacs = []
         discoveryMessage = nil
     }
@@ -459,6 +464,7 @@ final class PairedMacs: MacList {
         defer { checking.remove(id) }
         if statuses[id] == nil || statuses[id] == .notFound { statuses[id] = .checking }
         let changeCount = settings[id]?.changeCount
+        let managedChangeCounts = relayed[id]?.changeCounts
         let status: Status
         var report: HostSettingsReport?
         var github: GitHubReport?
@@ -484,7 +490,7 @@ final class PairedMacs: MacList {
             settings.show(report)
             if let github { settings.show(github) }
         }
-        if let managed { macsManaged(by: id).show(managed) }
+        if let managed { macsManaged(by: id).show(managed, readSince: managedChangeCounts) }
     }
 
     /// Reads a Mac's settings every `settingsInterval` until the task is cancelled.
@@ -642,7 +648,7 @@ final class PairedMacs: MacList {
         }
         // The host reads or changes one of its Macs before it answers, within its own time limits.
         let timeout = switch request {
-        case .read(nil), .discover, .stopDiscovering, .pair, .confirmCode, .cancelPairing: HostLink.requestTimeout
+        case .read(nil), .discover, .pair, .confirmCode, .cancelPairing: HostLink.requestTimeout
         case .read: HostLink.requestTimeout * 3
         case .configurePool, .saveStorage, .remove: Self.changeTimeout
         }

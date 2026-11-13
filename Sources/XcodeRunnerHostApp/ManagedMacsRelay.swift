@@ -9,9 +9,8 @@ enum ManagedMacsRequest: Codable, Sendable {
     case saveStorage(directory: String, mac: HostPairing.ID)
     /// Ends the pairing between the host and a Mac.
     case remove(mac: HostPairing.ID)
-    /// Lists the Macs that wait to pair with the host, until `stopDiscovering` or until the dashboard stops reading.
+    /// Lists the Macs that wait to pair with the host. The host keeps looking while dashboards keep asking.
     case discover
-    case stopDiscovering
     /// Starts pairing the host with a waiting Mac. Later reads carry the code to confirm, and the result.
     case pair(waitingMac: WaitingMac.ID)
     /// Confirms that the Mac being paired shows the same code as the report.
@@ -48,8 +47,9 @@ struct ManagedMacsReport: Codable, Equatable, Sendable {
 /// Answers a dashboard's requests about the Macs that this host manages, with the operations of this host's own window.
 @MainActor
 final class ManagedMacsRelay {
-    /// How long the host keeps listing waiting Macs after a dashboard's last read, in case the dashboard left.
-    static let discoveryLifetime = Duration.seconds(30)
+    /// How long the host keeps listing waiting Macs after a dashboard last asked. A dashboard asks again while its
+    /// sheet is open, and cannot always say that it closed.
+    static let discoveryLifetime = Duration.seconds(10)
 
     private let macs: PairedMacs
     private let canAddMacs: @MainActor () -> Bool
@@ -57,7 +57,7 @@ final class ManagedMacsRelay {
     private var pairedMac: ListedMac?
     private var pairingError: String?
     private var discovery: Task<Void, Never>?
-    private var lastDiscoveryRead = ContinuousClock.now
+    private var lastDiscoveryRequest = ContinuousClock.now
 
     init(macs: PairedMacs, canAddMacs: @escaping @MainActor () -> Bool) {
         self.macs = macs
@@ -85,7 +85,6 @@ final class ManagedMacsRelay {
         do {
             switch request {
             case .read(let refreshing):
-                lastDiscoveryRead = .now
                 if let refreshing { await macs.refresh(refreshing) }
             case .configurePool(let changes, let mac):
                 let previous = macs.settings(of: mac)?.report?.poolStatus?.configuration.maximumConcurrentJobs
@@ -97,11 +96,8 @@ final class ManagedMacsRelay {
                 await macs.remove(mac)
             case .discover:
                 try requireCanAddMacs()
-                lastDiscoveryRead = .now
-                macs.discoverPairableMacs()
-                stopDiscoveringWhenUnread()
-            case .stopDiscovering:
-                stopDiscovering()
+                lastDiscoveryRequest = .now
+                discoverWhileAsked()
             case .pair(let waitingMac):
                 try requireCanAddMacs()
                 guard pairing == nil, macs.codeConfirmation == nil else {
@@ -132,8 +128,6 @@ final class ManagedMacsRelay {
 
     func shutDown() async {
         let tasks = [pairing, discovery]
-        pairing = nil
-        discovery = nil
         for task in tasks { task?.cancel() }
         for task in tasks { await task?.value }
     }
@@ -144,18 +138,13 @@ final class ManagedMacsRelay {
         }
     }
 
-    private func stopDiscovering() {
-        discovery?.cancel()
-        discovery = nil
-        macs.stopDiscoveringPairableMacs()
-    }
-
-    /// A dashboard that quits or loses the host cannot say that it stopped looking.
-    private func stopDiscoveringWhenUnread() {
+    /// Looks for waiting Macs for every dashboard that asks, alongside this host's own Add Mac sheet.
+    private func discoverWhileAsked() {
         guard discovery == nil else { return }
+        macs.discoverPairableMacs()
         discovery = Task {
-            while lastDiscoveryRead.duration(to: .now) < Self.discoveryLifetime {
-                do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            while lastDiscoveryRequest.duration(to: .now) < Self.discoveryLifetime {
+                do { try await Task.sleep(for: .seconds(1)) } catch { break }
             }
             discovery = nil
             macs.stopDiscoveringPairableMacs()

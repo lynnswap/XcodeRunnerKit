@@ -521,7 +521,6 @@ struct HostPairingTests {
         #expect(host.managedMacs.macs.map(\.id) == [managed.id, added.id])
         #expect(other.manager?.name == "Host")
         macs.stopDiscoveringPairableMacs()
-        try await waitUntil { !host.managedMacs.isDiscovering }
 
         // Removing a Mac on the dashboard ends its pairing with the host.
         try await waitUntil { other.managementPort != nil }
