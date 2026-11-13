@@ -138,6 +138,8 @@ final class PairedMacs {
     static let changeTimeout = Duration.seconds(300)
     /// How long a Mac has to download the official runner archive.
     static let downloadTimeout = Duration.seconds(900)
+    /// How often a host is asked for its sign-in code while GitHub has not issued it.
+    static let signInCodeInterval = Duration.milliseconds(500)
 
     private let store: any SecretStore
     private let name: String
@@ -462,10 +464,26 @@ final class PairedMacs {
         }
     }
 
-    /// Starts the host's GitHub sign-in and opens GitHub's page for its code in this Mac's browser.
+    /// Starts the host's GitHub sign-in and, once GitHub issued its code, opens GitHub's page for it in this Mac's
+    /// browser.
     func signIn(to id: HostPairing.ID) async {
-        guard let code = await changeGitHub(.signIn, of: id)?.signInCode else { return }
-        if !openURL(code.verificationURI) { settings[id]?.githubError = "Could not open your browser." }
+        guard let mac = mac(id), let settings = settings[id], var report = await changeGitHub(.signIn, of: id) else { return }
+        // The host answers before GitHub issues the code, so the sign-in can be cancelled while it waits.
+        while report.isConnecting, report.signInCode == nil {
+            do {
+                try await Task.sleep(for: Self.signInCodeInterval)
+                report = try await requestGitHub(.read, from: mac)
+            } catch is CancellationError {
+                return
+            } catch {
+                settings.githubError = Self.changeFailure(error, on: mac)
+                return
+            }
+            if !settings.isChangingGitHub { settings.show(report) }
+        }
+        if let code = report.signInCode, !openURL(code.verificationURI) {
+            settings.githubError = "Could not open your browser."
+        }
     }
 
     func cancelSignIn(to id: HostPairing.ID) async { await changeGitHub(.cancelSignIn, of: id) }

@@ -43,7 +43,7 @@ enum HostSettingsRequest: Codable, Sendable {
 /// afterwards, and keeps its tokens.
 enum GitHubRequest: Codable, Sendable {
     case read
-    /// Starts the device flow on the host. The reply carries the code for the person to enter on GitHub's page.
+    /// Starts the device flow on the host. A later read carries the code for the person to enter on GitHub's page.
     case signIn
     case cancelSignIn
     case signOut

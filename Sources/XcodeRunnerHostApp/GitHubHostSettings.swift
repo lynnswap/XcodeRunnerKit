@@ -46,8 +46,6 @@ final class GitHubHostSettings {
     private var configuration = GitHubHostConfiguration()
     private var connectionTask: Task<Void, Never>?
     private var synchronizationTask: Task<Void, Never>?
-    /// Dashboards' requests that wait for a sign-in to show its code or end.
-    private var signInWaiters: [CheckedContinuation<Void, Never>] = []
     var selectedRepositoryIDs: Set<Int> = []
     private(set) var account: GitHubAccount?
     private(set) var repositories: [GitHubRepository] = []
@@ -124,7 +122,6 @@ final class GitHubHostSettings {
             do {
                 let authorization = try await authentication.begin()
                 deviceAuthorization = authorization
-                resumeSignInWaiters()
                 if opensBrowser { try openBrowser(authorization.verificationURI) }
                 account = try await authentication.finish(authorization)
                 await loadRepositories()
@@ -143,13 +140,6 @@ final class GitHubHostSettings {
         deviceAuthorization = nil
         connectionTask = nil
         isConnecting = false
-        resumeSignInWaiters()
-    }
-
-    private func resumeSignInWaiters() {
-        let waiters = signInWaiters
-        signInWaiters = []
-        for waiter in waiters { waiter.resume() }
     }
 
     /// What this Mac's window shows, and what this Mac sends a dashboard.
@@ -257,11 +247,8 @@ final class GitHubHostSettings {
             case .read: break
             case .signIn:
                 guard !isBusy else { throw Self.busy }
+                // The reply does not wait for GitHub to issue the code, so the dashboard can cancel meanwhile.
                 signIn(opensBrowser: false)
-                // The reply carries the code, or the error that kept GitHub from issuing one.
-                if isConnecting, deviceAuthorization == nil {
-                    await withCheckedContinuation { signInWaiters.append($0) }
-                }
             case .cancelSignIn:
                 cancelConnection()
                 await connectionTask?.value

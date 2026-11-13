@@ -74,6 +74,14 @@ struct HostPairingTests {
         try await waitUntil { management.managementPort != nil }
         await macs.checkStatus(of: mac.id, at: try local(management.managementPort))
         #expect(macs.status(of: mac.id) == .online)
+        // A managing host registers the Mac's runners from its own sign-in, and leaves the Mac's GitHub settings alone.
+        let reply = try await HostLink.send(
+            .github(.signOut), to: try local(management.managementPort), key: mac.pairing.symmetricKey, identity: mac.id.uuidString
+        )
+        guard case .refused("Managed shares its GitHub settings only with a dashboard.") = reply else {
+            Issue.record("Expected the Mac to refuse the managing host, not \(reply)")
+            return
+        }
 
         await macs.remove(mac.id)
         #expect(macs.macs.isEmpty)

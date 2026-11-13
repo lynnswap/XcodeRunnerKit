@@ -114,8 +114,11 @@ final class HostManagement {
                         }
                         try delivery.get()
                     case .github(let request):
-                        guard let github = await self.settings?.github else {
-                            try await reply(.refused("\(self.name) cannot share its GitHub settings."))
+                        // A managing host registers this Mac's runners from its own sign-in and selection.
+                        guard role == .dashboard, let github = await self.settings?.github else {
+                            try await reply(.refused(role == .dashboard
+                                ? "\(self.name) cannot share its GitHub settings."
+                                : "\(self.name) shares its GitHub settings only with a dashboard."))
                             return
                         }
                         let answer = await github.answer(request)
