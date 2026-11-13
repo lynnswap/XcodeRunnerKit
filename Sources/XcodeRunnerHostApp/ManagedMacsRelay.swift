@@ -15,8 +15,8 @@ enum ManagedMacsRequest: Codable, Sendable {
     ///
     /// - Parameter attempt: Names this pairing, so that the dashboard reads and cancels only its own.
     case pair(waitingMac: WaitingMac.ID, attempt: UUID)
-    /// Confirms that the Mac being paired shows the same code as the report.
-    case confirmCode
+    /// Confirms that the Mac being paired as `attempt` shows the same code as the report.
+    case confirmCode(attempt: UUID)
     /// Stops the pairing that the dashboard started as `attempt`, if the host is still pairing for it.
     case cancelPairing(attempt: UUID)
 }
@@ -38,9 +38,10 @@ struct ManagedMacsReport: Codable, Equatable, Sendable {
     let canAddMacs: Bool
     let waitingMacs: [WaitingMac]
     let discoveryMessage: String?
-    let codeConfirmation: PairedMacs.CodeConfirmation?
     /// The last pairing that a dashboard started.
     let pairingAttempt: UUID?
+    /// The code of `pairingAttempt`, for the dashboard that started it to compare and confirm.
+    let codeConfirmation: PairedMacs.CodeConfirmation?
     /// Whether the host is still pairing for `pairingAttempt`.
     let isPairing: Bool
     /// The Mac that `pairingAttempt` added.
@@ -79,8 +80,10 @@ final class ManagedMacsRelay {
                 )
             },
             message: macs.message, canAddMacs: canAddMacs(), waitingMacs: macs.waitingMacs,
-            discoveryMessage: macs.discoveryMessage, codeConfirmation: macs.codeConfirmation,
-            pairingAttempt: pairingAttempt, isPairing: pairing != nil, pairedMac: pairedMac, pairingError: pairingError
+            discoveryMessage: macs.discoveryMessage, pairingAttempt: pairingAttempt,
+            // A pairing from this host's own Add Mac sheet shows its code there.
+            codeConfirmation: pairing != nil ? macs.codeConfirmation : nil,
+            isPairing: pairing != nil, pairedMac: pairedMac, pairingError: pairingError
         )
     }
 
@@ -120,7 +123,8 @@ final class ManagedMacsRelay {
                     }
                     pairing = nil
                 }
-            case .confirmCode:
+            case .confirmCode(let attempt):
+                guard attempt == pairingAttempt, pairing != nil else { break }
                 macs.confirmCode()
             case .cancelPairing(let attempt):
                 guard attempt == pairingAttempt else { break }

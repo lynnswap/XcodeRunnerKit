@@ -5,7 +5,7 @@ import Observation
 /// pairing with these Macs.
 @MainActor @Observable
 final class RelayedMacs: MacList {
-    /// How often the host is read while it lists waiting Macs or pairs with one.
+    /// How often the host is asked while it lists waiting Macs or pairs with one.
     static let pairingInterval = Duration.milliseconds(500)
 
     // The hosts own this list and remove it with its host.
@@ -17,6 +17,11 @@ final class RelayedMacs: MacList {
     private var requestError: String?
     private var discoveryError: String?
     private var discovering: Task<Void, Never>?
+    /// The pairing that this dashboard started on the host. The host pairs for one dashboard at a time.
+    private var pairingAttempt: UUID?
+    /// Requests are numbered as they are sent, because their answers can arrive in another order.
+    private var lastRequest = 0
+    private var lastShownRequest = 0
 
     init(hosts: PairedMacs, host: HostPairing.ID) {
         self.hosts = hosts
@@ -32,26 +37,32 @@ final class RelayedMacs: MacList {
     var canAddMacs: Bool { report?.canAddMacs == true }
     var waitingMacs: [WaitingMac] { report?.waitingMacs ?? [] }
     var discoveryMessage: String? { discoveryError ?? report?.discoveryMessage }
-    var codeConfirmation: PairedMacs.CodeConfirmation? { report?.codeConfirmation }
-
-    /// Each Mac's change count, to read before a request whose answer `show(_:readSince:)` then checks.
-    var changeCounts: [HostPairing.ID: Int] { settings.mapValues(\.changeCount) }
+    /// The code of the pairing that this dashboard started. Another dashboard's pairing shows its code there.
+    var codeConfirmation: PairedMacs.CodeConfirmation? {
+        guard let pairingAttempt, report?.pairingAttempt == pairingAttempt else { return nil }
+        return report?.codeConfirmation
+    }
 
     func status(of id: HostPairing.ID) -> PairedMacs.Status { report?.macs.first { $0.id == id }?.status ?? .notFound }
     func settings(of id: HostPairing.ID) -> PairedMacSettings? { settings[id] }
 
-    /// Shows what the host answered.
-    ///
-    /// - Parameter changeCounts: Each Mac's change count before the request, so that a read that overlaps a change
-    ///   does not show the settings from before it.
-    func show(_ report: ManagedMacsReport, readSince changeCounts: [HostPairing.ID: Int]? = nil) {
+    /// Numbers a request that is about to be sent, for `show(_:answering:)`.
+    func nextRequest() -> Int {
+        lastRequest += 1
+        return lastRequest
+    }
+
+    /// Shows what the host answered, unless the answer to a later request is already shown: the earlier answer can
+    /// list a Mac that was removed since, or settings from before a change.
+    func show(_ report: ManagedMacsReport, answering request: Int) {
+        guard request > lastShownRequest else { return }
+        lastShownRequest = request
         var next: [HostPairing.ID: PairedMacSettings] = [:]
         for mac in report.macs {
             let settings = settings[mac.id] ?? PairedMacSettings()
             next[mac.id] = settings
-            guard let read = mac.settings, let readAt = mac.readAt, !settings.isChanging else { continue }
-            if let changeCounts, changeCounts[mac.id] ?? 0 != settings.changeCount { continue }
-            settings.show(read, readAt: readAt)
+            // A change that is still being sent shows the settings that it saved.
+            if let read = mac.settings, let readAt = mac.readAt, !settings.isChanging { settings.show(read, readAt: readAt) }
         }
         settings = next
         self.report = report
@@ -59,7 +70,8 @@ final class RelayedMacs: MacList {
 
     func watchSettings(of id: HostPairing.ID) async {
         while true {
-            await read(refreshing: id)
+            // The host's own panes show whether it answers.
+            _ = try? await request(.read(refreshing: id))
             do { try await Task.sleep(for: PairedMacs.settingsInterval) } catch { return }
         }
     }
@@ -87,9 +99,8 @@ final class RelayedMacs: MacList {
         discovering = Task {
             // The host lists the Macs that it finds, and stops looking once it is no longer asked.
             while true {
-                let changeCounts = changeCounts
                 do {
-                    show(try await hosts.requestManagedMacs(.discover, from: host), readSince: changeCounts)
+                    try await request(.discover)
                     discoveryError = nil
                 } catch is CancellationError {
                     return
@@ -111,13 +122,13 @@ final class RelayedMacs: MacList {
     /// allows the pairing on the Mac.
     func pair(with id: WaitingMac.ID) async throws -> ListedMac {
         let attempt = UUID()
+        pairingAttempt = attempt
+        defer { if pairingAttempt == attempt { pairingAttempt = nil } }
         do {
-            show(try await hosts.requestManagedMacs(.pair(waitingMac: id, attempt: attempt), from: host))
+            try await request(.pair(waitingMac: id, attempt: attempt))
             while true {
                 try await Task.sleep(for: Self.pairingInterval)
-                let changeCounts = changeCounts
-                let report = try await hosts.requestManagedMacs(.read(refreshing: nil), from: host)
-                show(report, readSince: changeCounts)
+                let report = try await request(.read(refreshing: nil))
                 // Another dashboard's pairing replaces this one's result once this one ended.
                 guard report.pairingAttempt == attempt else { throw HostLinkError.unexpectedReply }
                 if let mac = report.pairedMac { return mac }
@@ -128,28 +139,31 @@ final class RelayedMacs: MacList {
             // The host may still be pairing for this attempt, with no dashboard left to show the code: this sheet was
             // cancelled, or a request to the host failed. The task that ends here may be cancelled, so another one
             // tells the host.
-            Task { _ = try? await self.hosts.requestManagedMacs(.cancelPairing(attempt: attempt), from: self.host) }
+            Task { _ = try? await self.request(.cancelPairing(attempt: attempt)) }
             throw error
         }
     }
 
     func confirmCode() {
-        Task { await send(.confirmCode) }
+        guard let pairingAttempt else { return }
+        Task { await send(.confirmCode(attempt: pairingAttempt)) }
     }
 
     private var hostName: String? { hosts.mac(host)?.name }
 
-    private func read(refreshing id: HostPairing.ID? = nil) async {
-        let changeCounts = changeCounts
-        // The host's own panes show whether it answers.
-        guard let report = try? await hosts.requestManagedMacs(.read(refreshing: id), from: host) else { return }
-        show(report, readSince: changeCounts)
+    /// Sends a request and shows what the host answered.
+    @discardableResult
+    private func request(_ request: ManagedMacsRequest) async throws -> ManagedMacsReport {
+        let number = nextRequest()
+        let report = try await hosts.requestManagedMacs(request, from: host)
+        show(report, answering: number)
+        return report
     }
 
     /// Sends a change and shows what the host answered, or why it did not confirm the change.
-    private func send(_ request: ManagedMacsRequest) async {
+    private func send(_ change: ManagedMacsRequest) async {
         do {
-            show(try await hosts.requestManagedMacs(request, from: host))
+            try await request(change)
             requestError = nil
         } catch {
             requestError = PairedMacSettings.changeFailure(error, on: hostName ?? "The host")
@@ -157,10 +171,10 @@ final class RelayedMacs: MacList {
     }
 
     /// Sends a change to one Mac's settings and returns the settings that the Mac answered the host with.
-    private func change(_ request: ManagedMacsRequest, of id: HostPairing.ID) async throws -> HostSettingsReport {
-        let report = try await hosts.requestManagedMacs(request, from: host)
-        show(report)
-        guard let settings = report.macs.first(where: { $0.id == id })?.settings else { throw HostLinkError.unexpectedReply }
+    private func change(_ change: ManagedMacsRequest, of id: HostPairing.ID) async throws -> HostSettingsReport {
+        guard let settings = try await request(change).macs.first(where: { $0.id == id })?.settings else {
+            throw HostLinkError.unexpectedReply
+        }
         return settings
     }
 }

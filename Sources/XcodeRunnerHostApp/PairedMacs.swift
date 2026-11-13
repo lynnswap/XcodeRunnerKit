@@ -472,7 +472,7 @@ final class PairedMacs: MacList {
         defer { checking.remove(id) }
         if statuses[id] == nil || statuses[id] == .notFound { statuses[id] = .checking }
         let changeCount = settings[id]?.changeCount
-        let managedChangeCounts = relayed[id]?.changeCounts
+        let managedRequest = role == .dashboard ? macsManaged(by: id).nextRequest() : nil
         let status: Status
         var report: HostSettingsReport?
         var github: GitHubReport?
@@ -498,7 +498,7 @@ final class PairedMacs: MacList {
             settings.show(report)
             if let github { settings.show(github) }
         }
-        if let managed { macsManaged(by: id).show(managed, readSince: managedChangeCounts) }
+        if let managed, let managedRequest { relayed[id]?.show(managed, answering: managedRequest) }
     }
 
     /// Reads a Mac's settings every `settingsInterval` until the task is cancelled.
