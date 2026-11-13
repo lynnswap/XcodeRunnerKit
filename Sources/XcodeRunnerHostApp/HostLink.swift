@@ -193,7 +193,13 @@ enum HostLinkError: LocalizedError, Equatable {
     case unexpectedReply
 
     init(_ error: NWError) {
-        if case .tls = error { self = .rejected } else { self = .unreachable(error.localizedDescription) }
+        // A Mac that stops listening while the connection is made closes it in the handshake without an alert. A Mac
+        // without the key answers with one.
+        if case .tls(let status) = error, status != errSSLClosedNoNotify {
+            self = .rejected
+        } else {
+            self = .unreachable(error.localizedDescription)
+        }
     }
 
     var errorDescription: String? {
