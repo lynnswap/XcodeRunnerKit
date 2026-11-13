@@ -87,7 +87,7 @@ final class ManagedMacsRelay {
         )
     }
 
-    /// - Returns: The reply, and whether a Mac saved a different job limit, so that this host registers its runners
+    /// - Returns: The reply, and whether a Mac saved an edited job limit, so that this host registers its runners
     ///   as it does after Apply in its own pane for the Mac.
     func answer(_ request: ManagedMacsRequest) async -> (reply: HostLinkReply, limitChanged: Bool) {
         var limitChanged = false
@@ -96,9 +96,10 @@ final class ManagedMacsRelay {
             case .read(let refreshing):
                 if let refreshing { await macs.refresh(refreshing) }
             case .configurePool(let changes, let mac):
-                let previous = macs.settings(of: mac)?.report?.poolStatus?.configuration.maximumConcurrentJobs
-                let saved = try await macs.relay(.configurePool(changes), to: mac)
-                limitChanged = saved.poolStatus?.configuration.maximumConcurrentJobs != previous
+                _ = try await macs.relay(.configurePool(changes), to: mac)
+                // The dashboard sends a limit only when it was edited. This host's last read of the Mac may be older
+                // than the limit that the edit replaced, so it does not decide whether the limit changed.
+                limitChanged = changes.maximumConcurrentJobs != nil
             case .saveStorage(let directory, let mac):
                 _ = try await macs.relay(.saveStorage(directory: directory), to: mac)
             case .remove(let mac):
