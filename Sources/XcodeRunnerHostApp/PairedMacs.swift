@@ -470,6 +470,7 @@ final class PairedMacs {
         guard let mac = mac(id), let settings = settings[id], var report = await changeGitHub(.signIn, of: id) else { return }
         // The host answers before GitHub issues the code, so the sign-in can be cancelled while it waits.
         while report.isConnecting, report.signInCode == nil {
+            let changeCount = settings.changeCount
             do {
                 try await Task.sleep(for: Self.signInCodeInterval)
                 report = try await requestGitHub(.read, from: mac)
@@ -479,7 +480,9 @@ final class PairedMacs {
                 settings.githubError = Self.changeFailure(error, on: mac)
                 return
             }
-            if !settings.isChangingGitHub { settings.show(report) }
+            // A change made meanwhile, such as cancelling, already showed newer settings than this read.
+            guard settings.changeCount == changeCount, !settings.isChanging else { return }
+            settings.show(report)
         }
         if let code = report.signInCode, !openURL(code.verificationURI) {
             settings.githubError = "Could not open your browser."

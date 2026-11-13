@@ -169,9 +169,10 @@ private struct DashboardPaneView: View {
             if let pane = navigation.pane, let host {
                 switch pane {
                 case .overview:
-                    DashboardHostPane(hosts: hosts, host: host) { _, report, github in
+                    DashboardHostPane(hosts: hosts, host: host) { settings, report, github in
                         HostOverviewView(
-                            settings: report, github: github, mac: MacReference(name: host.name), actions: actions(for: host)
+                            settings: report, github: github, mac: MacReference(name: host.name),
+                            requestError: settings.githubError, actions: actions(for: host)
                         ) {
                             navigation.pane = .github(host.id)
                         }

@@ -162,6 +162,8 @@ struct HostOverviewView<Settings: HostSettingsDisplay>: View {
     let settings: Settings
     let github: GitHubReport
     let mac: MacReference
+    /// Why the Mac refused the last GitHub request from a dashboard, or why it did not confirm it.
+    var requestError: String?
     let actions: GitHubActions
     /// Shows the GitHub pane, where the sign-in code and the repository selection are.
     let showGitHub: () -> Void
@@ -184,6 +186,9 @@ struct HostOverviewView<Settings: HostSettingsDisplay>: View {
                 Text("Repositories")
             } footer: {
                 if github.managesMacs { Text("Counts include the Macs that \(mac.object) manages.") }
+            }
+            if let requestError {
+                Section { ErrorText(requestError) }
             }
         }
     }
