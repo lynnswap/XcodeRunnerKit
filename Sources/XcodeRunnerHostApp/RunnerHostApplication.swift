@@ -483,6 +483,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             await runner.task.value
             print("Paused \(directory.lastPathComponent).")
         }
+        settings.refreshPause()
         guard settings.isPaused else { return [] }
         var finishing: Set<URL> = []
         var stopping: [(directory: URL, task: Task<Void, Never>)] = []

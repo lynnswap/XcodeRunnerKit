@@ -366,6 +366,10 @@ final class HostSettingsModel: HostSettingsDisplay {
         restartHost?()
     }
 
+    /// Reads the record again, which can change outside this window as the saved storage folder and Xcode can. The
+    /// scan of the runner services calls this, because reading the pool's status can wait for another process.
+    func refreshPause() { isPaused = installation.isPaused() }
+
     /// Pauses or resumes this Mac from its own window.
     func setPaused(_ isPaused: Bool) {
         do {
@@ -514,8 +518,6 @@ final class HostSettingsModel: HostSettingsDisplay {
     func refreshPoolStatus() async {
         refreshStorageSelection()
         refreshXcodes()
-        // The record can change outside this window, as the saved storage folder and Xcode can.
-        isPaused = installation.isPaused()
         do {
             let status = try await pool.status()
             poolStatus = status
