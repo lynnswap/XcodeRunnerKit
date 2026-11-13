@@ -34,6 +34,11 @@ struct KeychainSecretStore: SecretStore {
         Self(service: "lynnpd.xcodehomerunner.pairing", hostRoot: hostRoot, name: "managed-macs")
     }
 
+    /// The hosts that this Mac shows as a dashboard.
+    static func dashboardHosts(hostRoot: URL) -> Self {
+        Self(service: "lynnpd.xcodehomerunner.pairing", hostRoot: hostRoot, name: "dashboard-hosts")
+    }
+
     func read() throws -> Data? {
         var query = baseQuery
         query[kSecReturnData] = true

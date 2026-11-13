@@ -3,7 +3,16 @@ import Foundation
 import Network
 import Security
 
-/// A pairing between a managing host and a Mac it manages, kept by both of them.
+/// What the Mac that asks to pair does with the other Mac.
+enum PairingRole: String, Codable, Sendable {
+    /// Registers the Mac's runners and changes its settings.
+    case manager
+    /// Shows the Mac's status and changes its settings from another Mac's window.
+    case dashboard
+}
+
+/// A pairing between two Macs, kept by both of them: a managing host and a Mac it manages, or a dashboard and a host
+/// it shows.
 struct HostPairing: Codable, Equatable, Identifiable, Sendable {
     /// Names this pairing on each connection as the TLS pre-shared key identity.
     let id: UUID
@@ -14,7 +23,7 @@ struct HostPairing: Codable, Equatable, Identifiable, Sendable {
     var symmetricKey: SymmetricKey { SymmetricKey(data: key) }
 }
 
-/// A request from a managing host to a Mac it manages.
+/// A request from a managing host or a dashboard to a Mac paired with it.
 enum HostLinkRequest: Codable, Sendable {
     case settings(HostSettingsRequest)
     case runners(RunnerRequest)
@@ -22,7 +31,7 @@ enum HostLinkRequest: Codable, Sendable {
     case unpair
 }
 
-/// Reads or changes a managed Mac's settings. The Mac answers with its settings afterwards.
+/// Reads or changes a paired Mac's settings. The Mac answers with its settings afterwards.
 enum HostSettingsRequest: Codable, Sendable {
     case read
     case configurePool(PoolSettingsDraft.Changes)
@@ -30,7 +39,7 @@ enum HostSettingsRequest: Codable, Sendable {
 }
 
 /// Reads or changes a managed Mac's runner folders. The managing host compares them with GitHub and makes the GitHub
-/// requests, so only registration tokens leave it.
+/// requests, so only registration tokens leave it. A Mac refuses these requests from a dashboard.
 enum RunnerRequest: Codable, Sendable {
     case hostName
     case inventory
@@ -51,25 +60,25 @@ enum HostLinkReply: Codable, Sendable {
     case refused(String)
 }
 
-/// A message from a managing host to a Mac that waits to pair.
+/// A message from the Mac that asks to pair to a Mac that waits to pair.
 enum PairingRequest: Codable, Sendable {
-    /// Commits to the host's public key, and sends the other values that the code covers, before the Mac sends its
-    /// key. Someone in between then has to choose every value before learning the one that decides the code.
-    case begin(commitment: Data, pairingID: UUID, managerName: String)
+    /// Commits to the asking Mac's public key, and sends the other values that the code covers, before the Mac sends
+    /// its key. Someone in between then has to choose every value before learning the one that decides the code.
+    case begin(commitment: Data, pairingID: UUID, requesterName: String, role: PairingRole)
     case reveal(publicKey: Data)
-    /// Sent after the person confirms on the managing host that both Macs show the same code.
+    /// Sent after the person confirms on the asking Mac that both Macs show the same code.
     case confirm(Data)
 }
 
 enum PairingReply: Codable, Sendable {
-    /// `hostID` stays the same when the Mac pairs again, so the managing host replaces its earlier pairing.
+    /// `hostID` stays the same when the Mac pairs again, so the asking Mac replaces its earlier pairing.
     case publicKey(Data, name: String, hostID: UUID)
     /// Sent after the person allows the pairing on the Mac and the Mac saves it.
     case paired(Data)
     case refused(String)
 }
 
-/// Why a Mac refused to pair, as the managing host shows it.
+/// Why a Mac refused to pair, as the asking Mac shows it.
 struct PairingRefusal: Error {
     let message: String
 
@@ -102,11 +111,12 @@ enum HostLinkError: LocalizedError, Equatable {
 /// What both Macs derive from the key agreement while pairing.
 struct PairingAgreement: Sendable {
     enum Role: String {
-        case manager
+        /// The Mac that asked to pair.
+        case requester
         case mac
     }
 
-    /// The pre-shared key for management connections. It never crosses the network.
+    /// The pre-shared key for the paired Macs' connections. It never crosses the network.
     let key: Data
     /// Six digits that both Macs show. Anyone else taking part in the exchange changes the code on at least one Mac.
     let code: String
@@ -130,11 +140,12 @@ struct PairingAgreement: Sendable {
 
     /// Every value exchanged while pairing, so that a changed value changes the code.
     static func transcript(
-        commitment: Data, managerKey: Data, macKey: Data, pairingID: UUID, managerName: String, macName: String, hostID: UUID
+        commitment: Data, requesterKey: Data, macKey: Data, pairingID: UUID, requesterName: String, role: PairingRole,
+        macName: String, hostID: UUID
     ) -> Data {
         let parts = [
-            commitment, managerKey, macKey, Data(pairingID.uuidString.utf8), Data(managerName.utf8), Data(macName.utf8),
-            Data(hostID.uuidString.utf8),
+            commitment, requesterKey, macKey, Data(pairingID.uuidString.utf8), Data(requesterName.utf8),
+            Data(role.rawValue.utf8), Data(macName.utf8), Data(hostID.uuidString.utf8),
         ]
         return parts.reduce(into: Data()) { transcript, part in
             withUnsafeBytes(of: UInt32(part.count).bigEndian) { transcript.append(contentsOf: $0) }
@@ -152,14 +163,17 @@ struct PairingAgreement: Sendable {
     }
 }
 
-/// Connections between a managing host and the Macs it manages.
+/// Connections between paired Macs: a managing host and the Macs it manages, or a dashboard and the hosts it shows.
 enum HostLink {
-    /// Advertised by a Mac while another host manages it. The app's `NSBonjourServices` lists both types.
+    /// Advertised by a Mac for each Mac paired with it. The app's `NSBonjourServices` lists both types.
     static let managementService = "_xcrunner._tcp"
     /// Advertised by a Mac while it waits to pair.
     static let pairingService = "_xcrunner-pair._tcp"
-    /// The management service's TXT record key holding the pairing ID, so the managing host finds its own Macs.
+    /// The management service's TXT record key holding the pairing ID, so each paired Mac finds its own service.
     static let pairingKeyName = "pairing"
+    /// The pairing service's TXT record key holding the role that the Mac waits for, so a Mac lists only the Macs
+    /// it can pair with.
+    static let roleKeyName = "role"
     /// A connection whose key the other Mac rejects keeps waiting instead of failing, so requests stop after this long.
     static let requestTimeout = Duration.seconds(10)
 
@@ -238,10 +252,12 @@ enum HostLink {
 
     /// Pairs with the Mac at `endpoint`.
     ///
-    /// - Parameter confirm: Shows the code and returns once the person confirms that the Mac shows the same code.
+    /// - Parameters:
+    ///   - role: What this Mac does with the Mac. The Mac refuses a role that it does not wait for.
+    ///   - confirm: Shows the code and returns once the person confirms that the Mac shows the same code.
     /// - Returns: The pairing and the Mac's host ID.
     static func requestPairing(
-        at endpoint: NWEndpoint, pairingID: UUID, managerName: String,
+        at endpoint: NWEndpoint, pairingID: UUID, requesterName: String, role: PairingRole,
         confirm: @escaping @Sendable (_ macName: String, _ code: String) async throws -> Void
     ) async throws -> (pairing: HostPairing, hostID: UUID) {
         let connection = NetworkConnection(to: endpoint) {
@@ -252,7 +268,9 @@ enum HostLink {
             let publicKey = privateKey.publicKey.rawRepresentation
             let commitment = Data(SHA256.hash(data: publicKey))
             let reply = try await within(requestTimeout) {
-                try await connection.send(PairingRequest.begin(commitment: commitment, pairingID: pairingID, managerName: managerName))
+                try await connection.send(PairingRequest.begin(
+                    commitment: commitment, pairingID: pairingID, requesterName: requesterName, role: role
+                ))
                 return try await connection.receive().content
             }
             guard case .publicKey(let macKey, let macName, let hostID) = reply else { throw unexpected(reply) }
@@ -260,8 +278,8 @@ enum HostLink {
             let agreement = try PairingAgreement(
                 privateKey: privateKey, peerPublicKey: macKey,
                 transcript: PairingAgreement.transcript(
-                    commitment: commitment, managerKey: publicKey, macKey: macKey, pairingID: pairingID,
-                    managerName: managerName, macName: macName, hostID: hostID
+                    commitment: commitment, requesterKey: publicKey, macKey: macKey, pairingID: pairingID,
+                    requesterName: requesterName, role: role, macName: macName, hostID: hostID
                 )
             )
             // The Mac can refuse while the person compares the codes here, and the person can allow the pairing on the
@@ -272,7 +290,7 @@ enum HostLink {
                 }
                 group.addTask {
                     try await confirm(macName, agreement.code)
-                    try await connection.send(PairingRequest.confirm(agreement.proof(from: .manager)))
+                    try await connection.send(PairingRequest.confirm(agreement.proof(from: .requester)))
                     return nil
                 }
                 defer { group.cancelAll() }
@@ -298,14 +316,15 @@ enum HostLink {
     /// Accepts pairing requests until the task is cancelled.
     ///
     /// - Parameters:
-    ///   - begin: Takes a managing host's request before this Mac sends its key, or throws to refuse it.
+    ///   - role: What the Mac that pairs may do. A request for another role is refused.
+    ///   - begin: Takes a request before this Mac sends its key, or throws to refuse it.
     ///   - allow: Shows the code for a request and returns once the person allows the pairing on this Mac.
-    ///   - save: Keeps the pairing once the person allowed it and the managing host confirmed the code.
-    ///   - ended: Called after each connection, once the managing host got the reply.
+    ///   - save: Keeps the pairing once the person allowed it and the asking Mac confirmed the code.
+    ///   - ended: Called after each connection, once the asking Mac got the reply.
     static func acceptPairing(
-        name: String, hostID: UUID, advertising service: BonjourListenerProvider?,
+        name: String, hostID: UUID, role: PairingRole, advertising service: BonjourListenerProvider?,
         ready: @escaping @Sendable (NWEndpoint.Port) async -> Void,
-        begin: @escaping @Sendable (_ connection: UUID, _ managerName: String) async throws -> Void,
+        begin: @escaping @Sendable (_ connection: UUID, _ requesterName: String) async throws -> Void,
         allow: @escaping @Sendable (_ connection: UUID, _ code: String) async throws -> Void,
         save: @escaping @Sendable (HostPairing) async throws -> Void,
         ended: @escaping @Sendable (_ connection: UUID) async -> Void
@@ -320,8 +339,8 @@ enum HostLink {
         try await listener.run { connection in
             let id = UUID()
             await answerPairing(
-                on: connection, name: name, hostID: hostID,
-                begin: { managerName in try await begin(id, managerName) },
+                on: connection, name: name, hostID: hostID, role: role,
+                begin: { requesterName in try await begin(id, requesterName) },
                 allow: { code in try await allow(id, code) },
                 save: save
             )
@@ -329,10 +348,10 @@ enum HostLink {
         }
     }
 
-    /// Answers one managing host's request to pair, with the pairing's proof or the reason this Mac refused.
+    /// Answers one Mac's request to pair, with the pairing's proof or the reason this Mac refused.
     private static func answerPairing(
-        on connection: NetworkConnection<PairingServerProtocol>, name: String, hostID: UUID,
-        begin: @escaping @Sendable (_ managerName: String) async throws -> Void,
+        on connection: NetworkConnection<PairingServerProtocol>, name: String, hostID: UUID, role: PairingRole,
+        begin: @escaping @Sendable (_ requesterName: String) async throws -> Void,
         allow: @escaping @Sendable (_ code: String) async throws -> Void,
         save: @escaping @Sendable (HostPairing) async throws -> Void
     ) async {
@@ -341,36 +360,42 @@ enum HostLink {
         // Cancelling a pending receive closes the connection, so the reply is sent before the group cancels it.
         await withThrowingTaskGroup(of: Step.self) { group in
             do {
-                guard case .begin(let commitment, let pairingID, let managerName) = try await within(requestTimeout, {
-                    try await connection.receive().content
-                }) else {
+                guard case .begin(let commitment, let pairingID, let requesterName, let requestedRole) = try await within(
+                    requestTimeout, { try await connection.receive().content }
+                ) else {
                     throw notVerified
+                }
+                // The person opened this Mac to one role, so a request cannot choose another.
+                guard requestedRole == role else {
+                    throw PairingRefusal(role == .manager
+                        ? "\(name) is waiting for a managing Mac, not a dashboard."
+                        : "\(name) is waiting for a dashboard, not a managing Mac.")
                 }
                 // Each key this Mac sends gives someone in between another chance at a matching code, so a request is
                 // taken before the key is sent.
-                try await begin(managerName)
+                try await begin(requesterName)
                 let privateKey = Curve25519.KeyAgreement.PrivateKey()
                 let publicKey = privateKey.publicKey.rawRepresentation
                 try await connection.send(PairingReply.publicKey(publicKey, name: name, hostID: hostID))
-                guard case .reveal(let managerKey) = try await within(requestTimeout, { try await connection.receive().content }),
-                      Data(SHA256.hash(data: managerKey)) == commitment else {
+                guard case .reveal(let requesterKey) = try await within(requestTimeout, { try await connection.receive().content }),
+                      Data(SHA256.hash(data: requesterKey)) == commitment else {
                     throw notVerified
                 }
                 let agreement = try PairingAgreement(
-                    privateKey: privateKey, peerPublicKey: managerKey,
+                    privateKey: privateKey, peerPublicKey: requesterKey,
                     transcript: PairingAgreement.transcript(
-                        commitment: commitment, managerKey: managerKey, macKey: publicKey, pairingID: pairingID,
-                        managerName: managerName, macName: name, hostID: hostID
+                        commitment: commitment, requesterKey: requesterKey, macKey: publicKey, pairingID: pairingID,
+                        requesterName: requesterName, role: role, macName: name, hostID: hostID
                     )
                 )
-                // Pairing needs both the person's permission here and the managing host's confirmation, in either order.
+                // Pairing needs both the person's permission here and the asking Mac's confirmation, in either order.
                 group.addTask {
                     try await allow(agreement.code)
                     return .allowed
                 }
                 group.addTask {
                     guard case .confirm(let proof) = try await connection.receive().content,
-                          agreement.isValid(proof, from: .manager) else { throw notVerified }
+                          agreement.isValid(proof, from: .requester) else { throw notVerified }
                     return .confirmed
                 }
                 var isAllowed = false
@@ -381,7 +406,7 @@ enum HostLink {
                     case .allowed: isAllowed = true
                     case .confirmed:
                         isConfirmed = true
-                        // The managing host sends nothing more, so a message or the end of the connection means that
+                        // The asking Mac sends nothing more, so a message or the end of the connection means that
                         // it stopped pairing while the person here decides.
                         group.addTask {
                             _ = try await connection.receive()
@@ -389,12 +414,12 @@ enum HostLink {
                         }
                     }
                 }
-                try await save(HostPairing(id: pairingID, name: managerName, key: agreement.key))
+                try await save(HostPairing(id: pairingID, name: requesterName, key: agreement.key))
                 try? await connection.send(PairingReply.paired(agreement.proof(from: .mac)))
             } catch let refusal as PairingRefusal {
                 try? await connection.send(PairingReply.refused(refusal.message))
             } catch {
-                // The managing host left, or this Mac stopped waiting to pair.
+                // The asking Mac left, or this Mac stopped waiting to pair.
             }
             group.cancelAll()
         }
@@ -418,7 +443,10 @@ enum HostLink {
             }
         }
         return try await withThrowingTaskGroup { group in
-            group.addTask { try await body(connection) }
+            group.addTask {
+                // A send or receive can throw the connection's failure before its state reports it.
+                do { return try await body(connection) } catch let error as NWError { throw HostLinkError(error) }
+            }
             group.addTask {
                 for await error in failures.stream { throw HostLinkError(error) }
                 throw CancellationError()

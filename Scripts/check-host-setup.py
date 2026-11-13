@@ -811,7 +811,7 @@ with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
     assert (applications / "XcodeRunnerHost.previous.app/Contents/MacOS/xcode-runner-host").read_text() == "legacy executable"
     plist = plistlib.loads((home / "Library/LaunchAgents/lynnpd.xcodehomerunner.plist").read_bytes())
     assert plist["AssociatedBundleIdentifiers"] == ["lynnpd.xcodehomerunner"]
-    assert plist["ProgramArguments"] == [str(applications.resolve() / "XcodeHomeRunner.app/Contents/MacOS/XcodeHomeRunner"), "--settings-service"]
+    assert plist["ProgramArguments"] == [str(applications.resolve() / "XcodeHomeRunner.app/Contents/MacOS/XcodeHomeRunner"), "--host", "--settings-service"]
     assert plist["MachServices"] == {"lynnpd.xcodehomerunner.settings": True}
     assert (applications / "XcodeHomeRunner.app/Contents/Resources/HostSetup/install-github-runner.sh").read_text() == "first setup script"
     installed_cli = applications.resolve() / "XcodeHomeRunner.app/Contents/Helpers/xcode-runner"

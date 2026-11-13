@@ -2,7 +2,8 @@ import Foundation
 import Network
 import Observation
 
-/// This Mac's pairing with the host that manages it, and the connections that host makes.
+/// This Mac's pairings with the host that manages it and with the dashboards that show it, and the connections they
+/// make.
 @MainActor @Observable
 final class HostManagement {
     /// How long this Mac waits to pair, in seconds.
@@ -10,28 +11,31 @@ final class HostManagement {
 
     struct PairingWindow: Equatable {
         let id = UUID()
+        /// What the Mac that pairs through this window may do.
+        let role: PairingRole
         let expiresAt: Date
-        /// The managing host asking to pair. One host can ask at a time.
+        /// The Mac asking to pair. One Mac can ask at a time.
         var request: PairingPrompt?
         /// The listening port, for connections that do not use Bonjour.
         var port: NWEndpoint.Port?
     }
 
-    /// A managing host's request to pair, which the person allows after checking that both Macs show the same code.
+    /// A Mac's request to pair, which the person allows after checking that both Macs show the same code.
     struct PairingPrompt: Equatable {
         /// The request's connection.
         let id: UUID
-        let managerName: String
+        let requesterName: String
         /// `nil` until the Macs exchange keys.
         var code: String?
         var isAllowed = false
     }
 
-    /// What this Mac keeps about being managed.
+    /// What this Mac keeps about the Macs paired with it.
     struct Record: Codable {
-        /// Identifies this Mac to managing hosts across pairings.
+        /// Identifies this Mac to the Macs that pair with it, across pairings.
         let hostID: UUID
         var manager: HostPairing?
+        var dashboards: [HostPairing] = []
     }
 
     private let store: any SecretStore
@@ -39,18 +43,24 @@ final class HostManagement {
     private let advertises: Bool
     private let hostID: UUID
     private(set) var manager: HostPairing?
+    /// The Macs that show this Mac in their window. They change its settings and leave its runners to this Mac or
+    /// its managing host.
+    private(set) var dashboards: [HostPairing] = []
     private(set) var pairingWindow: PairingWindow?
-    /// The management listener's port, for connections that do not use Bonjour.
-    private(set) var managementPort: NWEndpoint.Port?
+    /// Each pairing's listening port, for connections that do not use Bonjour.
+    private(set) var ports: [HostPairing.ID: NWEndpoint.Port] = [:]
     /// Why the last pairing window closed without pairing.
     private(set) var pairingMessage: String?
     private(set) var errorMessage: String?
-    /// Answers the managing host's requests to read and change this Mac's settings and runners.
+    /// Answers the paired Macs' requests to read and change this Mac's settings and runners.
     @ObservationIgnored weak var settings: HostSettingsModel?
-    /// Outlives a window that closed when the Macs paired, until the managing host gets the reply.
+    /// Outlives a window that closed when the Macs paired, until the asking Mac gets the reply.
     private var pairingTask: (window: UUID, task: Task<Void, Never>)?
     private var decision: (request: UUID, continuation: CheckedContinuation<Void, any Error>)?
-    private var managementTask: Task<Void, Never>?
+    private var listeners: [HostPairing.ID: Task<Void, Never>] = [:]
+
+    /// The managing host's listening port.
+    var managementPort: NWEndpoint.Port? { manager.flatMap { ports[$0.id] } }
 
     /// - Parameter advertises: Whether listeners register Bonjour services. Tests connect to the listening ports instead.
     init(store: any SecretStore, name: String, advertises: Bool = true) {
@@ -61,22 +71,30 @@ final class HostManagement {
             let record = try store.read().map { try JSONDecoder().decode(Record.self, from: $0) }
             hostID = record?.hostID ?? UUID()
             manager = record?.manager
+            dashboards = record?.dashboards ?? []
         } catch {
             hostID = UUID()
             errorMessage = "Could not read this Mac's pairing: \(error.localizedDescription)"
         }
     }
 
-    /// Accepts the managing host's connections, if this Mac is paired.
+    /// Accepts the connections of the Macs paired with this Mac.
     func start() {
-        guard let manager, managementTask == nil else { return }
-        let txtRecord = NWTXTRecord([HostLink.pairingKeyName: manager.id.uuidString])
-        managementTask = Task {
+        if let manager { listen(to: manager, as: .manager) }
+        for dashboard in dashboards { listen(to: dashboard, as: .dashboard) }
+    }
+
+    private func listen(to pairing: HostPairing, as role: PairingRole) {
+        guard listeners[pairing.id] == nil else { return }
+        let txtRecord = NWTXTRecord([HostLink.pairingKeyName: pairing.id.uuidString])
+        // This Mac advertises one service for each pairing, and a service name has to be its only one of that type.
+        let serviceName = role == .manager ? name : pairing.id.uuidString
+        listeners[pairing.id] = Task {
             do {
                 try await HostLink.listen(
-                    key: manager.symmetricKey, identity: manager.id.uuidString,
-                    advertising: advertises ? .bonjour(name: name, type: HostLink.managementService, txtRecord: txtRecord) : nil,
-                    ready: { port in await self.managementListenerIsReady(port, for: manager.id) }
+                    key: pairing.symmetricKey, identity: pairing.id.uuidString,
+                    advertising: advertises ? .bonjour(name: serviceName, type: HostLink.managementService, txtRecord: txtRecord) : nil,
+                    ready: { port in await self.listenerIsReady(port, for: pairing.id) }
                 ) { request, reply in
                     switch request {
                     case .settings(let request):
@@ -84,57 +102,75 @@ final class HostManagement {
                             try await reply(.refused("\(self.name) cannot share its settings."))
                             return
                         }
-                        try await reply(await settings.answer(request))
+                        let answer = await settings.answer(request)
+                        try await reply(answer)
+                        // A managing host registers runners for a changed job limit itself. After a dashboard's
+                        // change this Mac does, as it does after its own Apply.
+                        if role == .dashboard, case .settings = answer, case .configurePool(let changes) = request,
+                           changes.maximumConcurrentJobs != nil {
+                            await settings.github.synchronize()
+                        }
                     case .runners(let request):
-                        guard let github = await self.settings?.github else {
-                            try await reply(.refused("\(self.name) cannot share its runners."))
+                        guard role == .manager, let github = await self.settings?.github else {
+                            try await reply(.refused(role == .manager
+                                ? "\(self.name) cannot share its runners."
+                                : "\(self.name) changes its runners only for its managing Mac."))
                             return
                         }
                         try await reply(await github.answer(request))
                     case .unpair:
-                        // Replying after the pairing is removed keeps the host from forgetting a Mac that still accepts it.
-                        if case .failure(let error) = await self.forget(manager.id) {
+                        // Replying after the pairing is removed keeps the other Mac from forgetting a Mac that still
+                        // accepts it.
+                        if case .failure(let error) = await self.forget(pairing.id) {
                             try await reply(.refused("\(self.name) could not remove the pairing: \(error.localizedDescription)"))
                             return
                         }
                         // The pairing is already removed, so a lost reply does not keep it.
                         try? await reply(.unpaired)
-                        await self.stopAcceptingConnections()
+                        await self.stopListening(to: pairing.id)
                     }
                 }
             } catch is CancellationError {
             } catch {
-                showManagementFailure(error, for: manager.id)
+                showListeningFailure(error, for: pairing)
             }
         }
     }
 
     func shutDown() async {
-        let tasks = [pairingTask?.task, managementTask]
+        let tasks = [pairingTask?.task].compactMap { $0 } + listeners.values
         pairingTask = nil
-        managementTask = nil
-        for task in tasks { task?.cancel() }
-        for task in tasks { await task?.value }
+        listeners = [:]
+        ports = [:]
+        for task in tasks { task.cancel() }
+        for task in tasks { await task.value }
     }
 
     /// Waits for a managing host to ask to pair.
-    func allowManagement() {
+    func allowManagement() { waitToPair(as: .manager) }
+
+    /// Waits for a dashboard to ask to pair.
+    func allowDashboard() { waitToPair(as: .dashboard) }
+
+    private func waitToPair(as role: PairingRole) {
         guard pairingWindow == nil else { return }
         // A window that closed when the Macs paired or the person refused may still be sending its last reply.
         pairingTask?.task.cancel()
-        let window = PairingWindow(expiresAt: .now.addingTimeInterval(Self.pairingDuration))
+        let window = PairingWindow(role: role, expiresAt: .now.addingTimeInterval(Self.pairingDuration))
         pairingWindow = window
         pairingMessage = nil
+        let txtRecord = NWTXTRecord([HostLink.roleKeyName: role.rawValue])
         let task = Task {
             do {
                 try await withThrowingTaskGroup { group in
                     group.addTask {
                         try await HostLink.acceptPairing(
-                            name: self.name, hostID: self.hostID,
-                            advertising: self.advertises ? .bonjour(name: self.name, type: HostLink.pairingService) : nil,
+                            name: self.name, hostID: self.hostID, role: role,
+                            advertising: self.advertises
+                                ? .bonjour(name: self.name, type: HostLink.pairingService, txtRecord: txtRecord) : nil,
                             ready: { port in await self.pairingListenerIsReady(port, window: window.id) },
-                            begin: { request, managerName in
-                                try await self.takeRequest(request, from: managerName, window: window.id)
+                            begin: { request, requesterName in
+                                try await self.takeRequest(request, from: requesterName, window: window.id)
                             },
                             allow: { request, code in try await self.askToAllow(request, code: code) },
                             save: { pairing in try await self.pair(with: pairing, window: window.id) },
@@ -143,7 +179,9 @@ final class HostManagement {
                     }
                     group.addTask {
                         try await Task.sleep(for: .seconds(Self.pairingDuration))
-                        await self.closePairingWindow(window.id, message: "No managing Mac paired in time.")
+                        await self.closePairingWindow(
+                            window.id, message: role == .manager ? "No managing Mac paired in time." : "No dashboard paired in time."
+                        )
                     }
                     try await group.next()
                 }
@@ -160,7 +198,7 @@ final class HostManagement {
         closePairingWindow(window.id, message: nil)
     }
 
-    /// Allows the managing host that asks to pair, after the person checks that both Macs show the same code.
+    /// Allows the Mac that asks to pair, after the person checks that both Macs show the same code.
     func allowPairing() {
         guard var request = pairingWindow?.request, request.code != nil, !request.isAllowed else { return }
         request.isAllowed = true
@@ -168,27 +206,35 @@ final class HostManagement {
         decide(request.id, .success(()))
     }
 
-    /// Refuses the managing host that asks to pair and stops waiting, because an unexpected request can come from
-    /// someone else on the network.
+    /// Refuses the Mac that asks to pair and stops waiting, because an unexpected request can come from someone else
+    /// on the network.
     func refusePairing() {
-        guard let request = pairingWindow?.request else { return }
-        // The listener stops once the managing host gets the refusal.
+        guard let window = pairingWindow, let request = window.request else { return }
+        // The listener stops once the asking Mac gets the refusal.
         pairingWindow = nil
-        pairingMessage = "You did not allow \(request.managerName) to manage this Mac."
+        pairingMessage = window.role == .manager
+            ? "You did not allow \(request.requesterName) to manage this Mac."
+            : "You did not allow \(request.requesterName) to show this Mac."
         decide(request.id, .failure(PairingRefusal("\(name) did not allow the pairing.")))
     }
 
     /// Forgets the managing host. It can no longer connect until the Macs pair again.
     func stopManagement() {
         guard let manager, case .success = forget(manager.id) else { return }
-        stopAcceptingConnections()
+        stopListening(to: manager.id)
     }
 
-    /// Takes one request at a time, because each request lets the managing host try for a matching code.
-    private func takeRequest(_ request: UUID, from managerName: String, window: UUID) throws {
+    /// Forgets a dashboard. It can no longer connect until the Macs pair again.
+    func removeDashboard(_ id: HostPairing.ID) {
+        guard dashboards.contains(where: { $0.id == id }), case .success = forget(id) else { return }
+        stopListening(to: id)
+    }
+
+    /// Takes one request at a time, because each request lets the asking Mac try for a matching code.
+    private func takeRequest(_ request: UUID, from requesterName: String, window: UUID) throws {
         guard pairingWindow?.id == window else { throw PairingRefusal("\(name) is no longer waiting to pair.") }
         guard pairingWindow?.request == nil else { throw PairingRefusal("\(name) is confirming another pairing.") }
-        pairingWindow?.request = PairingPrompt(id: request, managerName: managerName)
+        pairingWindow?.request = PairingPrompt(id: request, requesterName: requesterName)
     }
 
     private func askToAllow(_ request: UUID, code: String) async throws {
@@ -209,56 +255,61 @@ final class HostManagement {
         decision.continuation.resume(with: result)
     }
 
-    /// Keeps a pairing that the person allowed and the managing host confirmed.
+    /// Keeps a pairing that the person allowed and the asking Mac confirmed.
     private func pair(with pairing: HostPairing, window: UUID) throws {
-        // Closing the window here lets only one managing host pair through it.
-        guard pairingWindow?.id == window else { throw PairingRefusal("\(name) is no longer waiting to pair.") }
+        // Closing the window here lets only one Mac pair through it.
+        guard let open = pairingWindow, open.id == window else { throw PairingRefusal("\(name) is no longer waiting to pair.") }
+        var record = Record(hostID: hostID, manager: manager, dashboards: dashboards)
+        switch open.role {
+        case .manager: record.manager = pairing
+        case .dashboard: record.dashboards.append(pairing)
+        }
         do {
-            try store.write(JSONEncoder().encode(Record(hostID: hostID, manager: pairing)))
+            try store.write(JSONEncoder().encode(record))
         } catch {
             errorMessage = "Could not save the pairing: \(error.localizedDescription)"
             throw PairingRefusal("\(name) could not save the pairing.")
         }
         pairingWindow = nil
-        // A Mac has one managing host, so a new pairing replaces the previous one.
-        managementTask?.cancel()
-        managementTask = nil
-        managementPort = nil
-        manager = pairing
-        start()
+        // A Mac has one managing host, so a new one replaces the previous one. Dashboards stay as they are.
+        if open.role == .manager, let previous = manager { stopListening(to: previous.id) }
+        manager = record.manager
+        dashboards = record.dashboards
+        listen(to: pairing, as: open.role)
     }
 
     private func pairingRequestEnded(_ request: UUID, window: UUID) {
         decide(request, .failure(CancellationError()))
         if let prompt = pairingWindow?.request, prompt.id == request {
             // Another request could try for a matching code again, so pairing stops instead.
-            closePairingWindow(window, message: "Pairing stopped because \(prompt.managerName) did not finish pairing.")
+            closePairingWindow(window, message: "Pairing stopped because \(prompt.requesterName) did not finish pairing.")
         } else if pairingWindow == nil, pairingTask?.window == window {
-            // The window closed when the Macs paired or the person refused, and the managing host now has the reply.
+            // The window closed when the Macs paired or the person refused, and the asking Mac now has the reply.
             pairingTask?.task.cancel()
             pairingTask = nil
         }
     }
 
     private func forget(_ id: HostPairing.ID) -> Result<Void, any Error> {
-        guard manager?.id == id else { return .success(()) }
+        var record = Record(hostID: hostID, manager: manager, dashboards: dashboards)
+        if record.manager?.id == id { record.manager = nil }
+        record.dashboards.removeAll { $0.id == id }
+        guard record.manager != manager || record.dashboards != dashboards else { return .success(()) }
         do {
-            try store.write(JSONEncoder().encode(Record(hostID: hostID, manager: nil)))
+            try store.write(JSONEncoder().encode(record))
         } catch {
             errorMessage = "Could not remove the pairing: \(error.localizedDescription)"
             return .failure(error)
         }
-        manager = nil
+        manager = record.manager
+        dashboards = record.dashboards
         errorMessage = nil
         return .success(())
     }
 
-    private func stopAcceptingConnections() {
-        // A pairing made meanwhile replaced the listener already.
-        guard manager == nil else { return }
-        managementTask?.cancel()
-        managementTask = nil
-        managementPort = nil
+    private func stopListening(to id: HostPairing.ID) {
+        listeners.removeValue(forKey: id)?.cancel()
+        ports[id] = nil
     }
 
     private func closePairingWindow(_ window: UUID, message: String?) {
@@ -275,15 +326,25 @@ final class HostManagement {
         pairingWindow?.port = port
     }
 
-    private func managementListenerIsReady(_ port: NWEndpoint.Port, for id: HostPairing.ID) {
-        guard manager?.id == id else { return }
-        managementPort = port
+    private func listenerIsReady(_ port: NWEndpoint.Port, for id: HostPairing.ID) {
+        guard listeners[id] != nil else { return }
+        ports[id] = port
     }
 
-    private func showManagementFailure(_ error: any Error, for id: HostPairing.ID) {
-        guard manager?.id == id else { return }
-        managementTask = nil
-        managementPort = nil
-        errorMessage = "Could not accept connections from \(manager?.name ?? "the managing host"): \(error.localizedDescription)"
+    private func showListeningFailure(_ error: any Error, for pairing: HostPairing) {
+        guard manager == pairing || dashboards.contains(pairing) else { return }
+        listeners[pairing.id] = nil
+        ports[pairing.id] = nil
+        errorMessage = "Could not accept connections from \(pairing.name): \(error.localizedDescription)"
+    }
+}
+
+extension HostManagement.Record {
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        hostID = try container.decode(UUID.self, forKey: .hostID)
+        manager = try container.decodeIfPresent(HostPairing.self, forKey: .manager)
+        // Records saved before dashboards have none.
+        dashboards = try container.decodeIfPresent([HostPairing].self, forKey: .dashboards) ?? []
     }
 }

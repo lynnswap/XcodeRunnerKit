@@ -14,15 +14,18 @@ struct HostPairingTests {
         .hostPort(host: "127.0.0.1", port: try #require(port))
     }
 
-    private func waitToPair(_ management: HostManagement) async throws -> NWEndpoint {
-        management.allowManagement()
+    private func waitToPair(_ management: HostManagement, as role: PairingRole = .manager) async throws -> NWEndpoint {
+        switch role {
+        case .manager: management.allowManagement()
+        case .dashboard: management.allowDashboard()
+        }
         try await waitUntil { management.pairingWindow?.port != nil }
         return try local(management.pairingWindow?.port)
     }
 
     /// Pairs the Macs as a person does after seeing the same code on both.
     private func pair(_ macs: PairedMacs, with management: HostManagement) async throws -> PairedMac {
-        let endpoint = try await waitToPair(management)
+        let endpoint = try await waitToPair(management, as: macs.role)
         let pairing = Task { try await macs.pair(at: endpoint) }
         try await waitUntil { macs.codeConfirmation != nil && management.pairingWindow?.request?.code != nil }
         #expect(macs.codeConfirmation?.code == management.pairingWindow?.request?.code)
@@ -47,7 +50,7 @@ struct HostPairingTests {
         return HostSettingsModel(
             installation: installation, github: github?(installation),
             management: HostManagement(store: store, name: "Managed", advertises: false),
-            managedMacs: PairedMacs(store: MemorySecretStore(), name: "Managed", browses: false)
+            managedMacs: PairedMacs(store: MemorySecretStore(), name: "Managed", role: .manager, browses: false)
         )
     }
 
@@ -58,14 +61,14 @@ struct HostPairingTests {
         let managerStore = MemorySecretStore()
         let managed = managedMac(store: managedStore, at: root)
         let management = managed.management
-        let macs = PairedMacs(store: managerStore, name: "Manager", browses: false)
+        let macs = PairedMacs(store: managerStore, name: "Manager", role: .manager, browses: false)
 
         let mac = try await pair(macs, with: management)
         #expect(mac.name == "Managed")
         #expect(macs.codeConfirmation == nil)
         #expect(management.pairingWindow == nil)
         #expect(management.manager == HostPairing(id: mac.id, name: "Manager", key: mac.pairing.key))
-        #expect(PairedMacs(store: managerStore, name: "Manager", browses: false).macs == [mac])
+        #expect(PairedMacs(store: managerStore, name: "Manager", role: .manager, browses: false).macs == [mac])
         #expect(HostManagement(store: managedStore, name: "Managed", advertises: false).manager == management.manager)
 
         try await waitUntil { management.managementPort != nil }
@@ -87,7 +90,7 @@ struct HostPairingTests {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let managed = managedMac(at: root)
-        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", browses: false)
+        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", role: .manager, browses: false)
         let mac = try await pair(macs, with: managed.management)
         await managed.configureDefaultPool()
         await managed.refreshPoolStatus()
@@ -200,7 +203,7 @@ struct HostPairingTests {
         let managerClient = await transport.client
         let pool = HostExecutionPool(directory: installation.poolDirectory)
         try await pool.configure(maximumConcurrentJobs: 1)
-        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", browses: false)
+        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", role: .manager, browses: false)
         let manager = HostSettingsModel(
             installation: installation,
             github: GitHubHostSettings(
@@ -252,10 +255,144 @@ struct HostPairingTests {
         await macs.shutDown()
     }
 
+    @Test func dashboardsPairWithAHostThatKeepsManagingItsMacs() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let hostStore = MemorySecretStore()
+        let host = managedMac(store: hostStore, at: root)
+        // A host that manages a Mac cannot be managed, and is shown all the same.
+        let runner = HostManagement(store: MemorySecretStore(), name: "Runner", advertises: false)
+        _ = try await pair(host.managedMacs, with: runner)
+        #expect(!host.canAllowManagement)
+        await host.configureDefaultPool()
+        await host.refreshPoolStatus()
+
+        let first = PairedMacs(store: MemorySecretStore(), name: "Dashboard", role: .dashboard, browses: false)
+        let second = PairedMacs(store: MemorySecretStore(), name: "Other Dashboard", role: .dashboard, browses: false)
+        let shown = try await pair(first, with: host.management)
+        let alsoShown = try await pair(second, with: host.management)
+        #expect(host.management.manager == nil)
+        #expect(host.management.dashboards.map(\.name) == ["Dashboard", "Other Dashboard"])
+        #expect(host.canAddMacs)
+        #expect(HostManagement(store: hostStore, name: "Managed", advertises: false).dashboards == host.management.dashboards)
+
+        try await waitUntil { host.management.ports[shown.id] != nil && host.management.ports[alsoShown.id] != nil }
+        let otherEndpoint = try local(host.management.ports[alsoShown.id])
+        await first.checkStatus(of: shown.id, at: try local(host.management.ports[shown.id]))
+        await second.checkStatus(of: alsoShown.id, at: otherEndpoint)
+        #expect(first.status(of: shown.id) == .online)
+        #expect(second.status(of: alsoShown.id) == .online)
+        #expect(second.settings[alsoShown.id]?.report?.poolStatus?.configuration.maximumConcurrentJobs == HostInstallation.defaultMaximumConcurrentJobs)
+
+        // Either Mac ends the pairing, and the other dashboard stays.
+        await first.remove(shown.id)
+        #expect(first.macs.isEmpty)
+        #expect(first.message == nil)
+        try await waitUntil { host.management.dashboards.map(\.id) == [alsoShown.id] }
+        let readAt = second.settings[alsoShown.id]?.readAt
+        host.management.removeDashboard(alsoShown.id)
+        #expect(HostManagement(store: hostStore, name: "Managed", advertises: false).dashboards.isEmpty)
+        await second.checkStatus(of: alsoShown.id, at: otherEndpoint)
+        guard case .unreachable = second.status(of: alsoShown.id) else {
+            Issue.record("Expected the host to be unreachable, not \(second.status(of: alsoShown.id))")
+            return
+        }
+        #expect(second.settings[alsoShown.id]?.readAt == readAt)
+
+        await host.management.shutDown()
+        await runner.shutDown()
+        await host.managedMacs.shutDown()
+        await first.shutDown()
+        await second.shutDown()
+    }
+
+    @Test func aHostRegistersItsRunnersAfterADashboardChangesItsJobLimit() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = GitHubRepository(id: 1, fullName: "owner/Project")
+        let installs = Installs()
+        let listing: [GitHubTestTransport.Reply] = [
+            .init(path: "/user/installations", body: #"{"installations":[{"id":10}]}"#),
+            .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Project"}]}"#),
+        ]
+        let noRunners = GitHubTestTransport.Reply(path: "/repos/owner/Project/actions/runners", body: #"{"runners":[]}"#)
+        // Restoring the sign-in lists the repositories, and the limit change synchronizes once.
+        let transport = GitHubTestTransport(listing + listing + [
+            noRunners,
+            .init(path: "/repos/actions/runner/releases/latest", body: #"{"assets":[{"name":"actions-runner-osx-arm64-2.338.0.tar.gz","browser_download_url":"https://example.invalid/runner.tar.gz","digest":"sha256:\#(String(repeating: "a", count: 64))"}]}"#),
+            .init(path: "/repos/owner/Project/actions/runners/registration-token", body: #"{"token":"registration-token"}"#),
+            noRunners,
+        ])
+        let client = await transport.client
+        let credentials = MemorySecretStore()
+        try credentials.write(JSONEncoder().encode(GitHubCredentials(
+            clientID: "app", account: GitHubAccount(id: 1, login: "owner"), accessToken: "token",
+            refreshToken: nil, expiresAt: nil, refreshExpiresAt: nil
+        )))
+        let host = managedMac(at: root) { installation in
+            try? GitHubHostConfiguration(repositories: [repository])
+                .save(to: installation.hostRoot.appending(path: "github-host.json"))
+            return GitHubHostSettings(
+                installation: installation, pool: HostExecutionPool(directory: installation.poolDirectory), client: client,
+                authentication: GitHubAuthentication(clientID: "app", client: client, store: credentials),
+                provisioner: RunnerProvisioner(
+                    installation: installation, installerURL: root.appending(path: "unused-installer.sh"), client: client,
+                    hostName: "Host", prepareArchive: { _ in installation.homeDirectory.appending(path: "runner.tar.gz") },
+                    installRunner: { request in try await installs.install(request, in: installation, agentID: 1) }
+                )
+            )
+        }
+        try await host.pool.configure(maximumConcurrentJobs: 1)
+        await host.refreshPoolStatus()
+        await host.github.restore()
+        host.github.storageIsReady = true
+
+        let dashboard = PairedMacs(store: MemorySecretStore(), name: "Dashboard", role: .dashboard, browses: false)
+        let shown = try await pair(dashboard, with: host.management)
+        try await waitUntil { host.management.ports[shown.id] != nil }
+        await dashboard.checkStatus(of: shown.id, at: try local(host.management.ports[shown.id]))
+        let settings = try #require(dashboard.settings[shown.id])
+
+        settings.poolDraft.capacityInput = "0"
+        await dashboard.applyPoolConfiguration(of: shown.id)
+        #expect(settings.saveError == "Enter a positive whole number of concurrent jobs.")
+        settings.poolDraft.capacityInput = "2"
+        #expect(await dashboard.applyPoolConfiguration(of: shown.id))
+        #expect(try host.pool.configuration()?.maximumConcurrentJobs == 2)
+        // The host registers the runners for its new limit, as after its own Apply. The dashboard sends no token.
+        try await waitUntil { await installs.requests.count == 2 }
+        try await waitUntil { !host.github.isSynchronizing }
+        #expect(await installs.requests.allSatisfy { $0.registrationToken == "registration-token" })
+        #expect(await transport.requests.count == 8)
+        await #expect(throws: HostLinkError.refused("Managed changes its runners only for its managing Mac.")) {
+            _ = try await dashboard.requestRunners(.inventory, from: shown.id)
+        }
+
+        await host.management.shutDown()
+        await dashboard.shutDown()
+    }
+
+    @Test func aMacRefusesAPairingRequestForAnotherRole() async throws {
+        let management = HostManagement(store: MemorySecretStore(), name: "Managed", advertises: false)
+        let manager = PairedMacs(store: MemorySecretStore(), name: "Manager", role: .manager, browses: false)
+        let endpoint = try await waitToPair(management, as: .dashboard)
+
+        await #expect(throws: HostLinkError.refused("Managed is waiting for a dashboard, not a managing Mac.")) {
+            try await manager.pair(at: endpoint)
+        }
+        #expect(management.manager == nil)
+        #expect(management.dashboards.isEmpty)
+        // The person opened the Mac to dashboards, so it keeps waiting for one.
+        #expect(management.pairingWindow?.role == .dashboard)
+        #expect(management.pairingWindow?.request == nil)
+
+        await management.shutDown()
+    }
+
     @Test func removalReportsAMacThatCouldNotForgetThePairing() async throws {
         let managedStore = MemorySecretStore()
         let management = HostManagement(store: managedStore, name: "Managed", advertises: false)
-        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", browses: false)
+        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", role: .manager, browses: false)
         let mac = try await pair(macs, with: management)
         try await waitUntil { management.managementPort != nil }
         await macs.checkStatus(of: mac.id, at: try local(management.managementPort))
@@ -272,7 +409,7 @@ struct HostPairingTests {
 
     @Test func refusingAPairingRequestStopsWaitingToPair() async throws {
         let management = HostManagement(store: MemorySecretStore(), name: "Managed", advertises: false)
-        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", browses: false)
+        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", role: .manager, browses: false)
         let endpoint = try await waitToPair(management)
         let pairing = Task { try await macs.pair(at: endpoint) }
         try await waitUntil { management.pairingWindow?.request?.code != nil }
@@ -289,7 +426,7 @@ struct HostPairingTests {
 
     @Test func aManagingHostThatLeavesAfterConfirmingStopsPairing() async throws {
         let management = HostManagement(store: MemorySecretStore(), name: "Managed", advertises: false)
-        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", browses: false)
+        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", role: .manager, browses: false)
         let endpoint = try await waitToPair(management)
         let pairing = Task { try await macs.pair(at: endpoint) }
         try await waitUntil { macs.codeConfirmation != nil && management.pairingWindow?.request?.code != nil }
@@ -311,7 +448,7 @@ struct HostPairingTests {
         let connection = pairingConnection(to: try await waitToPair(management))
 
         try await connection.send(PairingRequest.begin(
-            commitment: Data(SHA256.hash(data: publicKey())), pairingID: UUID(), managerName: "Someone"
+            commitment: Data(SHA256.hash(data: publicKey())), pairingID: UUID(), requesterName: "Someone", role: .manager
         ))
         _ = try await connection.receive()
         try await connection.send(PairingRequest.reveal(publicKey: publicKey()))
@@ -328,22 +465,22 @@ struct HostPairingTests {
 
     @Test func aMacTakesOnePairingRequestAtATime() async throws {
         let management = HostManagement(store: MemorySecretStore(), name: "Managed", advertises: false)
-        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", browses: false)
+        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", role: .manager, browses: false)
         let endpoint = try await waitToPair(management)
         let first = pairingConnection(to: endpoint)
         try await first.send(PairingRequest.begin(
-            commitment: Data(SHA256.hash(data: publicKey())), pairingID: UUID(), managerName: "First"
+            commitment: Data(SHA256.hash(data: publicKey())), pairingID: UUID(), requesterName: "First", role: .manager
         ))
         _ = try await first.receive()
 
         await #expect(throws: HostLinkError.refused("Managed is confirming another pairing.")) { try await macs.pair(at: endpoint) }
-        #expect(management.pairingWindow?.request?.managerName == "First")
+        #expect(management.pairingWindow?.request?.requesterName == "First")
 
         await management.shutDown()
     }
 
     @Test func theManagingHostPairsOnlyAfterThePersonConfirmsTheCode() async throws {
-        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", browses: false)
+        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", role: .manager, browses: false)
         // Someone who answers in place of the Mac can prove the key it agreed, and says it paired right away.
         let impostor = try NetworkListener {
             Coder(sending: PairingReply.self, receiving: PairingRequest.self, using: .json) { TCP() }
@@ -355,17 +492,17 @@ struct HostPairingTests {
         }
         let serving = Task {
             try await impostor.run { connection in
-                guard case .begin(let commitment, let pairingID, let managerName) = try await connection.receive().content else { return }
+                guard case .begin(let commitment, let pairingID, let requesterName, let role) = try await connection.receive().content else { return }
                 let privateKey = Curve25519.KeyAgreement.PrivateKey()
                 let publicKey = privateKey.publicKey.rawRepresentation
                 let hostID = UUID()
                 try await connection.send(PairingReply.publicKey(publicKey, name: "Impostor", hostID: hostID))
-                guard case .reveal(let managerKey) = try await connection.receive().content else { return }
+                guard case .reveal(let requesterKey) = try await connection.receive().content else { return }
                 let agreement = try PairingAgreement(
-                    privateKey: privateKey, peerPublicKey: managerKey,
+                    privateKey: privateKey, peerPublicKey: requesterKey,
                     transcript: PairingAgreement.transcript(
-                        commitment: commitment, managerKey: managerKey, macKey: publicKey, pairingID: pairingID,
-                        managerName: managerName, macName: "Impostor", hostID: hostID
+                        commitment: commitment, requesterKey: requesterKey, macKey: publicKey, pairingID: pairingID,
+                        requesterName: requesterName, role: role, macName: "Impostor", hostID: hostID
                     )
                 )
                 try await connection.send(PairingReply.paired(agreement.proof(from: .mac)))
@@ -391,7 +528,7 @@ struct HostPairingTests {
 
     @Test func pairingTheSameMacAgainReplacesItsEarlierPairing() async throws {
         let management = HostManagement(store: MemorySecretStore(), name: "Managed", advertises: false)
-        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", browses: false)
+        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", role: .manager, browses: false)
 
         _ = try await pair(macs, with: management)
         management.stopManagement()
@@ -405,7 +542,7 @@ struct HostPairingTests {
 
     @Test func managementConnectionsUseAnEphemeralKeyExchange() async throws {
         let management = HostManagement(store: MemorySecretStore(), name: "Managed", advertises: false)
-        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", browses: false)
+        let macs = PairedMacs(store: MemorySecretStore(), name: "Manager", role: .manager, browses: false)
         let mac = try await pair(macs, with: management)
         try await waitUntil { management.managementPort != nil }
         let connection = NetworkConnection(
