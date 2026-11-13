@@ -273,8 +273,9 @@ operation on the host.
   project, or package relative to that directory.
 - **Host settings.** The operation uses the host's storage, its saved Xcode, and
   its build service, and takes a place in its job limit together with the jobs
-  from GitHub, waiting in arrival order. `--developer-directory` names an Xcode
-  on the host. The operation runs with the host app's environment, not with the
+  from GitHub, waiting in arrival order. An absolute path in an option, such as
+  `--developer-directory` or the source of a `--prefix-mapping`, names a file on
+  the host. The operation runs with the host app's environment, not with the
   shell's.
 - **Results.** The log and result bundle are copied to `--output-directory` on
   the dashboard's Mac, `XcodeRunnerOutput` by default. In the output and the

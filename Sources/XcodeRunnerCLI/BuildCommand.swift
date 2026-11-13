@@ -47,7 +47,7 @@ struct BuildOptions: ParsableArguments {
     @Option var scheme: String
     @Option(help: "xcodebuild destination specifier (default: platform=macOS). Not used with Simulator options.")
     var destination: String?
-    @Option(help: "Run on a host Mac that XcodeHomeRunner on this Mac shows, with the files of the Git checkout that contains the current directory. The log and result bundle are copied to --output-directory on this Mac, and --developer-directory names an Xcode on the host.")
+    @Option(help: "Run on a host Mac that XcodeHomeRunner on this Mac shows, with the files of the Git checkout that contains the current directory. The log and result bundle are copied to --output-directory on this Mac. Relative paths in other options are resolved in the host's copy of the current directory, and absolute paths, as for --developer-directory, name the host's files.")
     var host: String?
     @Option var outputDirectory: String?
     @Option var derivedData: String?
