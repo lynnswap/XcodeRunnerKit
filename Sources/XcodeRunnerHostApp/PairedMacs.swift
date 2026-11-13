@@ -30,6 +30,10 @@ final class PairedMacSettings {
     var xcodeSelectionInput = ""
     private(set) var isSavingXcode = false
     private(set) var xcodeSaveError: String?
+    /// The labels being edited for the Mac's runners, separated by commas.
+    var runnerLabelsInput = ""
+    private(set) var isSavingRunnerLabels = false
+    private(set) var runnerLabelsError: String?
     private(set) var isChangingPause = false
     /// Why the Mac refused to pause or resume, or why it did not confirm the change.
     private(set) var pauseError: String?
@@ -50,7 +54,8 @@ final class PairedMacSettings {
     var canApplyPoolConfiguration: Bool { report?.canApplyPoolConfiguration == true && !isSaving }
 
     var isChanging: Bool {
-        isSaving || isSavingStorage || isSavingXcode || isChangingPause || isRestarting || isChangingGitHub
+        isSaving || isSavingStorage || isSavingXcode || isSavingRunnerLabels || isChangingPause || isRestarting
+            || isChangingGitHub
     }
 
     /// Shows newly read GitHub settings, with the saved selection in a selection that was not edited.
@@ -69,6 +74,9 @@ final class PairedMacSettings {
         }
         if xcodeSelectionInput == self.report?.savedDeveloperDirectory?.path(percentEncoded: false) ?? "" {
             xcodeSelectionInput = report.savedDeveloperDirectory?.path(percentEncoded: false) ?? ""
+        }
+        if runnerLabelsInput == RunnerLabels.text(self.report?.runnerLabels ?? []) {
+            runnerLabelsInput = RunnerLabels.text(report.runnerLabels)
         }
         self.report = report
         self.readAt = readAt
@@ -155,6 +163,30 @@ final class PairedMacSettings {
         }
     }
 
+    /// Saves the edited labels for the Mac's runners.
+    ///
+    /// - Parameter send: Sends the labels to the Mac named `macName` and returns the settings it answers with.
+    /// - Returns: Whether the Mac saved a different list, so that its runners need updating.
+    func saveRunnerLabels(on macName: String, send: ([String]) async throws -> HostSettingsReport) async -> Bool {
+        guard let previous = report?.runnerLabels, !isSavingRunnerLabels else { return false }
+        isSavingRunnerLabels = true
+        beginChange()
+        defer {
+            isSavingRunnerLabels = false
+            endChange()
+        }
+        do {
+            let report = try await send(RunnerLabels.parse(runnerLabelsInput))
+            runnerLabelsError = nil
+            show(report)
+            runnerLabelsInput = RunnerLabels.text(report.runnerLabels)
+            return report.runnerLabels != previous
+        } catch {
+            runnerLabelsError = Self.changeFailure(error, on: macName)
+            return false
+        }
+    }
+
     /// Pauses or resumes the Mac.
     ///
     /// - Parameter send: Sends the change to the Mac named `macName` and returns the settings it answers with.
@@ -235,6 +267,8 @@ struct PairedRunnerMac: RunnerMac {
     }
 
     func markRemoved(_ runner: String) async throws { try await change(.markRemoved(runner: runner)) }
+
+    func markLabelsApplied(_ labels: [String]) async throws { try await change(.markLabelsApplied(labels)) }
 
     private func change(_ request: RunnerRequest) async throws {
         guard case .completed = try await macs.requestRunners(request, from: id) else { throw HostLinkError.unexpectedReply }
@@ -635,6 +669,14 @@ final class PairedMacs: MacList {
         }
     }
 
+    @discardableResult
+    func saveRunnerLabels(of id: HostPairing.ID) async -> Bool {
+        guard let mac = mac(id), let settings = settings[id] else { return false }
+        return await settings.saveRunnerLabels(on: mac.name) { labels in
+            try await self.requestSettings(.saveRunnerLabels(labels), from: mac)
+        }
+    }
+
     func setPaused(_ isPaused: Bool, of id: HostPairing.ID) async {
         guard let mac = mac(id), let settings = settings[id] else { return }
         await settings.setPaused(isPaused, on: mac.name) { isPaused in
@@ -784,7 +826,7 @@ final class PairedMacs: MacList {
         let timeout = switch request {
         case .read(refreshing: nil), .discover, .pair, .confirmCode, .cancelPairing: HostLink.requestTimeout
         case .read: HostLink.requestTimeout * 3
-        case .configurePool, .saveStorage, .saveXcode, .setPaused, .restart, .remove: Self.changeTimeout
+        case .configurePool, .saveStorage, .saveXcode, .saveRunnerLabels, .setPaused, .restart, .remove: Self.changeTimeout
         }
         let reply = try await send(.macs(request), to: mac, at: endpoint, timeout: timeout)
         switch reply {

@@ -371,9 +371,19 @@ before saving produce an error.
 
 ## Configure a workflow
 
-Use labels that match your runners. New runners include `xcode-runnerkit`
-and copy custom labels shared by existing managed runners. Labels assigned to
-only some runners, such as `ci-interactive`, need separate configuration.
+Use labels that match your runners. New runners include `xcode-runnerkit`,
+the labels of their Mac, and the custom labels shared by existing managed
+runners. Labels assigned to only some runners, such as `ci-interactive`, need
+separate configuration.
+
+To run a job on one Mac of a setup, give that Mac a label under **Runner
+Labels** in its pane, such as `xcode-27` for the Mac that has that Xcode, and
+add the label to `runs-on`. The Mac's runners get the labels of its list besides
+`xcode-runnerkit`: new runners when they are registered, and existing ones at
+the next synchronization, which follows a change at once when the Mac's host or
+its managing host is signed in. A label that leaves the list is removed from the
+runners. Labels that you set on a runner on GitHub stay. The Mac's own window,
+its managing host, and a dashboard edit the list.
 
 A macOS package test job can use:
 

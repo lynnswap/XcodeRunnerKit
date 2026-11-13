@@ -91,6 +91,14 @@ final class RelayedMacs: MacList {
         }
     }
 
+    @discardableResult
+    func saveRunnerLabels(of id: HostPairing.ID) async -> Bool {
+        guard let settings = settings[id], let mac = listedMacs.first(where: { $0.id == id }) else { return false }
+        return await settings.saveRunnerLabels(on: mac.name) { labels in
+            try await self.change(.saveRunnerLabels(labels, mac: id), of: id)
+        }
+    }
+
     func setPaused(_ isPaused: Bool, of id: HostPairing.ID) async {
         guard let settings = settings[id], let mac = listedMacs.first(where: { $0.id == id }) else { return }
         await settings.setPaused(isPaused, on: mac.name) { isPaused in

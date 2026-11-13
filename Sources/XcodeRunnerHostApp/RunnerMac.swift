@@ -13,6 +13,8 @@ protocol RunnerMac: Sendable {
     func install(_ request: RunnerProvisioner.InstallationRequest) async throws
     func markUnregistering(_ runner: String, from repositoryID: Int) async throws
     func markRemoved(_ runner: String) async throws
+    /// Records the labels of the Mac's lists that its runners have, after the host put them on the runners.
+    func markLabelsApplied(_ labels: [String]) async throws
 }
 
 /// A Mac's runner folders, read at once so that a Mac can send them to its managing host.
@@ -27,6 +29,10 @@ struct RunnerInventory: Codable, Sendable {
     let unreadable: [UnreadableEntry]
     /// Every entry name in the runners root, so that a new runner does not take one.
     let entryNames: Set<String>
+    /// The labels that the Mac's runners get besides `xcode-runnerkit`.
+    let labels: [String]
+    /// The labels of the Mac's earlier lists that its runners can still have.
+    let appliedLabels: [String]
 
     func folder(named name: String) -> RunnerFolder? { folders.first { $0.name == name } }
 }
@@ -120,7 +126,8 @@ struct LocalRunnerMac: RunnerMac {
             unreadable: scan.unreadable.map {
                 .init(registrationFile: $0.directory.registrationFile.path(percentEncoded: false), reason: $0.error.localizedDescription)
             },
-            entryNames: Set(scan.directories.map(\.name) + scan.unreadable.map(\.directory.name) + scan.otherEntries.map(\.lastPathComponent))
+            entryNames: Set(scan.directories.map(\.name) + scan.unreadable.map(\.directory.name) + scan.otherEntries.map(\.lastPathComponent)),
+            labels: try installation.runnerLabels(), appliedLabels: try installation.appliedRunnerLabels()
         )
     }
 
@@ -133,6 +140,8 @@ struct LocalRunnerMac: RunnerMac {
     }
 
     func markRemoved(_ runner: String) throws { try directory(named: runner).markRemoved() }
+
+    func markLabelsApplied(_ labels: [String]) throws { try installation.saveAppliedRunnerLabels(labels) }
 
     private func directory(named name: String) throws -> RunnerDirectory {
         guard let directory = try installation.runnerDirectories().directories.first(where: { $0.name == name }) else {

@@ -51,6 +51,34 @@ struct RunnerSettingsRow: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// The labels of a Mac's runners, as a person types them and as GitHub compares them.
+enum RunnerLabels {
+    /// The labels in a list that a person separated with commas.
+    static func parse(_ text: String) -> [String] {
+        text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    static func text(_ labels: [String]) -> String { labels.joined(separator: ", ") }
+
+    /// The labels in lowercase and once each, because GitHub compares labels without regard to case.
+    ///
+    /// Throws for a label that a runner cannot be given or that every runner already has.
+    static func validated(_ labels: [String]) throws(HostSettingsError) -> [String] {
+        var result: [String] = []
+        for label in labels.map({ $0.trimmingCharacters(in: .whitespaces).lowercased() }) where !result.contains(label) {
+            // The runner's setup takes its labels as one list separated by commas.
+            guard !label.isEmpty, !label.contains(","), !label.contains(where: \.isNewline) else {
+                throw HostSettingsError("A runner label cannot be empty or contain a comma.")
+            }
+            guard !["self-hosted", "macos", "arm64", "xcode-runnerkit"].contains(label) else {
+                throw HostSettingsError("Every runner already has the label \(label).")
+            }
+            result.append(label)
+        }
+        return result
+    }
+}
+
 /// A job limit and Simulator retention being edited, for this Mac or for a Mac paired with it.
 struct PoolSettingsDraft: Equatable {
     /// The edited settings. A setting that matches the saved one is `nil`, so Apply leaves its saved value as it is.
@@ -127,6 +155,8 @@ protocol HostSettingsDisplay {
     var hostState: HostState { get }
     /// Whether the Mac takes no new jobs. Its runners stay registered and appear offline on GitHub.
     var isPaused: Bool { get }
+    /// The labels that the Mac's runners get besides `xcode-runnerkit`, so that a workflow can choose the Mac.
+    var runnerLabels: [String] { get }
     var runners: [RunnerSettingsRow] { get }
     var runnerScanError: String? { get }
     var poolStatus: HostExecutionPool.Status? { get }
@@ -198,6 +228,7 @@ extension HostSettingsDisplay {
 struct HostSettingsReport: Codable, Equatable, Sendable {
     let hostState: HostState
     let isPaused: Bool
+    let runnerLabels: [String]
     let runners: [RunnerSettingsRow]
     let runnerScanError: String?
     let poolStatus: HostExecutionPool.Status?
@@ -219,6 +250,7 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
     @MainActor init(_ settings: some HostSettingsDisplay) {
         hostState = settings.hostState
         isPaused = settings.isPaused
+        runnerLabels = settings.runnerLabels
         runners = settings.runners
         runnerScanError = settings.runnerScanError
         poolStatus = settings.poolStatus
@@ -260,6 +292,11 @@ final class HostSettingsModel: HostSettingsDisplay {
     var hostState = HostState.starting
     private(set) var isPaused: Bool
     private(set) var pauseError: String?
+    private(set) var runnerLabels: [String] = []
+    /// The labels being edited, separated by commas.
+    var runnerLabelsInput = ""
+    private(set) var isSavingRunnerLabels = false
+    private(set) var runnerLabelsError: String?
     var runners: [RunnerSettingsRow] = []
     var runnerScanError: String?
     private(set) var poolStatus: HostExecutionPool.Status?
@@ -323,6 +360,12 @@ final class HostSettingsModel: HostSettingsDisplay {
             storageSaveError = "Could not read the saved storage folder: \(error.localizedDescription)"
         }
         refreshXcodes()
+        do {
+            runnerLabels = try installation.runnerLabels()
+            runnerLabelsInput = RunnerLabels.text(runnerLabels)
+        } catch {
+            runnerLabelsError = "Could not read the runner labels: \(error.localizedDescription)"
+        }
         // The Macs paired with this Mac read and change its settings through the owner of this Mac's window.
         self.management.settings = self
         self.github.pairedMacs = self.managedMacs
@@ -364,6 +407,39 @@ final class HostSettingsModel: HostSettingsDisplay {
     func restart() {
         guard canRestart else { return }
         restartHost?()
+    }
+
+    /// Saves the edited labels from this Mac's window, and puts them on this Mac's runners when this Mac registers
+    /// them itself.
+    func saveRunnerLabelsInput() async {
+        guard !isSavingRunnerLabels else { return }
+        isSavingRunnerLabels = true
+        defer { isSavingRunnerLabels = false }
+        do {
+            let previous = runnerLabels
+            try saveRunnerLabels(RunnerLabels.parse(runnerLabelsInput))
+            runnerLabelsError = nil
+            runnerLabelsInput = RunnerLabels.text(runnerLabels)
+            if runnerLabels != previous { await github.synchronize() }
+        } catch {
+            runnerLabelsError = error.localizedDescription
+        }
+    }
+
+    /// Saves the labels for this Mac's runners, from this Mac's window or from a Mac paired with it.
+    private func saveRunnerLabels(_ labels: [String]) throws(HostSettingsError) {
+        let labels = try RunnerLabels.validated(labels)
+        guard hostState != .stopping, !hasAcceptedRestart else {
+            throw HostSettingsError("\(HostPane.macName) cannot save runner labels now. Try again in a moment.")
+        }
+        let shown = RunnerLabels.text(runnerLabels)
+        do {
+            try installation.saveRunnerLabels(labels)
+        } catch {
+            throw HostSettingsError("Could not save the runner labels: \(error.localizedDescription)")
+        }
+        runnerLabels = labels
+        if runnerLabelsInput == shown { runnerLabelsInput = RunnerLabels.text(labels) }
     }
 
     /// Reads the record again, which can change outside this window as the saved storage folder and Xcode can. The
@@ -592,6 +668,7 @@ final class HostSettingsModel: HostSettingsDisplay {
             case .saveStorage(let directory): try await savePairedMacStorage(directory)
             case .saveXcode(let developerDirectory): try saveDeveloperDirectory(developerDirectory)
             case .setPaused(let isPaused): try savePaused(isPaused)
+            case .saveRunnerLabels(let labels): try saveRunnerLabels(labels)
             case .restart: try acceptRestart()
             }
             return .settings(HostSettingsReport(self))
@@ -669,6 +746,12 @@ struct HostMacSettingsView: View {
             ) {
                 Text("Processes on this Mac. Overview shows each repository's connection and job counts from GitHub.")
             }
+            RunnerLabelsSection(
+                labels: $model.runnerLabelsInput, isSaving: model.isSavingRunnerLabels, saveError: model.runnerLabelsError,
+                mac: .thisMac
+            ) {
+                Task { await model.saveRunnerLabelsInput() }
+            }
             XcodeExecutionSection(
                 settings: model, draft: $model.poolDraft, isSaving: model.isSaving, canApply: model.canApplyPoolConfiguration,
                 saveError: model.saveError
@@ -732,6 +815,35 @@ struct RunnerServicesSection<Settings: HostSettingsDisplay, Footer: View>: View 
             Text("Runner Services")
         } footer: {
             footer
+        }
+    }
+}
+
+/// The labels of a Mac's runners, in its own window or in a paired Mac's pane for it.
+@MainActor
+struct RunnerLabelsSection: View {
+    @Binding var labels: String
+    let isSaving: Bool
+    let saveError: String?
+    let mac: MacReference
+    let save: () -> Void
+
+    var body: some View {
+        Section {
+            TextField("Labels", text: $labels, prompt: Text("None"))
+                .disabled(isSaving)
+                .accessibilityIdentifier("runner-labels")
+            HStack {
+                Spacer()
+                Button(isSaving ? "Saving…" : "Save", action: save)
+                    .disabled(isSaving)
+                    .accessibilityIdentifier("save-runner-labels")
+            }
+            if let saveError { ErrorText(saveError) }
+        } header: {
+            Text("Runner Labels")
+        } footer: {
+            Text("Runners on \(mac.object) get these labels besides xcode-runnerkit. Separate labels with commas. A workflow chooses \(mac.object) with one of them in runs-on.")
         }
     }
 }

@@ -75,6 +75,38 @@ package struct HostInstallation: Sendable {
         return URL(filePath: path, directoryHint: .notDirectory)
     }
 
+    /// The labels that this Mac's runners get besides `xcode-runnerkit`, so that a workflow can choose this Mac.
+    package func runnerLabels() throws -> [String] { try labels(at: hostRoot.appending(path: "runner-labels")) }
+
+    package func saveRunnerLabels(_ labels: [String]) throws {
+        try save(labels, at: hostRoot.appending(path: "runner-labels"))
+    }
+
+    /// The labels of earlier lists that a host put on this Mac's runners. It removes those that left the list.
+    package func appliedRunnerLabels() throws -> [String] { try labels(at: hostRoot.appending(path: "applied-runner-labels")) }
+
+    package func saveAppliedRunnerLabels(_ labels: [String]) throws {
+        try save(labels, at: hostRoot.appending(path: "applied-runner-labels"))
+    }
+
+    private func labels(at record: URL) throws -> [String] {
+        do {
+            return try String(contentsOf: record, encoding: .utf8).split(separator: "\n").map(String.init)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            return []
+        }
+    }
+
+    private func save(_ labels: [String], at record: URL) throws {
+        guard !labels.isEmpty else {
+            do { try FileManager.default.removeItem(at: record) }
+            catch let error as CocoaError where error.code == .fileNoSuchFile { }
+            return
+        }
+        try FileManager.default.createDirectory(at: hostRoot, withIntermediateDirectories: true)
+        try Data(labels.joined(separator: "\n").utf8).write(to: record, options: .atomic)
+    }
+
     private var pausedRecord: URL { hostRoot.appending(path: "paused") }
 
     /// Whether the host takes no new jobs: it stops its runner services once their jobs finish, and starts none.

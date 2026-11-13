@@ -42,6 +42,9 @@ enum HostSettingsRequest: Codable, Sendable {
     /// Saves the Xcode that the Mac's jobs use when they name none, as its `Contents/Developer` directory, or `nil`
     /// for the Xcode that `xcode-select` names.
     case saveXcode(developerDirectory: String?)
+    /// Saves the labels that the Mac's runners get besides `xcode-runnerkit`. Whoever registers the Mac's runners
+    /// puts them on the runners afterwards.
+    case saveRunnerLabels([String])
     /// Pauses or resumes the Mac. While paused, it stops its runner services once their jobs finish, starts none,
     /// and refuses a dashboard's builds. Its runners stay registered.
     case setPaused(Bool)
@@ -72,6 +75,7 @@ enum RunnerRequest: Codable, Sendable {
     case install(RunnerProvisioner.InstallationRequest)
     case markUnregistering(runner: String, repositoryID: Int)
     case markRemoved(runner: String)
+    case markLabelsApplied([String])
 }
 
 /// Runs a build or test of a dashboard's checkout on a host. One operation's messages share a connection: the
@@ -288,7 +292,7 @@ enum HostLink {
     static let versionKeyName = "version"
     /// The version of the messages that paired Macs exchange. Raise it with every change after which a Mac running
     /// the previous version could not read a request, a reply, or a report.
-    static let version = 5
+    static let version = 6
     /// A connection whose key the other Mac rejects keeps waiting instead of failing, so requests stop after this long.
     static let requestTimeout = Duration.seconds(10)
 

@@ -87,6 +87,7 @@ protocol RunnerProvisioningClient: Sendable {
     func registrationToken(repository: GitHubRepository, accessToken: String) async throws -> String
     func runnerDownload(accessToken: String) async throws -> GitHubRunnerDownload
     func removeRunner(_ id: Int, from repository: GitHubRepository, accessToken: String) async throws
+    func setCustomLabels(_ labels: [String], ofRunner id: Int, in repository: GitHubRepository, accessToken: String) async throws
 }
 
 extension GitHubClient: RunnerProvisioningClient {}
@@ -258,11 +259,32 @@ actor RunnerProvisioner {
             } catch { localOwnership[repository.id] = .failure(error) }
         }
         let sharedLabels = Self.commonCustomLabels(of: sharedRunners)
+        // The Mac's own labels, and the labels of its earlier lists that its runners can still have. GitHub compares
+        // labels without regard to case.
+        var macLabels = Set(inventory.labels.map { $0.lowercased() })
+        let appliedLabels = Set(inventory.appliedLabels.map { $0.lowercased() })
+        var retiredLabels = appliedLabels.subtracting(macLabels)
+        var labelProblems: [RunnerProvisioningProblem] = []
+        if !macLabels.isSubset(of: appliedLabels) {
+            // A label is recorded before a runner gets it, so that it can be removed after it leaves the list.
+            do {
+                try await mac.markLabelsApplied(appliedLabels.union(macLabels).sorted())
+            } catch {
+                labelProblems = [.failed("Could not record the Mac's runner labels, so they were not changed: \(error.localizedDescription)")]
+                macLabels = []
+                retiredLabels = []
+            }
+        }
+        var everyRunnerHasItsLabels = labelProblems.isEmpty
         var authenticationError: GitHubError?
 
         for repository in repositories {
             var knownRunners: [GitHubRunner] = []
-            var problems = initialScan.problems
+            var problems = initialScan.problems + labelProblems
+            var hasItsLabels = false
+            defer {
+                if !hasItsLabels { everyRunnerHasItsLabels = false }
+            }
             do {
                 try Task.checkCancellation()
                 guard let snapshot = snapshots[repository.id] else { throw CancellationError() }
@@ -270,8 +292,16 @@ actor RunnerProvisioner {
                 guard let ownership = localOwnership[repository.id] else { throw CancellationError() }
                 var local = try ownership.get()
                 knownRunners = Self.managedRunners(local: local, remote: remote)
+                // Existing runners get the Mac's labels and lose those that left its list. Their other labels stay.
+                for runner in knownRunners {
+                    let current = Self.customLabels(of: runner)
+                    let next = current.subtracting(retiredLabels).union(macLabels)
+                    guard next != current else { continue }
+                    try await client.setCustomLabels(next.sorted(), ofRunner: runner.id, in: repository, accessToken: token)
+                }
+                hasItsLabels = true
                 let inheritedLabels = knownRunners.isEmpty ? sharedLabels : Self.commonCustomLabels(of: knownRunners)
-                let labels = Array(Set(inheritedLabels + ["xcode-runnerkit"])).sorted()
+                let labels = Set(inheritedLabels).subtracting(retiredLabels).union(macLabels).union(["xcode-runnerkit"]).sorted()
                 let individualCount = local.count(where: { $0.hasIndividualService })
                 if individualCount > 0 {
                     problems.append(.individualServices(count: individualCount))
@@ -347,6 +377,9 @@ actor RunnerProvisioner {
             }
             statuses.append(Self.status(repository: repository, capacity: capacity, runners: knownRunners, problems: problems))
         }
+        // Once every runner has the list, the labels that left it are on no runner. If this record is not written,
+        // the next call finds nothing to change on the runners and writes it then.
+        if everyRunnerHasItsLabels, !retiredLabels.isEmpty { try? await mac.markLabelsApplied(macLabels.sorted()) }
 
         for repository in unlinked {
             var remaining = 0
@@ -494,12 +527,15 @@ actor RunnerProvisioner {
     }
 
     private static func commonCustomLabels(of runners: [GitHubRunner]) -> [String] {
-        let defaults: Set<String> = ["self-hosted", "macos", "arm64"]
-        let labelSets = runners.map { runner in
-            Set(runner.labels.map { $0.name.lowercased() }.filter { !defaults.contains($0) })
-        }
+        let labelSets = runners.map(customLabels)
         guard let first = labelSets.first else { return [] }
         return labelSets.dropFirst().reduce(first) { $0.intersection($1) }.sorted()
+    }
+
+    /// The labels that a runner has besides those that GitHub sets itself.
+    private static func customLabels(of runner: GitHubRunner) -> Set<String> {
+        let defaults: Set<String> = ["self-hosted", "macos", "arm64"]
+        return Set(runner.labels.map { $0.name.lowercased() }.filter { !defaults.contains($0) })
     }
 
     private static func status(
