@@ -201,38 +201,45 @@ enum RemoteOperationClient {
             ])
             var status: Int32?
             // The results are unpacked beside their place, and appear there once they are whole.
-            var results: (folder: URL, handle: FileHandle)?
-            while true {
-                switch try await exchange.receive() {
-                case .operation(.output(let data)):
-                    try output(rewriter.rewrite(data))
-                case .operation(.exited(let code)):
-                    try output(rewriter.finish())
-                    status = code
-                case .operation(.results(let data)):
-                    if results == nil {
-                        let folder = outputDirectory.appending(path: ".results-\(UUID().uuidString)")
-                        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                        let archive = folder.appending(path: resultsArchiveName)
-                        guard FileManager.default.createFile(atPath: archive.path(percentEncoded: false), contents: nil) else {
-                            throw CocoaError(.fileWriteUnknown, userInfo: [NSURLErrorKey: archive])
+            var results: (folder: URL, handle: FileHandle?)?
+            do {
+                events: while true {
+                    switch try await exchange.receive() {
+                    case .operation(.output(let data)):
+                        try output(rewriter.rewrite(data))
+                    case .operation(.exited(let code)):
+                        try output(rewriter.finish())
+                        status = code
+                    case .operation(.results(let data)):
+                        if results == nil {
+                            let folder = outputDirectory.appending(path: ".results-\(UUID().uuidString)")
+                            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                            let archive = folder.appending(path: resultsArchiveName)
+                            results = (folder, nil)
+                            guard FileManager.default.createFile(atPath: archive.path(percentEncoded: false), contents: nil) else {
+                                throw CocoaError(.fileWriteUnknown, userInfo: [NSURLErrorKey: archive])
+                            }
+                            results?.handle = try FileHandle(forWritingTo: archive)
                         }
-                        results = (folder, try FileHandle(forWritingTo: archive))
+                        try results?.handle?.write(contentsOf: data)
+                    case .operation(.finished):
+                        guard status != nil else { throw HostLinkError.unexpectedReply }
+                        try results?.handle?.close()
+                        break events
+                    case let reply:
+                        throw unexpected(reply)
                     }
-                    try results?.handle.write(contentsOf: data)
-                case .operation(.finished):
-                    guard let status else { throw HostLinkError.unexpectedReply }
-                    if let results {
-                        try results.handle.close()
-                        try await unpackResults(in: results.folder, into: outputDirectory, rewriter: rewriter)
-                    }
-                    // The host has nothing more to send, and removed what the operation left.
-                    try? await exchange.send(.operation(.received))
-                    return status
-                case let reply:
-                    throw unexpected(reply)
                 }
+            } catch {
+                // An archive that did not arrive whole has nothing to unpack.
+                if let results { try? FileManager.default.removeItem(at: results.folder) }
+                throw error
             }
+            guard let status else { throw HostLinkError.unexpectedReply }
+            if let results { try await unpackResults(in: results.folder, into: outputDirectory, rewriter: rewriter) }
+            // The host has nothing more to send, and removed what the operation left.
+            try? await exchange.send(.operation(.received))
+            return status
         }
     }
 
