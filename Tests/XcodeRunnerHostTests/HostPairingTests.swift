@@ -166,6 +166,17 @@ struct HostPairingTests {
         #expect(settings.report?.savedXcodeIsMissing == true)
         #expect(settings.xcodeSelectionInput == "/Applications/Removed.app/Contents/Developer")
 
+        // A paused Mac keeps that state across launches, and its own window shows it.
+        #expect(settings.report?.isPaused == false)
+        await macs.setPaused(true, of: mac.id)
+        #expect(settings.pauseError == nil)
+        #expect(settings.report?.isPaused == true)
+        #expect(managed.isPaused)
+        #expect(managedMac(at: root).isPaused)
+        await macs.setPaused(false, of: mac.id)
+        #expect(settings.report?.isPaused == false)
+        #expect(!managedMac(at: root).isPaused)
+
         // The saved folder waits for the Mac's next launch. A host that launchd started restarts itself when asked.
         #expect(settings.report?.storageChangeIsPending == true)
         // A host that someone started another way is restarted by them.
@@ -555,6 +566,10 @@ struct HostPairingTests {
         settings.storageDirectoryInput = "Storage"
         await macs.saveStorageDirectory(of: managed.id)
         #expect(settings.storageSaveError == "Enter an absolute folder path.")
+        await macs.setPaused(true, of: managed.id)
+        #expect(settings.pauseError == nil)
+        #expect(runner.isPaused)
+        #expect(settings.report?.isPaused == true)
         await macs.restart(managed.id)
         #expect(settings.restartError == nil)
         try await waitUntil { restarts == 1 }
@@ -722,11 +737,18 @@ struct HostPairingTests {
         await host.management.shutDown()
     }
 
-    @Test func aHostRefusesAnOperationWhileItsStorageIsMissing() async throws {
+    @Test func aHostRefusesAnOperationWhileItIsPausedOrItsStorageIsMissing() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let (host, storage, shown, endpoint, directory) = try await hostAndCheckout(at: root)
         let checkout = try await Checkout.containing(directory)
+        host.setPaused(true)
+        await #expect(throws: HostLinkError.refused("Managed is paused and takes no new jobs.")) {
+            try await RemoteOperationClient.run(
+                "build", arguments: [], in: checkout, on: shown, at: endpoint, outputDirectory: root.appending(path: "Output")
+            ) { _ in }
+        }
+        host.setPaused(false)
         // As when the volume that holds the storage is not mounted.
         try FileManager.default.removeItem(at: storage.directory)
 

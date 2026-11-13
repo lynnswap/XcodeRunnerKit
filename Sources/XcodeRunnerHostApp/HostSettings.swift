@@ -19,6 +19,10 @@ enum RunnerServiceState: String, Codable, Sendable {
     case stopped = "Stopped"
     case failed = "Needs attention"
     case individualService = "Individual service"
+    /// The Mac is paused, and the host stopped the runner's service or did not start it.
+    case paused = "Paused"
+    /// The Mac is paused, and the runner's service stops after the job that it runs.
+    case finishing = "Finishing a job"
 }
 
 struct RunnerSettingsRow: Codable, Equatable, Identifiable, Sendable {
@@ -121,6 +125,8 @@ struct PoolSettingsDraft: Equatable {
 @MainActor
 protocol HostSettingsDisplay {
     var hostState: HostState { get }
+    /// Whether the Mac takes no new jobs. Its runners stay registered and appear offline on GitHub.
+    var isPaused: Bool { get }
     var runners: [RunnerSettingsRow] { get }
     var runnerScanError: String? { get }
     var poolStatus: HostExecutionPool.Status? { get }
@@ -155,7 +161,11 @@ extension HostSettingsDisplay {
         return "\(status.activeJobCount) running · \(status.waitingJobCount) waiting · Limit \(status.configuration.maximumConcurrentJobs)"
     }
 
+    /// Whether the host runs and takes no new jobs, which is not a problem to solve.
+    var showsPaused: Bool { isPaused && hostState == .running }
+
     var admissionMessage: String {
+        if showsPaused { return "Runner services stop after the jobs that they run, and no new jobs start." }
         if !hasLoadedPoolStatus { return "Checking the execution pool…" }
         if poolError != nil { return "The execution pool is unavailable." }
         guard let poolStatus else { return "Set a limit to configure the shared execution pool." }
@@ -187,6 +197,7 @@ extension HostSettingsDisplay {
 /// What a Mac sends the Macs paired with it about its status and settings.
 struct HostSettingsReport: Codable, Equatable, Sendable {
     let hostState: HostState
+    let isPaused: Bool
     let runners: [RunnerSettingsRow]
     let runnerScanError: String?
     let poolStatus: HostExecutionPool.Status?
@@ -207,6 +218,7 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
 
     @MainActor init(_ settings: some HostSettingsDisplay) {
         hostState = settings.hostState
+        isPaused = settings.isPaused
         runners = settings.runners
         runnerScanError = settings.runnerScanError
         poolStatus = settings.poolStatus
@@ -246,6 +258,8 @@ final class HostSettingsModel: HostSettingsDisplay {
     /// Runs the builds and tests that dashboards send to this Mac.
     let operations: RemoteOperations
     var hostState = HostState.starting
+    private(set) var isPaused: Bool
+    private(set) var pauseError: String?
     var runners: [RunnerSettingsRow] = []
     var runnerScanError: String?
     private(set) var poolStatus: HostExecutionPool.Status?
@@ -290,6 +304,7 @@ final class HostSettingsModel: HostSettingsDisplay {
         operationTool: URL = Bundle.main.bundleURL.appending(path: "Contents/Helpers/xcode-runner")
     ) {
         self.installation = installation
+        self.isPaused = installation.isPaused()
         self.operations = RemoteOperations(installation: installation, tool: operationTool)
         // Reading status leaves an unconfigured pool unchanged.
         self.pool = HostExecutionPool(directory: installation.poolDirectory)
@@ -349,6 +364,34 @@ final class HostSettingsModel: HostSettingsDisplay {
     func restart() {
         guard canRestart else { return }
         restartHost?()
+    }
+
+    /// Reads the record again, which can change outside this window as the saved storage folder and Xcode can. The
+    /// scan of the runner services calls this, because reading the pool's status can wait for another process.
+    func refreshPause() { isPaused = installation.isPaused() }
+
+    /// Pauses or resumes this Mac from its own window.
+    func setPaused(_ isPaused: Bool) {
+        do {
+            try savePaused(isPaused)
+            pauseError = nil
+        } catch {
+            pauseError = error.localizedDescription
+        }
+    }
+
+    /// Saves whether this Mac takes new jobs, from this Mac's window or from a Mac paired with it. The host stops
+    /// and starts its runner services at its next scan of them.
+    private func savePaused(_ isPaused: Bool) throws(HostSettingsError) {
+        guard hostState != .stopping, !hasAcceptedRestart else {
+            throw HostSettingsError("\(HostPane.macName) cannot \(isPaused ? "pause" : "resume") now. Try again in a moment.")
+        }
+        do {
+            try installation.savePaused(isPaused)
+            self.isPaused = isPaused
+        } catch {
+            throw HostSettingsError("Could not \(isPaused ? "pause" : "resume") \(HostPane.macName): \(error.localizedDescription)")
+        }
     }
 
     func saveStorageSelection() async {
@@ -548,6 +591,7 @@ final class HostSettingsModel: HostSettingsDisplay {
             case .configurePool(let changes): try await applyPairedMacChanges(changes)
             case .saveStorage(let directory): try await savePairedMacStorage(directory)
             case .saveXcode(let developerDirectory): try saveDeveloperDirectory(developerDirectory)
+            case .setPaused(let isPaused): try savePaused(isPaused)
             case .restart: try acceptRestart()
             }
             return .settings(HostSettingsReport(self))
@@ -619,7 +663,10 @@ struct HostMacSettingsView: View {
             // Other Macs' changes to this Mac's settings appear below, so who can make them comes first.
             HostManagementSection(model: model)
             HostDashboardsSection(model: model)
-            RunnerServicesSection(settings: model) {
+            RunnerServicesSection(
+                settings: model, mac: .thisMac, isChangingPause: false, pauseError: model.pauseError,
+                setPaused: { model.setPaused($0) }
+            ) {
                 Text("Processes on this Mac. Overview shows each repository's connection and job counts from GitHub.")
             }
             XcodeExecutionSection(
@@ -649,10 +696,23 @@ struct HostMacSettingsView: View {
 @MainActor
 struct RunnerServicesSection<Settings: HostSettingsDisplay, Footer: View>: View {
     let settings: Settings
+    let mac: MacReference
+    let isChangingPause: Bool
+    /// Why the Mac did not pause or resume.
+    let pauseError: String?
+    let setPaused: (Bool) -> Void
     @ViewBuilder let footer: Footer
 
     var body: some View {
         Section {
+            Toggle("Take new jobs", isOn: Binding(get: { !settings.isPaused }, set: { setPaused(!$0) }))
+                .disabled(isChangingPause)
+                .accessibilityIdentifier("take-new-jobs")
+            if settings.isPaused {
+                Text("\(mac.subject) is paused. Its runner services stop after the jobs that they run, and its runners stay registered and appear offline on GitHub.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            if let pauseError { ErrorText(pauseError) }
             if settings.runners.isEmpty {
                 Text(settings.storageError == nil ? "No runners have opted in to this host." : "Runner services have not started because storage needs attention.")
                     .foregroundStyle(.secondary)

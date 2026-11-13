@@ -8,6 +8,7 @@ enum ManagedMacsRequest: Codable, Sendable {
     case configurePool(PoolSettingsDraft.Changes, mac: HostPairing.ID)
     case saveStorage(directory: String, mac: HostPairing.ID)
     case saveXcode(developerDirectory: String?, mac: HostPairing.ID)
+    case setPaused(Bool, mac: HostPairing.ID)
     case restart(mac: HostPairing.ID)
     /// Ends the pairing between the host and a Mac.
     case remove(mac: HostPairing.ID)
@@ -124,6 +125,8 @@ final class ManagedMacsRelay {
                 try await relay(.saveStorage(directory: directory), to: mac)
             case .saveXcode(let developerDirectory, let mac):
                 try await relay(.saveXcode(developerDirectory: developerDirectory), to: mac)
+            case .setPaused(let isPaused, let mac):
+                try await relay(.setPaused(isPaused), to: mac)
             case .restart(let mac):
                 try await relay(.restart, to: mac)
             case .remove(let mac):

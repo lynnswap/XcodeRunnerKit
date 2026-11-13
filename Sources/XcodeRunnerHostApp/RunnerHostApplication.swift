@@ -203,6 +203,12 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private struct HostedRunner {
         let task: Task<Void, Never>
         var state: RunnerServiceState
+        /// The process group of the runner's service, once it started.
+        var processGroup: Int32?
+        /// Stops the service of a paused runner when the worker of its job ends.
+        var jobWatch: (worker: Int32, source: any DispatchSourceProcess)?
+        /// Whether the service was asked to stop when its job ended while the Mac was paused.
+        var stoppedAfterJob = false
     }
     private var runners: [URL: HostedRunner] = [:]
     private let settings: HostSettingsModel
@@ -420,6 +426,9 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     }
 
     private func reconcile() async throws {
+        // The services that run need no scan of the runner folders, so a folder that cannot be read does not keep a
+        // paused Mac taking jobs.
+        let finishing = try await stopServicesWhilePaused()
         let scan = try RunnerDirectory.scan(root)
         if let unreadable = scan.unreadable.first { throw unreadable.error }
         // A runner marked while the services below stop keeps running until the next scan stops it.
@@ -437,16 +446,100 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             try FileManager.default.removeItem(at: directory.url)
             print("Removed \(directory.name).")
         }
+        // Read after the waits above, during which the Mac can be paused or resumed.
+        let isPaused = settings.isPaused
+        var individual: Set<URL> = []
         for runner in requested where runners[runner.url] == nil {
             if try runner.hasIndividualService() {
-                print("Skipped \(runner.name): uninstall its individual service before opting in.")
-                continue
+                if !isPaused { print("Skipped \(runner.name): uninstall its individual service before opting in.") }
+                individual.insert(runner.url)
+            } else if !isPaused {
+                runners[runner.url] = HostedRunner(task: Task { await serve(runner.url) }, state: .starting)
             }
-            runners[runner.url] = HostedRunner(task: Task { await serve(runner.url) }, state: .starting)
         }
         settings.runnerScanError = nil
         settings.runners = requested.sorted { $0.name < $1.name }.map { runner in
-            RunnerSettingsRow.read(runner, state: runners[runner.url]?.state ?? .individualService)
+            let state: RunnerServiceState = if isPaused, finishing.contains(runner.url) {
+                .finishing
+            } else if let hosted = runners[runner.url] {
+                hosted.state
+            } else {
+                individual.contains(runner.url) ? .individualService : .paused
+            }
+            return RunnerSettingsRow.read(runner, state: state)
+        }
+    }
+
+    /// While the Mac is paused, stops the services of the runners that run no job.
+    ///
+    /// The official runner has no way to refuse jobs while it runs, so a job that it takes in the instant before
+    /// its service stops is cancelled, as when the host quits.
+    ///
+    /// - Returns: The runners that finish a job, whose services stop when it ends.
+    private func stopServicesWhilePaused() async throws -> Set<URL> {
+        // A service that stopped when its job ended is removed even if the Mac resumed since, so that it starts again.
+        for (directory, runner) in runners where runner.stoppedAfterJob {
+            runners[directory] = nil
+            await runner.task.value
+            print("Paused \(directory.lastPathComponent).")
+        }
+        settings.refreshPause()
+        guard settings.isPaused else { return [] }
+        var finishing: Set<URL> = []
+        var stopping: [(directory: URL, task: Task<Void, Never>)] = []
+        for (directory, runner) in runners {
+            // A service that just ended has no processes to list, and no job.
+            if runner.state == .running, let group = runner.processGroup,
+               let worker = (try? Self.jobWorker(inGroup: group)) ?? nil {
+                finishing.insert(directory)
+                if runner.jobWatch?.worker != worker {
+                    runner.jobWatch?.source.cancel()
+                    runners[directory]?.jobWatch = (worker, stopService(of: directory, after: worker))
+                }
+                continue
+            }
+            runner.jobWatch?.source.cancel()
+            runners[directory] = nil
+            // Every idle runner is asked to stop before any of them is waited for, so none takes a job meanwhile.
+            runner.task.cancel()
+            stopping.append((directory, runner.task))
+        }
+        for runner in stopping {
+            await runner.task.value
+            print("Paused \(runner.directory.lastPathComponent).")
+        }
+        try Task.checkCancellation()
+        return finishing
+    }
+
+    /// Stops a paused runner's service as soon as its job's worker ends. A runner whose repository has jobs waiting
+    /// takes the next one before the next scan of the runners.
+    private func stopService(of directory: URL, after worker: Int32) -> any DispatchSourceProcess {
+        let source = DispatchSource.makeProcessSource(identifier: worker, eventMask: .exit, queue: .main)
+        source.setEventHandler {
+            source.cancel()
+            guard let runner = self.runners[directory], runner.jobWatch?.worker == worker else { return }
+            self.runners[directory]?.jobWatch = nil
+            // The Mac can have resumed while the job ran. The next scan removes a service that stops here.
+            if self.settings.isPaused {
+                self.runners[directory]?.stoppedAfterJob = true
+                runner.task.cancel()
+            }
+        }
+        source.resume()
+        return source
+    }
+
+    /// The worker process that the official runner in a service's process group started for the job that it runs.
+    private nonisolated static func jobWorker(inGroup identifier: Int32) throws -> Int32? {
+        try groupMembers(identifier).first { member in
+            var info = proc_bsdshortinfo()
+            let size = Int32(MemoryLayout<proc_bsdshortinfo>.size)
+            // A worker that ended stays listed until the runner collects its status.
+            guard proc_pidinfo(member, PROC_PIDT_SHORTBSDINFO, 0, &info, size) == size, info.pbsi_status != UInt32(SZOMB) else {
+                return false
+            }
+            return withUnsafeBytes(of: info.pbsi_comm) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) } == "Runner.Worker"
         }
     }
 
@@ -476,6 +569,21 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     }
 
     private nonisolated static func groupHasLiveProcesses(_ identifier: Int32) throws -> Bool {
+        for member in try groupMembers(identifier) {
+            var info = proc_bsdshortinfo()
+            let size = Int32(MemoryLayout<proc_bsdshortinfo>.size)
+            let read = proc_pidinfo(member, PROC_PIDT_SHORTBSDINFO, 0, &info, size)
+            if read == size {
+                if info.pbsi_pgid == UInt32(identifier) && info.pbsi_status != UInt32(SZOMB) { return true }
+            } else if errno != ESRCH {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
+        }
+        return false
+    }
+
+    /// The processes in a process group, with those that already exited and were not reaped.
+    private nonisolated static func groupMembers(_ identifier: Int32) throws -> [Int32] {
         let estimatedBytes = proc_listpids(UInt32(PROC_PGRP_ONLY), UInt32(identifier), nil, 0)
         guard estimatedBytes > 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
@@ -493,17 +601,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             if Int(count) < members.count * MemoryLayout<Int32>.stride { break }
             members += members
         } while true
-        for member in members.prefix(Int(count) / MemoryLayout<Int32>.stride) {
-            var info = proc_bsdshortinfo()
-            let size = Int32(MemoryLayout<proc_bsdshortinfo>.size)
-            let read = proc_pidinfo(member, PROC_PIDT_SHORTBSDINFO, 0, &info, size)
-            if read == size {
-                if info.pbsi_pgid == UInt32(identifier) && info.pbsi_status != UInt32(SZOMB) { return true }
-            } else if errno != ESRCH {
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-            }
-        }
-        return false
+        return Array(members.prefix(Int(count) / MemoryLayout<Int32>.stride))
     }
 
     private func serve(_ directory: URL) async {
@@ -541,6 +639,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 error: .fileDescriptor(.init(rawValue: descriptor), closeAfterSpawningProcess: false)
             ) { execution in
                 self.runners[directory]?.state = .running
+                self.runners[directory]?.processGroup = execution.processIdentifier.value
                 try await Self.cleanUpServiceGroupAfterExit(execution.processIdentifier.value)
             }
             if Task.isCancelled {

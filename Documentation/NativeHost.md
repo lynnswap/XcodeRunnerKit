@@ -146,6 +146,23 @@ five minutes while signed in. Pool and repository settings are saved separately;
 apply pending changes in the other. **Disconnect** removes local login tokens and
 stops registration management; it leaves existing runner services running.
 
+### Pause a Mac
+
+To use a Mac for something else for a while, turn off **Take new jobs** under
+**Runner Services** in its pane. The host stops each runner service once the
+runner has no job, and starts none, so the jobs that run finish. A job that a
+runner takes in the instant before its service stops is cancelled, as when the
+host quits. The runners stay registered and appear offline on GitHub, where
+their jobs wait or go to other runners with the same labels. A paused Mac also refuses a build or test
+that a dashboard sends with `--host`, and finishes one that it accepted before,
+also when that one still waits for a place in the job limit. Overview shows the
+Mac as **Paused**.
+
+Turning **Take new jobs** on starts the runner services again without
+registering anything. The setting is kept across restarts of the host, and the
+Mac's managing host and its dashboards can change it in their panes for the
+Mac.
+
 ## Pair other Macs
 
 One host can list the other XcodeHomeRunner hosts on your local network under

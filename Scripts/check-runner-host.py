@@ -282,6 +282,53 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     assert rejected.returncode != 0 and b'certificate signing identity' in rejected.stderr
     assert not (root/'home/Applications').exists()
 
+# A paused host stops the services of idle runners, lets a runner finish its job, and starts them again when resumed.
+with tempfile.TemporaryDirectory(prefix='RunnerHost pause ') as temporary:
+    root = Path(temporary)
+    home = root/'home'
+    host_root = home/'Library/Application Support/XcodeRunnerKit'
+    runners = home/'Library/XcodeRunnerKit/runners'
+    runners.mkdir(parents=True)
+    idle = fixture(runners, 'idle')
+    busy = fixture(runners, 'busy')
+    # The official runner starts a process of this name for each job, in its service's process group.
+    # The host finds the worker by its executable's name, which a script or a link to another tool does not have.
+    subprocess.run(['xcrun', 'clang', '-x', 'c', '-', '-o', str(busy/'Runner.Worker')], check=True,
+                   input=b'#include <unistd.h>\nint main(void) { sleep(600); return 0; }\n')
+    # A runner whose repository has jobs waiting takes the next one as soon as a job ends.
+    (busy/'runsvc.sh').write_text('''#!/bin/bash
+trap 'kill -INT "$PID"' TERM INT
+./Runner.Worker &
+echo $! > job.pid
+(while ps -o stat= -p $(cat job.pid) | grep -qv Z; do sleep 0.02; done; ./Runner.Worker) &
+python3 worker.py &
+PID=$!
+# Waiting also returns when another child ends, as the first job does.
+while kill -0 "$PID" 2>/dev/null; do wait "$PID"; done
+''')
+    with (root/'host.log').open('wb') as log:
+        watched = HostOutput([executable, '--host', '--home-directory', str(home)], log, env={**os.environ, 'HOME':str(home)})
+        try:
+            wait_for(lambda:(idle/'pid.json').exists() and (busy/'pid.json').exists(), 'Runners did not start')
+            idle_pid = json.loads((idle/'pid.json').read_text())['pid']
+            busy_pid = json.loads((busy/'pid.json').read_text())['pid']
+            (host_root/'paused').touch()
+            wait_for(lambda:watched.contains('Paused idle.'), 'A paused host did not stop an idle runner')
+            assert not alive(idle_pid)
+            # The host scans its runners every two seconds, so several scans leave the busy runner alone.
+            time.sleep(6)
+            assert alive(busy_pid) and not (busy/'stopping').exists(), 'A paused host stopped a runner during its job'
+            os.kill(int((busy/'job.pid').read_text()), signal.SIGKILL)
+            wait_for(lambda:watched.contains('Paused busy.'), 'A paused host did not stop a runner after its job')
+            assert not alive(busy_pid)
+            (host_root/'paused').unlink()
+            wait_for(lambda:all(json.loads((directory/'pid.json').read_text())['pid'] not in (idle_pid, busy_pid)
+                                and alive(json.loads((directory/'pid.json').read_text())['pid'])
+                                for directory in (idle, busy)), 'A resumed host did not start its runners')
+        finally:
+            stop_host(watched.process, runners)
+            watched.close()
+
 with tempfile.TemporaryDirectory(prefix='RunnerHost blocked storage ') as temporary:
     root = Path(temporary)
     home = root/'home'
@@ -498,4 +545,4 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost storage change ') as tempora
         finally:
             stop_host(host, runners)
 
-print('PASS: dashboard launch without host files, an operation for a host handed to the app, runner lifecycle, hidden runner discovery, removal of runners unregistered from GitHub, prompt shutdown while storage is locked, recovery when unavailable storage returns, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')
+print('PASS: dashboard launch without host files, an operation for a host handed to the app, pausing and resuming runner services around a job, runner lifecycle, hidden runner discovery, removal of runners unregistered from GitHub, prompt shutdown while storage is locked, recovery when unavailable storage returns, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')

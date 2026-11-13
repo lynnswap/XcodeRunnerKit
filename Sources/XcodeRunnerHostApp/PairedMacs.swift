@@ -30,6 +30,9 @@ final class PairedMacSettings {
     var xcodeSelectionInput = ""
     private(set) var isSavingXcode = false
     private(set) var xcodeSaveError: String?
+    private(set) var isChangingPause = false
+    /// Why the Mac refused to pause or resume, or why it did not confirm the change.
+    private(set) var pauseError: String?
     private(set) var isRestarting = false
     /// Why the Mac refused to restart, or why it did not confirm that it restarts.
     private(set) var restartError: String?
@@ -46,7 +49,9 @@ final class PairedMacSettings {
 
     var canApplyPoolConfiguration: Bool { report?.canApplyPoolConfiguration == true && !isSaving }
 
-    var isChanging: Bool { isSaving || isSavingStorage || isSavingXcode || isRestarting || isChangingGitHub }
+    var isChanging: Bool {
+        isSaving || isSavingStorage || isSavingXcode || isChangingPause || isRestarting || isChangingGitHub
+    }
 
     /// Shows newly read GitHub settings, with the saved selection in a selection that was not edited.
     fileprivate func show(_ github: GitHubReport) {
@@ -147,6 +152,25 @@ final class PairedMacSettings {
             xcodeSelectionInput = report.savedDeveloperDirectory?.path(percentEncoded: false) ?? ""
         } catch {
             xcodeSaveError = Self.changeFailure(error, on: macName)
+        }
+    }
+
+    /// Pauses or resumes the Mac.
+    ///
+    /// - Parameter send: Sends the change to the Mac named `macName` and returns the settings it answers with.
+    func setPaused(_ isPaused: Bool, on macName: String, send: (Bool) async throws -> HostSettingsReport) async {
+        guard report != nil, !isChangingPause else { return }
+        isChangingPause = true
+        beginChange()
+        defer {
+            isChangingPause = false
+            endChange()
+        }
+        do {
+            show(try await send(isPaused))
+            pauseError = nil
+        } catch {
+            pauseError = Self.changeFailure(error, on: macName)
         }
     }
 
@@ -611,6 +635,13 @@ final class PairedMacs: MacList {
         }
     }
 
+    func setPaused(_ isPaused: Bool, of id: HostPairing.ID) async {
+        guard let mac = mac(id), let settings = settings[id] else { return }
+        await settings.setPaused(isPaused, on: mac.name) { isPaused in
+            try await self.requestSettings(.setPaused(isPaused), from: mac)
+        }
+    }
+
     func restart(_ id: HostPairing.ID) async {
         guard let mac = mac(id), let settings = settings[id] else { return }
         await settings.restart(on: mac.name) { try await self.requestSettings(.restart, from: mac) }
@@ -753,7 +784,7 @@ final class PairedMacs: MacList {
         let timeout = switch request {
         case .read(refreshing: nil), .discover, .pair, .confirmCode, .cancelPairing: HostLink.requestTimeout
         case .read: HostLink.requestTimeout * 3
-        case .configurePool, .saveStorage, .saveXcode, .restart, .remove: Self.changeTimeout
+        case .configurePool, .saveStorage, .saveXcode, .setPaused, .restart, .remove: Self.changeTimeout
         }
         let reply = try await send(.macs(request), to: mac, at: endpoint, timeout: timeout)
         switch reply {

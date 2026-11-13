@@ -263,7 +263,12 @@ private struct PairedMacSettingsSections<Macs: MacList>: View {
     let limitChanged: () async -> Void
 
     var body: some View {
-        RunnerServicesSection(settings: report) { Text("Processes on \(mac.name).") }
+        RunnerServicesSection(
+            settings: report, mac: MacReference(name: mac.name), isChangingPause: settings.isChangingPause,
+            pauseError: settings.pauseError, setPaused: { isPaused in Task { await macs.setPaused(isPaused, of: mac.id) } }
+        ) {
+            Text("Processes on \(mac.name).")
+        }
         XcodeExecutionSection(
             settings: report, draft: $settings.poolDraft, isSaving: settings.isSaving,
             canApply: settings.canApplyPoolConfiguration, saveError: settings.saveError
