@@ -207,6 +207,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         var processGroup: Int32?
         /// Stops the service of a paused runner when the worker of its job ends.
         var jobWatch: (worker: Int32, source: any DispatchSourceProcess)?
+        /// Whether the service was asked to stop when its job ended while the Mac was paused.
+        var stoppedAfterJob = false
     }
     private var runners: [URL: HostedRunner] = [:]
     private let settings: HostSettingsModel
@@ -446,6 +448,12 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         // no way to refuse jobs while it runs, so a job that it takes in the instant before its service stops is
         // cancelled, as when the host quits.
         var finishing: Set<URL> = []
+        // A service that stopped when its job ended is removed even if the Mac resumed since, so that it starts again.
+        for (directory, runner) in runners where runner.stoppedAfterJob {
+            runners[directory] = nil
+            await runner.task.value
+            print("Paused \(directory.lastPathComponent).")
+        }
         if isPaused {
             var stopping: [(directory: URL, task: Task<Void, Never>)] = []
             for (directory, runner) in runners {
@@ -502,7 +510,10 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             guard let runner = self.runners[directory], runner.jobWatch?.worker == worker else { return }
             self.runners[directory]?.jobWatch = nil
             // The Mac can have resumed while the job ran. The next scan removes a service that stops here.
-            if self.settings.isPaused { runner.task.cancel() }
+            if self.settings.isPaused {
+                self.runners[directory]?.stoppedAfterJob = true
+                runner.task.cancel()
+            }
         }
         source.resume()
         return source
