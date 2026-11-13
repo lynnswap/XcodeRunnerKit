@@ -380,10 +380,11 @@ To run a job on one Mac of a setup, give that Mac a label under **Runner
 Labels** in its pane, such as `xcode-27` for the Mac that has that Xcode, and
 add the label to `runs-on`. The Mac's runners get the labels of its list besides
 `xcode-runnerkit`: new runners when they are registered, and existing ones at
-the next synchronization, which follows a change at once when the Mac's host or
-its managing host is signed in. A label that leaves the list is removed from the
-runners. Labels that you set on a runner on GitHub stay. The Mac's own window,
-its managing host, and a dashboard edit the list.
+the next synchronization. A change is synchronized at once, except one made in
+the own window of a Mac that another Mac manages, which that Mac applies at its
+next synchronization. A label that leaves the list is removed from the runners.
+Labels that you set on a runner on GitHub stay. The Mac's own window, its
+managing host, and a dashboard edit the list.
 
 A macOS package test job can use:
 

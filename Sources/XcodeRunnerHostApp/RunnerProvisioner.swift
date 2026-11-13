@@ -264,6 +264,10 @@ actor RunnerProvisioner {
         var macLabels = Set(inventory.labels.map { $0.lowercased() })
         let appliedLabels = Set(inventory.appliedLabels.map { $0.lowercased() })
         var retiredLabels = appliedLabels.subtracting(macLabels)
+        // A runner whose installation stopped after it registered has labels, and is compared once it is installed.
+        let installationsArePending = inventory.folders.contains { folder in
+            do { return try folder.incompleteInstallationOwner() != nil } catch { return true }
+        }
         var labelProblems: [RunnerProvisioningProblem] = []
         if !macLabels.isSubset(of: appliedLabels) {
             // A label is recorded before a runner gets it, so that it can be removed after it leaves the list.
@@ -384,8 +388,8 @@ actor RunnerProvisioner {
         // not compare can still have one: its registration could not be read, or its repository was not reconciled.
         // If this record is not written, the next call finds nothing to change on the runners and writes it then.
         let hostedRunners = Set(initialLocal.filter { $0.isHosted && !$0.hasIndividualService }.map(\.name))
-        if everyRunnerHasItsLabels, initialScan.problems.isEmpty, hostedRunners.isSubset(of: runnersWithTheirLabels),
-           !retiredLabels.isEmpty {
+        if everyRunnerHasItsLabels, initialScan.problems.isEmpty, !installationsArePending,
+           hostedRunners.isSubset(of: runnersWithTheirLabels), !retiredLabels.isEmpty {
             try? await mac.markLabelsApplied(macLabels.sorted())
         }
 
