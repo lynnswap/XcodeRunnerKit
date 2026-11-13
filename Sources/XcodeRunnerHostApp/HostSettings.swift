@@ -491,8 +491,12 @@ final class HostSettingsModel: HostSettingsDisplay {
     /// Takes a paired Mac's request to restart. From here on this Mac takes no other change, so that none starts
     /// between the reply and the restart, which the caller performs with `performAcceptedRestart()`.
     private func acceptRestart() throws(HostSettingsError) {
-        guard canRestart else {
+        guard restartHost != nil else {
             throw HostSettingsError("\(HostPane.macName) cannot restart XcodeHomeRunner by itself. Restart it on that Mac.")
+        }
+        // The pane that asked may show settings from before a save started here.
+        guard canRestart else {
+            throw HostSettingsError("\(HostPane.macName) cannot restart now. Try again in a moment.")
         }
         hasAcceptedRestart = true
     }
