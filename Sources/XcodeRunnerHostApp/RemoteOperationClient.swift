@@ -167,7 +167,8 @@ enum RemoteOperationClient {
     }
 
     /// Sends the checkout's files to the host and runs the command there. The log and result bundle are copied
-    /// into a folder that the host names, inside `outputDirectory`.
+    /// into a folder that the host names, inside `outputDirectory`, and the log names this Mac's folders as the
+    /// output does.
     ///
     /// Cancelling the task ends the connection, and the host then stops the command.
     ///
@@ -199,7 +200,8 @@ enum RemoteOperationClient {
                 (hostCheckout, checkout.root.path(percentEncoded: false)), (hostOutput, outputDirectory.path(percentEncoded: false)),
             ])
             var status: Int32?
-            var results: (archive: URL, handle: FileHandle)?
+            // The results are unpacked beside their place, and appear there once they are whole.
+            var results: (folder: URL, handle: FileHandle)?
             while true {
                 switch try await exchange.receive() {
                 case .operation(.output(let data)):
@@ -209,19 +211,20 @@ enum RemoteOperationClient {
                     status = code
                 case .operation(.results(let data)):
                     if results == nil {
-                        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-                        let archive = outputDirectory.appending(path: ".results-\(UUID().uuidString).tar")
+                        let folder = outputDirectory.appending(path: ".results-\(UUID().uuidString)")
+                        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                        let archive = folder.appending(path: resultsArchiveName)
                         guard FileManager.default.createFile(atPath: archive.path(percentEncoded: false), contents: nil) else {
                             throw CocoaError(.fileWriteUnknown, userInfo: [NSURLErrorKey: archive])
                         }
-                        results = (archive, try FileHandle(forWritingTo: archive))
+                        results = (folder, try FileHandle(forWritingTo: archive))
                     }
                     try results?.handle.write(contentsOf: data)
                 case .operation(.finished):
                     guard let status else { throw HostLinkError.unexpectedReply }
                     if let results {
                         try results.handle.close()
-                        try await unpack(results.archive, into: outputDirectory)
+                        try await unpackResults(in: results.folder, into: outputDirectory, rewriter: rewriter)
                     }
                     // The host has nothing more to send, and removed what the operation left.
                     try? await exchange.send(.operation(.received))
@@ -294,10 +297,15 @@ enum RemoteOperationClient {
         try await exchange.send(.operation(.filesEnd))
     }
 
-    private static func unpack(_ archive: URL, into directory: URL) async throws {
+    private static let resultsArchiveName = "results.tar"
+
+    /// Unpacks the archive in `folder`, shows the host's folders in each log as this Mac's, and moves the
+    /// operation's folder into `directory`.
+    private static func unpackResults(in folder: URL, into directory: URL, rewriter: PathRewriter) async throws {
+        let archive = folder.appending(path: resultsArchiveName)
         let unpacking = try await Subprocess.run(
             .path("/usr/bin/tar"),
-            arguments: ["-xf", archive.path(percentEncoded: false), "-C", directory.path(percentEncoded: false)],
+            arguments: ["-xf", archive.path(percentEncoded: false), "-C", folder.path(percentEncoded: false)],
             output: .discarded, error: .string(limit: 4096)
         )
         guard unpacking.terminationStatus.isSuccess else {
@@ -306,6 +314,27 @@ enum RemoteOperationClient {
             )
         }
         try FileManager.default.removeItem(at: archive)
+        for job in try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) {
+            let log = job.appending(path: "xcodebuild.log")
+            if FileManager.default.fileExists(atPath: log.path(percentEncoded: false)) {
+                var rewriter = rewriter
+                let rewritten = job.appending(path: "xcodebuild.log.rewritten")
+                guard FileManager.default.createFile(atPath: rewritten.path(percentEncoded: false), contents: nil) else {
+                    throw CocoaError(.fileWriteUnknown, userInfo: [NSURLErrorKey: rewritten])
+                }
+                let reading = try FileHandle(forReadingFrom: log)
+                let writing = try FileHandle(forWritingTo: rewritten)
+                while let piece = try reading.read(upToCount: 1 << 20), !piece.isEmpty {
+                    try writing.write(contentsOf: rewriter.rewrite(piece))
+                }
+                try writing.write(contentsOf: rewriter.finish())
+                try reading.close()
+                try writing.close()
+                _ = try FileManager.default.replaceItemAt(log, withItemAt: rewritten)
+            }
+            try FileManager.default.moveItem(at: job, to: directory.appending(path: job.lastPathComponent))
+        }
+        try FileManager.default.removeItem(at: folder)
     }
 
     private static func unexpected(_ reply: HostLinkReply) -> HostLinkError {

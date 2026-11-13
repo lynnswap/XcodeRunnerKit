@@ -277,11 +277,11 @@ operation on the host.
   on the host. The operation runs with the host app's environment, not with the
   shell's.
 - **Results.** The log and result bundle are copied to `--output-directory` on
-  the dashboard's Mac, `XcodeRunnerOutput` by default. In the output, the host's
-  copy of the checkout and its output folder appear as the matching folders on
-  the dashboard's Mac, so the paths in compiler messages open there. The host
-  removes its copy of the checkout and the build products when the operation
-  ends.
+  the dashboard's Mac, `XcodeRunnerOutput` by default. In the output and the
+  copied log, the host's copy of the checkout and its output folder appear as
+  the matching folders on the dashboard's Mac, so the paths in compiler messages
+  open there. The result bundle keeps the host's paths. The host removes its
+  copy of the checkout and the build products when the operation ends.
 - **Compiler cache.** Operations from dashboards share one cache on the host,
   apart from the caches of the repositories that run jobs from GitHub. The host
   unpacks every worktree of a repository at the same path, so a later operation

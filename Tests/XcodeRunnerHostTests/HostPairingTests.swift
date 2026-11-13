@@ -611,7 +611,7 @@ struct HostPairingTests {
         #!/bin/bash
         output=${2#--output-directory=}
         mkdir -p "$output/Job/Results.xcresult"
-        echo "the log" > "$output/Job/xcodebuild.log"
+        echo "the log of $PWD" > "$output/Job/xcodebuild.log"
         echo "the results" > "$output/Job/Results.xcresult/Info.plist"
         echo "arguments: $*"
         echo "directory: $PWD"
@@ -705,7 +705,7 @@ struct HostPairingTests {
         #expect(lines.contains("Log: \(outputDirectory.path(percentEncoded: false))/Job/xcodebuild.log"))
         let cache = storage.compilationCacheDirectory.appending(path: "remote").path(percentEncoded: false)
         #expect(lines.contains("arguments: build --output-directory=\(outputDirectory.path(percentEncoded: false)) --compilation-cache=\(cache) --scheme=App -- -quiet"))
-        #expect(try String(contentsOf: outputDirectory.appending(path: "Job/xcodebuild.log"), encoding: .utf8) == "the log\n")
+        #expect(try String(contentsOf: outputDirectory.appending(path: "Job/xcodebuild.log"), encoding: .utf8) == "the log of \(local)/App/Empty\n")
         #expect(try String(contentsOf: outputDirectory.appending(path: "Job/Results.xcresult/Info.plist"), encoding: .utf8) == "the results\n")
         #expect(try FileManager.default.contentsOfDirectory(atPath: outputDirectory.path(percentEncoded: false)).sorted() == ["Job"])
         // The host keeps the compiler cache and nothing else.
