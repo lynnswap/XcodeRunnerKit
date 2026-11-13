@@ -388,7 +388,7 @@ final class PairedMacs: MacList {
             codeConfirmation = nil
         }
         let (pairing, hostID) = try await HostLink.requestPairing(
-            at: endpoint, pairingID: UUID(), requesterName: name, role: role
+            at: endpoint, pairingID: UUID(), requesterName: name, role: role, version: version
         ) { macName, code in
             try await self.waitForConfirmation(of: code, from: macName)
         }
@@ -408,7 +408,7 @@ final class PairedMacs: MacList {
             // A Mac replaces its managing host by itself, and keeps every dashboard until told.
             if role == .dashboard {
                 let reply: HostLinkReply? = if let endpoint = endpoints[mac.id] {
-                    try? await HostLink.send(.unpair, to: endpoint, key: mac.pairing.symmetricKey, identity: mac.id.uuidString, version: version)
+                    try? await send(.unpair, to: mac, at: endpoint)
                 } else {
                     nil
                 }
@@ -459,7 +459,7 @@ final class PairedMacs: MacList {
         if status(of: id) != .rejected {
             if let endpoint = endpoints[id] {
                 do {
-                    let reply = try await HostLink.send(.unpair, to: endpoint, key: mac.pairing.symmetricKey, identity: mac.id.uuidString, version: version)
+                    let reply = try await send(.unpair, to: mac, at: endpoint)
                     if case .refused(let message) = reply { throw HostLinkError.refused(message) }
                     guard case .unpaired = reply else { throw HostLinkError.unexpectedReply }
                 } catch {
@@ -494,10 +494,6 @@ final class PairedMacs: MacList {
         endpoints[id] = endpoint
         checking.insert(id)
         defer { checking.remove(id) }
-        guard !unversioned.contains(id) else {
-            statuses[id] = .incompatible(.older)
-            return
-        }
         if statuses[id] == nil || statuses[id] == .notFound { statuses[id] = .checking }
         let changeCount = settings[id]?.changeCount
         let status: Status
@@ -574,6 +570,17 @@ final class PairedMacs: MacList {
         if let endpoint = endpoints[id] { await checkStatus(of: id, at: endpoint) }
     }
 
+    /// Sends a request to a paired Mac. A Mac that advertises no version does not answer a message that carries one,
+    /// so it is not asked.
+    private func send(
+        _ request: HostLinkRequest, to mac: PairedMac, at endpoint: NWEndpoint, timeout: Duration = HostLink.requestTimeout
+    ) async throws -> HostLinkReply {
+        guard !unversioned.contains(mac.id) else { throw HostLinkError.incompatible(.older) }
+        return try await HostLink.send(
+            request, to: endpoint, key: mac.pairing.symmetricKey, identity: mac.id.uuidString, version: version, timeout: timeout
+        )
+    }
+
     private func requestSettings(
         _ request: HostSettingsRequest, from mac: PairedMac, at endpoint: NWEndpoint? = nil
     ) async throws -> HostSettingsReport {
@@ -581,9 +588,7 @@ final class PairedMacs: MacList {
             throw HostLinkError.unreachable("\(mac.name) was not found on the local network.")
         }
         let timeout = if case .read = request { HostLink.requestTimeout } else { Self.changeTimeout }
-        let reply = try await HostLink.send(
-            .settings(request), to: endpoint, key: mac.pairing.symmetricKey, identity: mac.id.uuidString, version: version, timeout: timeout
-        )
+        let reply = try await send(.settings(request), to: mac, at: endpoint, timeout: timeout)
         switch reply {
         case .settings(let report): return report
         case .refused(let message): throw HostLinkError.refused(message)
@@ -661,9 +666,7 @@ final class PairedMacs: MacList {
             throw HostLinkError.unreachable("\(mac.name) was not found on the local network.")
         }
         let timeout = if case .read = request { HostLink.requestTimeout } else { Self.changeTimeout }
-        let reply = try await HostLink.send(
-            .github(request), to: endpoint, key: mac.pairing.symmetricKey, identity: mac.id.uuidString, version: version, timeout: timeout
-        )
+        let reply = try await send(.github(request), to: mac, at: endpoint, timeout: timeout)
         switch reply {
         case .github(let report): return report
         case .refused(let message): throw HostLinkError.refused(message)
@@ -689,9 +692,7 @@ final class PairedMacs: MacList {
         case .read: HostLink.requestTimeout * 3
         case .configurePool, .saveStorage, .remove: Self.changeTimeout
         }
-        let reply = try await HostLink.send(
-            .macs(request), to: endpoint, key: mac.pairing.symmetricKey, identity: mac.id.uuidString, version: version, timeout: timeout
-        )
+        let reply = try await send(.macs(request), to: mac, at: endpoint, timeout: timeout)
         switch reply {
         case .macs(let report): return report
         case .refused(let message): throw HostLinkError.refused(message)
@@ -716,9 +717,7 @@ final class PairedMacs: MacList {
         case .install: Self.changeTimeout
         default: HostLink.requestTimeout
         }
-        let reply = try await HostLink.send(
-            .runners(request), to: endpoint, key: mac.pairing.symmetricKey, identity: mac.id.uuidString, version: version, timeout: timeout
-        )
+        let reply = try await send(.runners(request), to: mac, at: endpoint, timeout: timeout)
         if case .refused(let message) = reply { throw HostLinkError.refused(message) }
         return reply
     }

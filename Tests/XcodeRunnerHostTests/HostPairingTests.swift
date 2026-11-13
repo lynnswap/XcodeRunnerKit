@@ -585,6 +585,14 @@ struct HostPairingTests {
         updated.pairableMacsChanged([.init(id: "waiting", name: "Waiting", endpoint: endpoint, version: HostLink.version)])
         #expect(updated.waitingMacs == [WaitingMac(id: "waiting", name: "Waiting", mismatch: .older)])
         await #expect(throws: HostLinkError.incompatible(.older)) { try await updated.pair(with: "waiting") }
+        // A Mac that waits refuses a Mac of another version that asks without having listed it.
+        let other = HostManagement(store: MemorySecretStore(), name: "Other", advertises: false)
+        let waiting = try await waitToPair(other)
+        await #expect(throws: HostLinkError.refused("Other runs an older version of XcodeHomeRunner. Update it to pair.")) {
+            try await updated.pair(at: waiting)
+        }
+        #expect(other.manager == nil)
+        await other.shutDown()
 
         await management.shutDown()
         await macs.shutDown()
@@ -667,7 +675,7 @@ struct HostPairingTests {
         let connection = pairingConnection(to: try await waitToPair(management))
 
         try await connection.send(PairingRequest.begin(
-            commitment: Data(SHA256.hash(data: publicKey())), pairingID: UUID(), requesterName: "Someone", role: .manager
+            commitment: Data(SHA256.hash(data: publicKey())), pairingID: UUID(), requesterName: "Someone", role: .manager, version: HostLink.version
         ))
         _ = try await connection.receive()
         try await connection.send(PairingRequest.reveal(publicKey: publicKey()))
@@ -688,7 +696,7 @@ struct HostPairingTests {
         let endpoint = try await waitToPair(management)
         let first = pairingConnection(to: endpoint)
         try await first.send(PairingRequest.begin(
-            commitment: Data(SHA256.hash(data: publicKey())), pairingID: UUID(), requesterName: "First", role: .manager
+            commitment: Data(SHA256.hash(data: publicKey())), pairingID: UUID(), requesterName: "First", role: .manager, version: HostLink.version
         ))
         _ = try await first.receive()
 
@@ -711,7 +719,7 @@ struct HostPairingTests {
         }
         let serving = Task {
             try await impostor.run { connection in
-                guard case .begin(let commitment, let pairingID, let requesterName, let role) = try await connection.receive().content else { return }
+                guard case .begin(let commitment, let pairingID, let requesterName, let role, _) = try await connection.receive().content else { return }
                 let privateKey = Curve25519.KeyAgreement.PrivateKey()
                 let publicKey = privateKey.publicKey.rawRepresentation
                 let hostID = UUID()

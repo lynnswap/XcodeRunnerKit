@@ -203,7 +203,7 @@ final class HostManagement {
                 try await withThrowingTaskGroup { group in
                     group.addTask {
                         try await HostLink.acceptPairing(
-                            name: self.name, hostID: self.hostID, role: role,
+                            name: self.name, hostID: self.hostID, role: role, version: self.version,
                             advertising: self.advertises
                                 ? .bonjour(name: self.name, type: HostLink.pairingService, txtRecord: txtRecord) : nil,
                             ready: { port in await self.pairingListenerIsReady(port, window: window.id) },
