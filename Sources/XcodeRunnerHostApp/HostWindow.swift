@@ -123,7 +123,7 @@ private struct HostPaneView: View {
             case .mac: HostMacSettingsView(model: settings)
             case .managedMac(let id):
                 if let mac = settings.managedMacs.mac(id) {
-                    ManagedMacView(model: settings, mac: mac, navigation: navigation)
+                    PairedMacView(model: settings, mac: mac, navigation: navigation)
                 } else {
                     ContentUnavailableView("This Mac was removed", systemImage: "desktopcomputer")
                 }
@@ -313,7 +313,7 @@ final class PreviewSecretStore: SecretStore {
 
 /// The Macs that previews list under Runners.
 private let previewManagedMacs = ["m1pro", "Mac Studio"].enumerated().map { index, name in
-    ManagedMac(
+    PairedMac(
         pairing: HostPairing(id: UUID(uuidString: "6F1C0B7E-2D7A-4C55-9E0B-3E0D2B7C1A0\(index)")!, name: name, key: Data(count: 32)),
         hostID: UUID()
     )
@@ -369,12 +369,12 @@ private func previewHostSplitViewController(
     let settings = HostSettingsModel(
         installation: installation, github: github,
         management: HostManagement(store: managingHost, name: HostPane.macName, advertises: false),
-        managedMacs: ManagedMacs(store: managedMacStore, name: HostPane.macName, browses: false)
+        managedMacs: PairedMacs(store: managedMacStore, name: HostPane.macName, browses: false)
     )
     switch pairing {
     case .waitingToPair: settings.management.allowManagement()
     case .asked(let name):
-        requestPreviewPairing(from: ManagedMacs(store: PreviewSecretStore(), name: name, browses: false), with: settings.management)
+        requestPreviewPairing(from: PairedMacs(store: PreviewSecretStore(), name: name, browses: false), with: settings.management)
     case .managingConnected(let stopsAnswering):
         connectPreviewMac(previewManagedMacs[0], to: settings.managedMacs, stopsAnswering: stopsAnswering)
     case .none, .managing, .managed: break
@@ -400,7 +400,7 @@ private func previewHostSplitViewController(
 
 /// Answers as `mac` over the loopback interface with its own settings, and has `macs` read them as browsing does.
 @MainActor
-private func connectPreviewMac(_ mac: ManagedMac, to macs: ManagedMacs, stopsAnswering: Bool) {
+private func connectPreviewMac(_ mac: PairedMac, to macs: PairedMacs, stopsAnswering: Bool) {
     let store = PreviewSecretStore()
     let manager = HostPairing(id: mac.id, name: HostPane.macName, key: mac.pairing.key)
     try? store.write(JSONEncoder().encode(HostManagement.Record(hostID: mac.hostID, manager: manager)))
@@ -408,7 +408,7 @@ private func connectPreviewMac(_ mac: ManagedMac, to macs: ManagedMacs, stopsAns
     let settings = HostSettingsModel(
         installation: installation,
         management: HostManagement(store: store, name: mac.name, advertises: false),
-        managedMacs: ManagedMacs(store: PreviewSecretStore(), name: mac.name, browses: false)
+        managedMacs: PairedMacs(store: PreviewSecretStore(), name: mac.name, browses: false)
     )
     settings.hostState = .running
     settings.storageDidBecomeAvailable(HostInstallation.Storage(directory: installation.hostRoot.appending(path: "Storage")))

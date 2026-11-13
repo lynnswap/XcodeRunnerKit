@@ -3,11 +3,11 @@ import SwiftUI
 /// Pairs a Mac that waits to pair with this host.
 @MainActor
 struct AddMacView: View {
-    let macs: ManagedMacs
-    let paired: (ManagedMac) -> Void
+    let macs: PairedMacs
+    let paired: (PairedMac) -> Void
     let cancel: () -> Void
-    @State private var selection: ManagedMacs.PairableMac.ID?
-    @State private var pairing: (mac: ManagedMacs.PairableMac, task: Task<Void, Never>)?
+    @State private var selection: PairedMacs.PairableMac.ID?
+    @State private var pairing: (mac: PairedMacs.PairableMac, task: Task<Void, Never>)?
     @State private var errorMessage: String?
 
     var body: some View {
@@ -86,7 +86,7 @@ struct AddMacView: View {
         }
     }
 
-    private func codeSection(_ confirmation: ManagedMacs.CodeConfirmation) -> some View {
+    private func codeSection(_ confirmation: PairedMacs.CodeConfirmation) -> some View {
         Section {
             LabeledContent("Code") { PairingCode(confirmation.code) }
             if confirmation.isConfirmed {
@@ -102,7 +102,7 @@ struct AddMacView: View {
         }
     }
 
-    private var selectedMac: ManagedMacs.PairableMac? { macs.pairableMacs.first { $0.id == selection } }
+    private var selectedMac: PairedMacs.PairableMac? { macs.pairableMacs.first { $0.id == selection } }
 
     private func pair() {
         guard let mac = selectedMac else { return }
@@ -137,14 +137,14 @@ struct PairingCode: View {
 
 /// A Mac that this host manages.
 @MainActor
-struct ManagedMacView: View {
+struct PairedMacView: View {
     let model: HostSettingsModel
-    let mac: ManagedMac
+    let mac: PairedMac
     let navigation: HostWindowNavigation
     @State private var isConfirmingRemoval = false
     @State private var isRemoving = false
 
-    private var macs: ManagedMacs { model.managedMacs }
+    private var macs: PairedMacs { model.managedMacs }
 
     var body: some View {
         let status = macs.status(of: mac.id)
@@ -177,7 +177,7 @@ struct ManagedMacView: View {
                 if let message = macs.message { ErrorText(message) }
             }
             if let settings, let report {
-                ManagedMacSettingsSections(model: model, mac: mac, settings: settings, report: report)
+                PairedMacSettingsSections(model: model, mac: mac, settings: settings, report: report)
             }
             Section {
                 HStack {
@@ -208,10 +208,10 @@ struct ManagedMacView: View {
 
 /// A managed Mac's runner services and execution settings, with the controls of the Mac's own window.
 @MainActor
-private struct ManagedMacSettingsSections: View {
+private struct PairedMacSettingsSections: View {
     let model: HostSettingsModel
-    let mac: ManagedMac
-    @Bindable var settings: ManagedMacSettings
+    let mac: PairedMac
+    @Bindable var settings: PairedMacSettings
     let report: HostSettingsReport
 
     var body: some View {
@@ -322,7 +322,7 @@ struct HostManagementSection: View {
     }
 }
 
-private extension ManagedMacs.Status {
+private extension PairedMacs.Status {
     var title: String {
         switch self {
         case .notFound: "Not found on the local network"
@@ -355,7 +355,7 @@ private extension ManagedMacs.Status {
 #if DEBUG
 /// Asks `management` to pair over the loopback interface, so that previews show both Macs' codes.
 @MainActor
-func requestPreviewPairing(from macs: ManagedMacs, with management: HostManagement) {
+func requestPreviewPairing(from macs: PairedMacs, with management: HostManagement) {
     management.allowManagement()
     Task {
         // The preview shows the request while both Macs wait, and shows nothing if it fails.
@@ -368,10 +368,10 @@ func requestPreviewPairing(from macs: ManagedMacs, with management: HostManageme
 }
 
 #Preview("Add Mac", traits: .sizeThatFitsLayout) {
-    AddMacView(macs: ManagedMacs(store: PreviewSecretStore(), name: HostPane.macName, browses: false), paired: { _ in }, cancel: {})
+    AddMacView(macs: PairedMacs(store: PreviewSecretStore(), name: HostPane.macName, browses: false), paired: { _ in }, cancel: {})
 }
 #Preview("Add Mac Code", traits: .sizeThatFitsLayout) {
-    let macs = ManagedMacs(store: PreviewSecretStore(), name: HostPane.macName, browses: false)
+    let macs = PairedMacs(store: PreviewSecretStore(), name: HostPane.macName, browses: false)
     requestPreviewPairing(from: macs, with: HostManagement(store: PreviewSecretStore(), name: "m1pro", advertises: false))
     return AddMacView(macs: macs, paired: { _ in }, cancel: {})
 }

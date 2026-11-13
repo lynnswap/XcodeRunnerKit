@@ -219,7 +219,7 @@ final class HostSettingsModel: HostSettingsDisplay {
     /// This Mac's pairing with the host that manages it.
     let management: HostManagement
     /// The Macs that this host manages.
-    let managedMacs: ManagedMacs
+    let managedMacs: PairedMacs
     let settingsService: HostSettingsService
     var hostState = HostState.starting
     var runners: [RunnerSettingsRow] = []
@@ -241,7 +241,7 @@ final class HostSettingsModel: HostSettingsDisplay {
 
     init(
         installation: HostInstallation, github: GitHubHostSettings? = nil,
-        management: HostManagement? = nil, managedMacs: ManagedMacs? = nil
+        management: HostManagement? = nil, managedMacs: PairedMacs? = nil
     ) {
         self.installation = installation
         // Reading status leaves an unconfigured pool unchanged.
@@ -251,7 +251,7 @@ final class HostSettingsModel: HostSettingsDisplay {
         self.management = management ?? HostManagement(
             store: KeychainSecretStore.managingHost(hostRoot: installation.hostRoot), name: HostPane.macName
         )
-        self.managedMacs = managedMacs ?? ManagedMacs(
+        self.managedMacs = managedMacs ?? PairedMacs(
             store: KeychainSecretStore.managedMacs(hostRoot: installation.hostRoot), name: HostPane.macName
         )
         do {
