@@ -26,6 +26,7 @@ struct HostPairing: Codable, Equatable, Identifiable, Sendable {
 /// A request from a managing host or a dashboard to a Mac paired with it.
 enum HostLinkRequest: Codable, Sendable {
     case settings(HostSettingsRequest)
+    case github(GitHubRequest)
     case runners(RunnerRequest)
     /// Asks the Mac to forget this pairing.
     case unpair
@@ -36,6 +37,19 @@ enum HostSettingsRequest: Codable, Sendable {
     case read
     case configurePool(PoolSettingsDraft.Changes)
     case saveStorage(directory: String)
+}
+
+/// Reads or changes a host's GitHub sign-in and repository selection. The host answers with its GitHub state
+/// afterwards, and keeps its tokens.
+enum GitHubRequest: Codable, Sendable {
+    case read
+    /// Starts the device flow on the host. A later read carries the code for the person to enter on GitHub's page.
+    case signIn
+    case cancelSignIn
+    case signOut
+    case reloadRepositories
+    /// Saves the selection. The host then registers and removes runners, which later reads report.
+    case applySelection(Set<Int>)
 }
 
 /// Reads or changes a managed Mac's runner folders. The managing host compares them with GitHub and makes the GitHub
@@ -51,6 +65,7 @@ enum RunnerRequest: Codable, Sendable {
 
 enum HostLinkReply: Codable, Sendable {
     case settings(HostSettingsReport)
+    case github(GitHubReport)
     case hostName(String)
     case runners(RunnerInventory)
     case archive(URL)

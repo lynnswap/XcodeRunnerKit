@@ -112,7 +112,8 @@ final class GitHubHostSettings {
         catch { errorMessage = error.localizedDescription }
     }
 
-    func signIn() {
+    /// - Parameter opensBrowser: Whether GitHub's page opens on this Mac. A dashboard opens it on its own Mac.
+    func signIn(opensBrowser: Bool = true) {
         guard !isBusy else { return }
         isConnecting = true
         errorMessage = nil
@@ -121,7 +122,7 @@ final class GitHubHostSettings {
             do {
                 let authorization = try await authentication.begin()
                 deviceAuthorization = authorization
-                try openBrowser(authorization.verificationURI)
+                if opensBrowser { try openBrowser(authorization.verificationURI) }
                 account = try await authentication.finish(authorization)
                 await loadRepositories()
             } catch is CancellationError {
@@ -139,6 +140,20 @@ final class GitHubHostSettings {
         deviceAuthorization = nil
         connectionTask = nil
         isConnecting = false
+    }
+
+    /// What this Mac's window shows, and what this Mac sends a dashboard.
+    var report: GitHubReport {
+        GitHubReport(
+            accountLogin: account?.login, hasRestored: hasRestored, isConnecting: isConnecting,
+            signInCode: deviceAuthorization.map { .init(userCode: $0.userCode, verificationURI: $0.verificationURI) },
+            isBusy: isBusy, canReloadRepositories: canReloadRepositories, canDisconnect: canDisconnect,
+            isLoadingRepositories: isLoadingRepositories, isSavingSelection: isSavingSelection, isSynchronizing: isSynchronizing,
+            selectableRepositories: selectableRepositories, hasListedRepositories: !repositories.isEmpty,
+            savedRepositoryIDs: savedRepositoryIDs, runnerStatuses: runnerStatuses.map(RepositoryRunnerReport.init),
+            errorMessage: errorMessage, installationURL: app.installationURL, managerName: management?.manager?.name,
+            managesMacs: pairedMacs?.macs.isEmpty == false
+        )
     }
 
     func signOut() async {
@@ -203,14 +218,60 @@ final class GitHubHostSettings {
 
     /// Saves through the same owner for GUI and local automation, then reconciles registrations.
     func updateRepositorySelection(_ selectedIDs: Set<Int>) async throws -> String? {
+        try beginSelectionUpdate(selectedIDs)
+        return await finishSelectionUpdate()
+    }
+
+    /// Saves a selection and keeps other changes out until `finishSelectionUpdate()`.
+    private func beginSelectionUpdate(_ selectedIDs: Set<Int>) throws {
         guard !isShuttingDown else { throw HostSettingsError("The runner host is stopping.") }
-        guard !isBusy, !isLoadingRepositories else {
-            throw HostSettingsError("GitHub runner management is busy. Retry after the current operation finishes.")
-        }
-        isSavingSelection = true
-        defer { isSavingSelection = false }
+        guard !isBusy, !isLoadingRepositories else { throw Self.busy }
         try saveSelection(selectedIDs)
+        isSavingSelection = true
+    }
+
+    private func finishSelectionUpdate() async -> String? {
+        defer { isSavingSelection = false }
         return await applySavedRepositorySelection()
+    }
+
+    private static let busy = HostSettingsError("GitHub runner management is busy. Retry after the current operation finishes.")
+
+    /// Answers a dashboard's request to read or change this Mac's GitHub settings, the way this Mac's window does.
+    ///
+    /// After a reply to `.applySelection` that is not a refusal, call `synchronizeDashboardSelection()`, so that the
+    /// dashboard gets the saved selection before runners are registered and removed.
+    func answer(_ request: GitHubRequest) async -> HostLinkReply {
+        do {
+            switch request {
+            case .read: break
+            case .signIn:
+                guard !isBusy else { throw Self.busy }
+                // The reply does not wait for GitHub to issue the code, so the dashboard can cancel meanwhile.
+                signIn(opensBrowser: false)
+            case .cancelSignIn:
+                cancelConnection()
+                await connectionTask?.value
+            case .signOut:
+                guard canDisconnect else { throw Self.busy }
+                await signOut()
+            case .reloadRepositories:
+                guard canReloadRepositories else { throw Self.busy }
+                await loadRepositories()
+            case .applySelection(let selectedIDs):
+                do { try beginSelectionUpdate(selectedIDs) }
+                catch { throw HostSettingsError("Could not save the repository selection: \(error.localizedDescription)") }
+            }
+            return .github(report)
+        } catch {
+            return .refused(error.localizedDescription)
+        }
+    }
+
+    /// Registers and removes runners for the selection that a dashboard saved.
+    func synchronizeDashboardSelection() async {
+        guard isSavingSelection else { return }
+        errorMessage = await finishSelectionUpdate()
     }
 
     private func applySavedRepositorySelection() async -> String? {

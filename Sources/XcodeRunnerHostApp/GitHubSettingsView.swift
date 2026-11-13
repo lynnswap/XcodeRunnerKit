@@ -1,94 +1,141 @@
 import SwiftUI
 
+/// What the GitHub controls do: on this Mac, or on the host that a dashboard shows.
+@MainActor
+struct GitHubActions {
+    let signIn: () -> Void
+    let cancelSignIn: () -> Void
+    let signOut: () -> Void
+    /// Opens the page that installs the GitHub App on repositories.
+    let addRepositories: () -> Void
+    let reloadRepositories: () -> Void
+    let applySelection: () -> Void
+}
+
+extension GitHubHostSettings {
+    /// The GitHub controls of this Mac's own window.
+    var actions: GitHubActions {
+        GitHubActions(
+            signIn: { self.signIn() }, cancelSignIn: { self.cancelConnection() },
+            signOut: { Task { await self.signOut() } }, addRepositories: { self.installApp() },
+            reloadRepositories: { Task { await self.reloadRepositories() } },
+            applySelection: { Task { await self.applyRepositorySelection() } }
+        )
+    }
+}
+
+/// How a pane names the Mac it shows: this Mac in its own window, or a host by name on a dashboard.
+struct MacReference {
+    /// `nil` for this Mac.
+    let name: String?
+
+    static let thisMac = MacReference(name: nil)
+
+    /// The Mac at the start of a sentence.
+    var subject: String { name ?? "This Mac" }
+    var object: String { name ?? "this Mac" }
+    var possessive: String { name.map { $0 + "'s" } ?? "this Mac's" }
+}
+
+/// A Mac's GitHub sign-in and repository selection, in its own window or on a dashboard.
 @MainActor
 struct GitHubSettingsView: View {
-    @Bindable var model: GitHubHostSettings
+    let github: GitHubReport
+    /// The repository selection being edited.
+    @Binding var selection: Set<Int>
+    let mac: MacReference
+    /// Whether a request to the Mac is in progress, which holds the controls until it answers.
+    var isRequesting = false
+    /// Why the Mac refused the last request from a dashboard, or why it did not confirm it.
+    var requestError: String?
+    let actions: GitHubActions
 
     var body: some View {
         Form {
             Section {
-                if let account = model.account {
+                if let login = github.accountLogin {
                     LabeledContent("Connected account") {
                         HStack {
-                            Text(account.login)
-                            Button("Disconnect") { Task { await model.signOut() } }
-                                .disabled(!model.canDisconnect)
+                            Text(login)
+                            Button("Disconnect", action: actions.signOut)
+                                .disabled(!github.canDisconnect)
                         }
                     }
-                } else if model.isConnecting {
-                    if let authorization = model.deviceAuthorization {
-                        LabeledContent("Code", value: authorization.userCode)
+                } else if github.isConnecting {
+                    if let code = github.signInCode {
+                        LabeledContent("Code", value: code.userCode)
                             .font(.title3.monospaced())
                             .textSelection(.enabled)
                         Text("Enter this code on the GitHub page that opened, then authorize the app. Enter it only on a page you opened from these settings.")
                             .font(.callout).foregroundStyle(.secondary)
-                        Link("Open GitHub", destination: authorization.verificationURI)
+                        Link("Open GitHub", destination: code.verificationURI)
                     } else {
                         ProgressView("Contacting GitHub…")
                     }
-                    Button("Cancel") { model.cancelConnection() }
+                    Button("Cancel", action: actions.cancelSignIn)
                 } else {
-                    Text("Connect GitHub to register runners for your repositories. The sign-in is saved in this Mac's Keychain.")
+                    Text("Connect GitHub to register runners for your repositories. The sign-in is saved in \(mac.possessive) Keychain.")
                         .foregroundStyle(.secondary)
-                    Button("Connect GitHub…") { model.signIn() }
-                        .disabled(model.isBusy)
+                    Button("Connect GitHub…", action: actions.signIn)
+                        .disabled(github.isBusy)
                         .accessibilityIdentifier("github-sign-in")
                 }
             } header: {
                 Text("Account")
             } footer: {
-                if model.account != nil {
-                    Text("Disconnecting removes this Mac's GitHub sign-in and pauses runner management. Existing runner services and jobs continue.")
+                if github.accountLogin != nil {
+                    Text("Disconnecting removes \(mac.possessive) GitHub sign-in and pauses runner management. Existing runner services and jobs continue.")
                 }
             }
-            if model.account != nil {
+            if github.accountLogin != nil {
                 Section {
-                    ForEach(model.selectableRepositories) { repository in
+                    ForEach(github.selectableRepositories) { repository in
                         Toggle(repository.fullName, isOn: Binding(
-                            get: { model.selectedRepositoryIDs.contains(repository.id) },
+                            get: { selection.contains(repository.id) },
                             set: { selected in
-                                if selected { model.selectedRepositoryIDs.insert(repository.id) }
-                                else { model.selectedRepositoryIDs.remove(repository.id) }
+                                if selected { selection.insert(repository.id) } else { selection.remove(repository.id) }
                             }
                         ))
-                        .disabled(model.isBusy)
+                        .disabled(github.isBusy)
                     }
-                    if model.isLoadingRepositories {
+                    if github.isLoadingRepositories {
                         ProgressView("Loading repositories…")
-                    } else if model.repositories.isEmpty {
+                    } else if !github.hasListedRepositories {
                         Text("To list a repository here, choose Add Repositories on GitHub…, install the app on it, then choose Reload.")
                             .foregroundStyle(.secondary)
                     }
                     HStack {
-                        if model.selectedRepositoryIDs != model.savedRepositoryIDs {
+                        if selection != github.savedRepositoryIDs {
                             Text("Unapplied changes").foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button("Add Repositories on GitHub…") { model.installApp() }
-                            .disabled(model.isBusy)
-                        Button("Reload") { Task { await model.reloadRepositories() } }
-                            .disabled(!model.canReloadRepositories)
-                        Button(model.isSavingSelection ? "Applying…" : "Apply") {
-                            Task { await model.applyRepositorySelection() }
-                        }
-                        .disabled(model.isBusy || model.isLoadingRepositories)
-                        .accessibilityIdentifier("apply-repository-selection")
+                        Button("Add Repositories on GitHub…", action: actions.addRepositories)
+                            .disabled(github.isBusy)
+                        Button("Reload", action: actions.reloadRepositories)
+                            .disabled(!github.canReloadRepositories)
+                        Button(github.isSavingSelection ? "Applying…" : "Apply", action: actions.applySelection)
+                            .disabled(github.isBusy || github.isLoadingRepositories)
+                            .accessibilityIdentifier("apply-repository-selection")
                     }
                 } header: {
                     Text("Repositories")
                 } footer: {
-                    if let manager = model.management?.manager {
-                        Text("\(manager.name) registers this Mac's runners while it manages this Mac, so this selection applies after management stops.")
-                    } else if model.pairedMacs?.macs.isEmpty == false {
-                        Text("This Mac and the Macs it manages register runners for the selected repositories. Overview shows their status.")
+                    if let manager = github.managerName {
+                        Text("\(manager) registers \(mac.possessive) runners while it manages \(mac.object), so this selection applies after management stops.")
+                    } else if github.managesMacs {
+                        Text("\(mac.subject) and the Macs it manages register runners for the selected repositories. Overview shows their status.")
                     } else {
-                        Text("This Mac registers runners for the selected repositories. Overview shows their status.")
+                        Text("\(mac.subject) registers runners for the selected repositories. Overview shows their status.")
                     }
                 }
             }
-            if let error = model.errorMessage {
+            if let error = github.errorMessage {
                 Section { ErrorText(error) }
             }
+            if let requestError {
+                Section { ErrorText(requestError) }
+            }
         }
+        .disabled(isRequesting)
     }
 }

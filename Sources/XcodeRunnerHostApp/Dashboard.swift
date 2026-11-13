@@ -76,13 +76,27 @@ final class Dashboard: NSObject, NSApplicationDelegate {
     }
 }
 
+/// A pane in the dashboard window's sidebar, for one of the hosts.
+enum DashboardPane: Hashable {
+    case overview(HostPairing.ID)
+    case github(HostPairing.ID)
+    /// The host's runner services and execution settings.
+    case mac(HostPairing.ID)
+
+    var host: HostPairing.ID {
+        switch self {
+        case .overview(let host), .github(let host), .mac(let host): host
+        }
+    }
+}
+
 @MainActor @Observable
 final class DashboardNavigation {
-    var host: HostPairing.ID?
+    var pane: DashboardPane?
     var isAddingMac = false
 }
 
-/// Creates the dashboard window: a sidebar of paired hosts beside the selected host's pane.
+/// Creates the dashboard window: a sidebar of paired hosts and their panes beside the selected pane.
 @MainActor
 func makeDashboardWindow(hosts: PairedMacs) -> NSWindow {
     let window = NSWindow(contentViewController: makeDashboardSplitViewController(hosts: hosts, navigation: DashboardNavigation()))
@@ -99,12 +113,12 @@ func makeDashboardWindow(hosts: PairedMacs) -> NSWindow {
 
 @MainActor
 func makeDashboardSplitViewController(hosts: PairedMacs, navigation: DashboardNavigation) -> NSSplitViewController {
-    if navigation.host == nil { navigation.host = hosts.macs.first?.id }
+    if navigation.pane == nil { navigation.pane = hosts.macs.first.map { .overview($0.id) } }
     let sidebar = NSSplitViewItem(sidebarWithViewController: NSHostingController(rootView: DashboardSidebar(hosts: hosts, navigation: navigation)))
     sidebar.canCollapse = false
     sidebar.minimumThickness = 180
-    let detail = NSHostingController(rootView: DashboardHostView(hosts: hosts, navigation: navigation))
-    // The selected host's navigation title names the window, as the host window's panes do.
+    let detail = NSHostingController(rootView: DashboardPaneView(hosts: hosts, navigation: navigation))
+    // The selected pane's navigation title names the window, as the host window's panes do.
     detail.sceneBridgingOptions = [.title]
     let split = NSSplitViewController()
     split.addSplitViewItem(sidebar)
@@ -118,12 +132,14 @@ private struct DashboardSidebar: View {
     let navigation: DashboardNavigation
 
     var body: some View {
-        // A sidebar click can deselect the row; a host stays selected while there is one.
-        let selection = Binding<HostPairing.ID?>(get: { navigation.host }, set: { if let host = $0 { navigation.host = host } })
+        // A sidebar click can deselect the row; a pane stays selected while there is a host.
+        let selection = Binding<DashboardPane?>(get: { navigation.pane }, set: { if let pane = $0 { navigation.pane = pane } })
         List(selection: selection) {
-            Section("Macs") {
-                ForEach(hosts.macs) { mac in
-                    Label(mac.name, systemImage: "desktopcomputer").tag(mac.id)
+            ForEach(hosts.macs) { host in
+                Section(host.name) {
+                    Label("Overview", systemImage: "gauge.with.dots.needle.50percent").tag(DashboardPane.overview(host.id))
+                    Label { Text("GitHub") } icon: { Image("github-mark", bundle: .module) }.tag(DashboardPane.github(host.id))
+                    Label(host.name, systemImage: "desktopcomputer").tag(DashboardPane.mac(host.id))
                 }
             }
         }
@@ -142,17 +158,39 @@ private struct DashboardSidebar: View {
 }
 
 @MainActor
-private struct DashboardHostView: View {
+private struct DashboardPaneView: View {
     let hosts: PairedMacs
     let navigation: DashboardNavigation
 
     var body: some View {
         @Bindable var navigation = navigation
-        let host = navigation.host.flatMap { hosts.mac($0) }
+        let host = navigation.pane.flatMap { hosts.mac($0.host) }
         Group {
-            if let host {
-                // The host registers runners for a changed limit itself.
-                PairedMacView(macs: hosts, mac: host, limitChanged: {}, removed: { navigation.host = hosts.macs.first?.id })
+            if let pane = navigation.pane, let host {
+                switch pane {
+                case .overview:
+                    DashboardHostPane(hosts: hosts, host: host) { settings, report, github in
+                        HostOverviewView(
+                            settings: report, github: github, mac: MacReference(name: host.name),
+                            requestError: settings.githubError, actions: actions(for: host)
+                        ) {
+                            navigation.pane = .github(host.id)
+                        }
+                    }
+                case .github:
+                    DashboardHostPane(hosts: hosts, host: host) { settings, _, github in
+                        @Bindable var settings = settings
+                        GitHubSettingsView(
+                            github: github, selection: $settings.selectedRepositoryIDs, mac: MacReference(name: host.name),
+                            isRequesting: settings.isChangingGitHub, requestError: settings.githubError, actions: actions(for: host)
+                        )
+                    }
+                case .mac:
+                    // The host registers runners for a changed limit itself.
+                    PairedMacView(macs: hosts, mac: host, limitChanged: {}) {
+                        navigation.pane = hosts.macs.first.map { .overview($0.id) }
+                    }
+                }
             } else {
                 ContentUnavailableView {
                     Label("No Macs", systemImage: "desktopcomputer")
@@ -167,32 +205,89 @@ private struct DashboardHostView: View {
             }
         }
         .formStyle(.grouped)
-        .navigationTitle(host?.name ?? "XcodeHomeRunner")
+        .navigationTitle(title(of: navigation.pane, host: host))
         .frame(minWidth: 440, minHeight: 420)
         .sheet(isPresented: $navigation.isAddingMac) {
             AddMacView(macs: hosts) { host in
                 navigation.isAddingMac = false
-                navigation.host = host.id
+                navigation.pane = .overview(host.id)
             } cancel: {
                 navigation.isAddingMac = false
             }
         }
+    }
+
+    private func title(of pane: DashboardPane?, host: PairedMac?) -> String {
+        guard let pane, let host else { return "XcodeHomeRunner" }
+        return switch pane {
+        case .overview: "Overview"
+        case .github: "GitHub"
+        case .mac: host.name
+        }
+    }
+
+    /// The GitHub controls, which act on the host. Its pages open in this Mac's browser.
+    private func actions(for host: PairedMac) -> GitHubActions {
+        GitHubActions(
+            signIn: { Task { await hosts.signIn(to: host.id) } },
+            cancelSignIn: { Task { await hosts.cancelSignIn(to: host.id) } },
+            signOut: { Task { await hosts.signOut(of: host.id) } },
+            addRepositories: { hosts.addRepositories(to: host.id) },
+            reloadRepositories: { Task { await hosts.reloadRepositories(of: host.id) } },
+            applySelection: { Task { await hosts.applyRepositorySelection(of: host.id) } }
+        )
+    }
+}
+
+/// A pane that shows what a host last answered. Values from an earlier read may have changed since, so while the host
+/// does not answer, the pane shows only the connection.
+@MainActor
+private struct DashboardHostPane<Content: View>: View {
+    let hosts: PairedMacs
+    let host: PairedMac
+    @ViewBuilder let content: (PairedMacSettings, HostSettingsReport, GitHubReport) -> Content
+
+    var body: some View {
+        Group {
+            if hosts.status(of: host.id) == .online, let settings = hosts.settings[host.id],
+               let report = settings.report, let github = settings.github {
+                content(settings, report, github)
+            } else {
+                Form {
+                    Section {
+                        PairedMacConnectionRows(macs: hosts, mac: host)
+                        if let message = hosts.message { ErrorText(message) }
+                    }
+                }
+            }
+        }
+        .task(id: host.id) { await hosts.watchSettings(of: host.id) }
     }
 }
 
 #if DEBUG
 /// A dashboard that shows the preview host, which answers over the loopback interface unless it is `notFound`.
 @MainActor
-private func previewDashboardSplitViewController(hasHost: Bool, notFound: Bool = false) -> NSSplitViewController {
+private func previewDashboardSplitViewController(
+    hasHost: Bool, notFound: Bool = false, pane: (HostPairing.ID) -> DashboardPane = { .overview($0) }
+) -> NSSplitViewController {
     let store = PreviewSecretStore()
     let host = PairedMac(pairing: HostPairing(id: UUID(), name: "m6mini", key: Data(count: 32)), hostID: UUID())
     if hasHost { try? store.write(JSONEncoder().encode([host])) }
     let hosts = PairedMacs(store: store, name: HostPane.macName, role: .dashboard, browses: false)
     if hasHost, !notFound { connectPreviewMac(host, to: hosts, stopsAnswering: false) }
-    return makeDashboardSplitViewController(hosts: hosts, navigation: DashboardNavigation())
+    let navigation = DashboardNavigation()
+    if hasHost { navigation.pane = pane(host.id) }
+    return makeDashboardSplitViewController(hosts: hosts, navigation: navigation)
 }
 
 #Preview("Dashboard", traits: .fixedLayout(width: 760, height: 620)) { previewDashboardSplitViewController(hasHost: true) }
+#Preview("Dashboard GitHub", traits: .fixedLayout(width: 760, height: 620)) {
+    previewDashboardSplitViewController(hasHost: true, pane: { .github($0) })
+}
+#Preview("Dashboard Mac", traits: .fixedLayout(width: 760, height: 620)) {
+    previewDashboardSplitViewController(hasHost: true, pane: { .mac($0) })
+}
 #Preview("Dashboard Host Not Found", traits: .fixedLayout(width: 760, height: 620)) {
     previewDashboardSplitViewController(hasHost: true, notFound: true)
 }

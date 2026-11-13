@@ -193,11 +193,11 @@ registered before stay. **Remove Mac…** leaves the runners on that Mac.
 
 ## Show a host on another Mac
 
-A Mac that runs no host can show a host's status and change its settings. Copy
-`XcodeHomeRunner.app` to that Mac and open it without running the installer.
-Opened this way, the app is a dashboard: it creates no runner folders or
-execution pool, registers no runners, and needs no GitHub sign-in. It keeps only
-its pairings, in that Mac's Keychain.
+A Mac that runs no host can show a host, sign it in to GitHub, and change its
+settings. Copy `XcodeHomeRunner.app` to that Mac and open it without running the
+installer. Opened this way, the app is a dashboard: it creates no runner folders
+or execution pool, registers no runners, and keeps no GitHub sign-in. It keeps
+only its pairings, in that Mac's Keychain.
 
 1. On the host, open **Settings…**, select that Mac under **Runners**, and choose
    **Allow Dashboard…**. The host waits five minutes for a dashboard.
@@ -207,19 +207,29 @@ its pairings, in that Mac's Keychain.
    host. A different code means that another device answered, so choose
    **Don't Allow**.
 
-While the host answers, the dashboard shows its status, runner services, Xcode
-job counts, job limit, Simulator retention, and storage folder. **Apply** and
-**Save** change them with the same checks as the host's own window. After a
-changed job limit, the host registers its runners itself; for a host that
-another Mac manages, that Mac does at its next synchronization. When the host
-does not answer, the dashboard hides these values and shows when they were last
-read.
+Each host has the panes of its own window: **Overview**, **GitHub**, and the
+host under its name. While the host answers, they show its status, repositories
+and runner counts, runner services, Xcode job counts, job limit, Simulator
+retention, and storage folder. **Apply** and **Save** change them with the same
+checks as the host's own window. After a changed job limit, the host registers
+its runners itself; for a host that another Mac manages, that Mac does at its
+next synchronization. When the host does not answer, the dashboard hides these
+values and shows when they were last read.
+
+To connect a host to GitHub from the dashboard, choose **Connect GitHub…** in
+its **GitHub** pane. The host starts the sign-in, the dashboard shows the code,
+and GitHub's page opens in the dashboard's browser, as does **Add Repositories
+on GitHub…**. The host keeps the login tokens and sends the dashboard neither
+them nor anything that completes a sign-in. **Apply** saves the repository
+selection on the host, which then registers and removes runners; Overview shows
+the progress. Changes made in the host's own window or on another dashboard
+appear within a few seconds.
 
 A dashboard does not take over a host. The host keeps its GitHub sign-in, the
 Macs it manages, and its managing Mac if it has one, and it accepts several
 dashboards. A host waits for either a managing Mac or a dashboard at a time, and
-refuses a request for the other. The GitHub pane and the Macs that a host
-manages do not appear on a dashboard.
+refuses a request for the other. The Macs that a host manages do not appear on a
+dashboard.
 
 **Remove Mac…** on the dashboard ends the pairing on both Macs. **Remove…**
 under **Dashboards** on the host ends it there; the dashboard then shows the

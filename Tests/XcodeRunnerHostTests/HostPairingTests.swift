@@ -74,6 +74,14 @@ struct HostPairingTests {
         try await waitUntil { management.managementPort != nil }
         await macs.checkStatus(of: mac.id, at: try local(management.managementPort))
         #expect(macs.status(of: mac.id) == .online)
+        // A managing host registers the Mac's runners from its own sign-in, and leaves the Mac's GitHub settings alone.
+        let reply = try await HostLink.send(
+            .github(.signOut), to: try local(management.managementPort), key: mac.pairing.symmetricKey, identity: mac.id.uuidString
+        )
+        guard case .refused("Managed shares its GitHub settings only with a dashboard.") = reply else {
+            Issue.record("Expected the Mac to refuse the managing host, not \(reply)")
+            return
+        }
 
         await macs.remove(mac.id)
         #expect(macs.macs.isEmpty)
@@ -375,6 +383,84 @@ struct HostPairingTests {
         await #expect(throws: HostLinkError.refused("Managed changes its runners only for its managing Mac.")) {
             _ = try await dashboard.requestRunners(.inventory, from: shown.id)
         }
+
+        await host.management.shutDown()
+        await dashboard.shutDown()
+    }
+
+    @Test func aDashboardSignsAHostInToGitHubAndChoosesItsRepositories() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = GitHubRepository(id: 1, fullName: "owner/Project")
+        let transport = GitHubTestTransport([
+            .init(path: "/login/device/code", body: #"{"device_code":"device-secret","user_code":"USER-CODE","verification_uri":"https://github.com/login/device","expires_in":900,"interval":5}"#),
+            .init(path: "/login/oauth/access_token", body: #"{"access_token":"token-secret"}"#),
+            .init(path: "/user", body: #"{"id":1,"login":"owner"}"#),
+            .init(path: "/user/installations", body: #"{"installations":[{"id":10}]}"#),
+            .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Project"}]}"#),
+        ])
+        let client = await transport.client
+        // The host asks GitHub for the token once the test lets its wait end, as after the person authorizes the app.
+        let authorized = AsyncStream<Void>.makeStream()
+        let authentication = GitHubAuthentication(clientID: "app", client: client, store: MemorySecretStore(), sleep: { _ in
+            for await _ in authorized.stream { return }
+        })
+        var openedOnHost: [URL] = []
+        let host = managedMac(at: root) { installation in
+            GitHubHostSettings(
+                installation: installation, pool: HostExecutionPool(directory: installation.poolDirectory),
+                app: GitHubApp(clientID: "app", slug: "host-app"), client: client, authentication: authentication,
+                openURL: { openedOnHost.append($0); return true }
+            )
+        }
+        await host.github.restore()
+        var opened: [URL] = []
+        let dashboard = PairedMacs(
+            store: MemorySecretStore(), name: "Dashboard", role: .dashboard, browses: false, openURL: { opened.append($0); return true }
+        )
+        let shown = try await pair(dashboard, with: host.management)
+        try await waitUntil { host.management.ports[shown.id] != nil }
+        let endpoint = try local(host.management.ports[shown.id])
+        await dashboard.checkStatus(of: shown.id, at: endpoint)
+        let settings = try #require(dashboard.settings[shown.id])
+        #expect(settings.github?.hasRestored == true)
+        #expect(settings.github?.accountLogin == nil)
+
+        // The code appears on the dashboard, and GitHub's page opens there and not on the host.
+        await dashboard.signIn(to: shown.id)
+        #expect(settings.github?.signInCode?.userCode == "USER-CODE")
+        #expect(opened == [URL(string: "https://github.com/login/device")!])
+        #expect(openedOnHost.isEmpty)
+        func sent() throws -> String { String(decoding: try JSONEncoder().encode(try #require(settings.github)), as: UTF8.self) }
+        #expect(try !sent().contains("device-secret"))
+
+        // The host finishes the sign-in and keeps the token. The dashboard's next read shows the account.
+        authorized.continuation.yield()
+        try await waitUntil { host.github.account != nil && !host.github.isConnecting }
+        await dashboard.checkStatus(of: shown.id, at: endpoint)
+        #expect(settings.github?.accountLogin == "owner")
+        #expect(settings.github?.selectableRepositories == [repository])
+        #expect(try !sent().contains("token-secret"))
+        dashboard.addRepositories(to: shown.id)
+        #expect(opened.last == URL(string: "https://github.com/apps/host-app/installations/new")!)
+
+        settings.selectedRepositoryIDs = [repository.id]
+        await dashboard.applyRepositorySelection(of: shown.id)
+        #expect(settings.githubError == nil)
+        #expect(settings.github?.savedRepositoryIDs == [repository.id])
+        let record = host.installation.hostRoot.appending(path: "github-host.json")
+        #expect(try GitHubHostConfiguration.load(from: record).repositories == [repository])
+        // The host's own window shows the selection, as it does for any change it did not make.
+        #expect(host.github.selectedRepositoryIDs == [repository.id])
+        // The host reports what registering the runners waits for, as its own Apply does.
+        try await waitUntil { !host.github.isSavingSelection }
+        await dashboard.checkStatus(of: shown.id, at: endpoint)
+        #expect(settings.github?.errorMessage?.contains("pending until host storage is ready") == true)
+
+        await dashboard.signOut(of: shown.id)
+        #expect(settings.github?.accountLogin == nil)
+        #expect(host.github.account == nil)
+        #expect(await transport.requests.count == 5)
 
         await host.management.shutDown()
         await dashboard.shutDown()
