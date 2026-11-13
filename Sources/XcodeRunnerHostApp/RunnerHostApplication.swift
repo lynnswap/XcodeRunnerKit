@@ -203,6 +203,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private struct HostedRunner {
         let task: Task<Void, Never>
         var state: RunnerServiceState
+        /// The process group of the runner's service, once it started.
+        var processGroup: Int32?
     }
     private var runners: [URL: HostedRunner] = [:]
     private let settings: HostSettingsModel
@@ -437,16 +439,55 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             try FileManager.default.removeItem(at: directory.url)
             print("Removed \(directory.name).")
         }
+        let isPaused = settings.isPaused
+        // A paused host lets each runner finish the job that it runs, and stops the others.
+        var finishing: Set<URL> = []
+        if isPaused {
+            for (directory, runner) in runners {
+                // A service that just ended has no processes to list, and no job.
+                if runner.state == .running, let group = runner.processGroup, (try? Self.groupRunsJob(group)) == true {
+                    finishing.insert(directory)
+                    continue
+                }
+                runners[directory] = nil
+                runner.task.cancel()
+                await runner.task.value
+                print("Paused \(directory.lastPathComponent).")
+            }
+            try Task.checkCancellation()
+        }
+        var individual: Set<URL> = []
         for runner in requested where runners[runner.url] == nil {
             if try runner.hasIndividualService() {
-                print("Skipped \(runner.name): uninstall its individual service before opting in.")
-                continue
+                if !isPaused { print("Skipped \(runner.name): uninstall its individual service before opting in.") }
+                individual.insert(runner.url)
+            } else if !isPaused {
+                runners[runner.url] = HostedRunner(task: Task { await serve(runner.url) }, state: .starting)
             }
-            runners[runner.url] = HostedRunner(task: Task { await serve(runner.url) }, state: .starting)
         }
         settings.runnerScanError = nil
         settings.runners = requested.sorted { $0.name < $1.name }.map { runner in
-            RunnerSettingsRow.read(runner, state: runners[runner.url]?.state ?? .individualService)
+            let state: RunnerServiceState = if finishing.contains(runner.url) {
+                .finishing
+            } else if let hosted = runners[runner.url] {
+                hosted.state
+            } else {
+                individual.contains(runner.url) ? .individualService : .paused
+            }
+            return RunnerSettingsRow.read(runner, state: state)
+        }
+    }
+
+    /// Whether the official runner in a service's process group runs a job, for which it starts a worker process.
+    private nonisolated static func groupRunsJob(_ identifier: Int32) throws -> Bool {
+        try groupMembers(identifier).contains { member in
+            var info = proc_bsdshortinfo()
+            let size = Int32(MemoryLayout<proc_bsdshortinfo>.size)
+            // A worker that ended stays listed until the runner collects its status.
+            guard proc_pidinfo(member, PROC_PIDT_SHORTBSDINFO, 0, &info, size) == size, info.pbsi_status != UInt32(SZOMB) else {
+                return false
+            }
+            return withUnsafeBytes(of: info.pbsi_comm) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) } == "Runner.Worker"
         }
     }
 
@@ -476,6 +517,21 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     }
 
     private nonisolated static func groupHasLiveProcesses(_ identifier: Int32) throws -> Bool {
+        for member in try groupMembers(identifier) {
+            var info = proc_bsdshortinfo()
+            let size = Int32(MemoryLayout<proc_bsdshortinfo>.size)
+            let read = proc_pidinfo(member, PROC_PIDT_SHORTBSDINFO, 0, &info, size)
+            if read == size {
+                if info.pbsi_pgid == UInt32(identifier) && info.pbsi_status != UInt32(SZOMB) { return true }
+            } else if errno != ESRCH {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
+        }
+        return false
+    }
+
+    /// The processes in a process group, with those that already exited and were not reaped.
+    private nonisolated static func groupMembers(_ identifier: Int32) throws -> [Int32] {
         let estimatedBytes = proc_listpids(UInt32(PROC_PGRP_ONLY), UInt32(identifier), nil, 0)
         guard estimatedBytes > 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
@@ -493,17 +549,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             if Int(count) < members.count * MemoryLayout<Int32>.stride { break }
             members += members
         } while true
-        for member in members.prefix(Int(count) / MemoryLayout<Int32>.stride) {
-            var info = proc_bsdshortinfo()
-            let size = Int32(MemoryLayout<proc_bsdshortinfo>.size)
-            let read = proc_pidinfo(member, PROC_PIDT_SHORTBSDINFO, 0, &info, size)
-            if read == size {
-                if info.pbsi_pgid == UInt32(identifier) && info.pbsi_status != UInt32(SZOMB) { return true }
-            } else if errno != ESRCH {
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-            }
-        }
-        return false
+        return Array(members.prefix(Int(count) / MemoryLayout<Int32>.stride))
     }
 
     private func serve(_ directory: URL) async {
@@ -541,6 +587,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 error: .fileDescriptor(.init(rawValue: descriptor), closeAfterSpawningProcess: false)
             ) { execution in
                 self.runners[directory]?.state = .running
+                self.runners[directory]?.processGroup = execution.processIdentifier.value
                 try await Self.cleanUpServiceGroupAfterExit(execution.processIdentifier.value)
             }
             if Task.isCancelled {

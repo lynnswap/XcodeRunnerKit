@@ -91,6 +91,13 @@ final class RelayedMacs: MacList {
         }
     }
 
+    func setPaused(_ isPaused: Bool, of id: HostPairing.ID) async {
+        guard let settings = settings[id], let mac = listedMacs.first(where: { $0.id == id }) else { return }
+        await settings.setPaused(isPaused, on: mac.name) { isPaused in
+            try await self.change(.setPaused(isPaused, mac: id), of: id)
+        }
+    }
+
     func restart(_ id: HostPairing.ID) async {
         guard let settings = settings[id], let mac = listedMacs.first(where: { $0.id == id }) else { return }
         await settings.restart(on: mac.name) { try await self.change(.restart(mac: id), of: id) }

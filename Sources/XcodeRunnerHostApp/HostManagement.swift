@@ -166,6 +166,10 @@ final class HostManagement {
                                 : "\(self.name) runs builds only for a dashboard."))
                             return
                         }
+                        guard await !settings.isPaused else {
+                            try await reply(.refused("\(self.name) is paused and takes no new jobs."))
+                            return
+                        }
                         try await settings.operations.run(operation, for: pairing.id, next: next, reply: reply)
                     case .operation:
                         // These follow a start that this Mac took, on its connection.

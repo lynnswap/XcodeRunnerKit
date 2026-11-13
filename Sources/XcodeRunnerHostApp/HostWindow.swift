@@ -279,10 +279,12 @@ struct HostStatusRows<Settings: HostSettingsDisplay>: View {
 
     var body: some View {
         LabeledContent("Status") {
+            // A paused Mac runs as its person chose, so it does not look like a host that needs attention.
             Label {
-                Text(settings.hostState.rawValue)
+                Text(settings.showsPaused ? "Paused" : settings.hostState.rawValue)
             } icon: {
-                Image(systemName: settings.hostState.systemImage).foregroundStyle(settings.hostState.tint)
+                Image(systemName: settings.showsPaused ? "pause.circle.fill" : settings.hostState.systemImage)
+                    .foregroundStyle(settings.showsPaused ? .secondary : settings.hostState.tint)
             }
         }
         LabeledContent("Xcode jobs") { Text(settings.jobSummary).monospacedDigit() }
@@ -359,7 +361,7 @@ private enum PreviewPairing {
 /// A host window's content with settings in a temporary folder, GitHub answered in memory, and no Bonjour.
 @MainActor
 private func previewHostSplitViewController(
-    pane: HostPane, isSignedIn: Bool, pairing: PreviewPairing = .none
+    pane: HostPane, isSignedIn: Bool, pairing: PreviewPairing = .none, isPaused: Bool = false
 ) -> NSSplitViewController {
     let installation = HostInstallation(homeDirectory: .temporaryDirectory.appending(path: UUID().uuidString))
     let github = previewGitHubSettings(installation: installation, isSignedIn: isSignedIn)
@@ -397,10 +399,11 @@ private func previewHostSplitViewController(
     }
     settings.hostState = .running
     settings.storageDidBecomeAvailable(HostInstallation.Storage(directory: installation.hostRoot.appending(path: "Storage")))
+    if isPaused { settings.setPaused(true) }
     if isSignedIn {
         settings.runners = [
-            RunnerSettingsRow(directory: installation.runnersRoot.appending(path: "1"), name: "m6mini-XcodeRunnerKit-1", state: .running, configurationError: nil),
-            RunnerSettingsRow(directory: installation.runnersRoot.appending(path: "2"), name: "m6mini-tweetpd-1", state: .starting, configurationError: nil),
+            RunnerSettingsRow(directory: installation.runnersRoot.appending(path: "1"), name: "m6mini-XcodeRunnerKit-1", state: isPaused ? .finishing : .running, configurationError: nil),
+            RunnerSettingsRow(directory: installation.runnersRoot.appending(path: "2"), name: "m6mini-tweetpd-1", state: isPaused ? .paused : .starting, configurationError: nil),
         ]
     }
     Task {
@@ -529,6 +532,12 @@ private struct XcodeSectionPreview: View {
 }
 #Preview("GitHub", traits: .fixedLayout(width: 760, height: 620)) { previewHostSplitViewController(pane: .github, isSignedIn: true) }
 #Preview("Mac", traits: .fixedLayout(width: 760, height: 620)) { previewHostSplitViewController(pane: .mac, isSignedIn: true) }
+#Preview("Paused Mac", traits: .fixedLayout(width: 760, height: 620)) {
+    previewHostSplitViewController(pane: .mac, isSignedIn: true, isPaused: true)
+}
+#Preview("Paused Overview", traits: .fixedLayout(width: 760, height: 620)) {
+    previewHostSplitViewController(pane: .overview, isSignedIn: true, isPaused: true)
+}
 #Preview("Waiting to Pair", traits: .fixedLayout(width: 760, height: 620)) {
     previewHostSplitViewController(pane: .mac, isSignedIn: true, pairing: .waitingToPair)
 }

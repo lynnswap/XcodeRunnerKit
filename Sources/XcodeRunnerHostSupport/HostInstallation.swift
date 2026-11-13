@@ -75,6 +75,23 @@ package struct HostInstallation: Sendable {
         return URL(filePath: path, directoryHint: .notDirectory)
     }
 
+    private var pausedRecord: URL { hostRoot.appending(path: "paused") }
+
+    /// Whether the host takes no new jobs: it stops its runner services once their jobs finish, and starts none.
+    package func isPaused() -> Bool {
+        FileManager.default.fileExists(atPath: pausedRecord.path(percentEncoded: false))
+    }
+
+    package func savePaused(_ isPaused: Bool) throws {
+        guard isPaused else {
+            do { try FileManager.default.removeItem(at: pausedRecord) }
+            catch let error as CocoaError where error.code == .fileNoSuchFile { }
+            return
+        }
+        try FileManager.default.createDirectory(at: hostRoot, withIntermediateDirectories: true)
+        try Data().write(to: pausedRecord)
+    }
+
     package func buildServiceExecutableURL() throws -> URL? {
         try Self.buildServiceExecutableURL(hostRoot: hostRoot)
     }
