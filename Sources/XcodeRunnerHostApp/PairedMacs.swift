@@ -246,18 +246,25 @@ final class PairedMacs {
                 "\(macName) paired, but this Mac could not save the pairing: \(error.localizedDescription) \(endingInstruction(on: macName)), then pair again."
             ])
         }
+        var keepsEarlierPairing = false
         for mac in replaced {
-            // A Mac keeps every dashboard until told, and only replaces its managing host by itself. A Mac that
-            // cannot be told lists the earlier pairing until the person removes it there.
-            if role == .dashboard, let endpoint = endpoints[mac.id] {
-                _ = try? await HostLink.send(.unpair, to: endpoint, key: mac.pairing.symmetricKey, identity: mac.id.uuidString)
+            // A Mac replaces its managing host by itself, and keeps every dashboard until told.
+            if role == .dashboard {
+                let reply: HostLinkReply? = if let endpoint = endpoints[mac.id] {
+                    try? await HostLink.send(.unpair, to: endpoint, key: mac.pairing.symmetricKey, identity: mac.id.uuidString)
+                } else {
+                    nil
+                }
+                if case .unpaired? = reply {} else { keepsEarlierPairing = true }
             }
             forgetStatus(of: mac.id)
             settings[mac.id] = nil
         }
         macs = next
         settings[mac.id] = PairedMacSettings()
-        message = nil
+        message = keepsEarlierPairing
+            ? "\(macName) could not be told to forget this Mac's earlier pairing. It lists this Mac twice under Dashboards until you remove one there."
+            : nil
         if browsing == nil { start() } else { advertisedServicesChanged() }
         return mac
     }

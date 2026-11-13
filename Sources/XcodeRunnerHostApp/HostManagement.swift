@@ -103,13 +103,16 @@ final class HostManagement {
                             return
                         }
                         let answer = await settings.answer(request)
-                        try await reply(answer)
+                        // The change is saved, so what follows it does not depend on the reply arriving.
+                        let delivery: Result<Void, any Error>
+                        do { delivery = .success(try await reply(answer)) } catch { delivery = .failure(error) }
                         // A managing host registers runners for a changed job limit itself. After a dashboard's
                         // change this Mac does, as it does after its own Apply.
                         if role == .dashboard, case .settings = answer, case .configurePool(let changes) = request,
                            changes.maximumConcurrentJobs != nil {
                             await settings.github.synchronize()
                         }
+                        try delivery.get()
                     case .runners(let request):
                         guard role == .manager, let github = await self.settings?.github else {
                             try await reply(.refused(role == .manager

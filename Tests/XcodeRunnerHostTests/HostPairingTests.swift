@@ -284,8 +284,16 @@ struct HostPairingTests {
         #expect(second.status(of: alsoShown.id) == .online)
         #expect(second.settings[alsoShown.id]?.report?.poolStatus?.configuration.maximumConcurrentJobs == HostInstallation.defaultMaximumConcurrentJobs)
 
+        // Pairing again replaces the dashboard's earlier pairing on the host as well.
+        let shownAgain = try await pair(first, with: host.management)
+        #expect(first.macs == [shownAgain])
+        #expect(first.message == nil)
+        #expect(host.management.dashboards.map(\.id) == [alsoShown.id, shownAgain.id])
+
         // Either Mac ends the pairing, and the other dashboard stays.
-        await first.remove(shown.id)
+        try await waitUntil { host.management.ports[shownAgain.id] != nil }
+        await first.checkStatus(of: shownAgain.id, at: try local(host.management.ports[shownAgain.id]))
+        await first.remove(shownAgain.id)
         #expect(first.macs.isEmpty)
         #expect(first.message == nil)
         try await waitUntil { host.management.dashboards.map(\.id) == [alsoShown.id] }
