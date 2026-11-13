@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Network
 import Observation
@@ -24,13 +25,26 @@ final class PairedMacSettings {
     fileprivate(set) var isSavingStorage = false
     fileprivate(set) var saveError: String?
     fileprivate(set) var storageSaveError: String?
+    /// The host's GitHub settings, which a dashboard reads with the settings above.
+    private(set) var github: GitHubReport?
+    /// The repository selection being edited.
+    var selectedRepositoryIDs: Set<Int> = []
+    fileprivate(set) var isChangingGitHub = false
+    /// Why the host refused the last GitHub request, or why it did not confirm it.
+    fileprivate(set) var githubError: String?
     /// Changes when a change to the Mac starts or ends, so that a read that overlaps a change does not show the
     /// settings from before it.
     fileprivate var changeCount = 0
 
     var canApplyPoolConfiguration: Bool { report?.canApplyPoolConfiguration == true && !isSaving }
 
-    fileprivate var isChanging: Bool { isSaving || isSavingStorage }
+    fileprivate var isChanging: Bool { isSaving || isSavingStorage || isChangingGitHub }
+
+    /// Shows newly read GitHub settings, with the saved selection in a selection that was not edited.
+    fileprivate func show(_ github: GitHubReport) {
+        if selectedRepositoryIDs == self.github?.savedRepositoryIDs ?? [] { selectedRepositoryIDs = github.savedRepositoryIDs }
+        self.github = github
+    }
 
     /// Shows a newly read report, with its settings in the inputs that were not edited, as the Mac's own window does.
     fileprivate func show(_ report: HostSettingsReport) {
@@ -130,6 +144,7 @@ final class PairedMacs {
     /// What this Mac does with the Macs it pairs with.
     let role: PairingRole
     private let browses: Bool
+    private let openURL: @MainActor (URL) -> Bool
     private(set) var macs: [PairedMac] = []
     private(set) var statuses: [HostPairing.ID: Status] = [:]
     /// Kept while a Mac is not found, so that its pane can show when the settings were last read.
@@ -146,12 +161,18 @@ final class PairedMacs {
     private var browsing: Task<Void, Never>?
     private var pairableBrowsing: Task<Void, Never>?
 
-    /// - Parameter browses: Whether to find Macs with Bonjour. Tests pass endpoints instead.
-    init(store: any SecretStore, name: String, role: PairingRole, browses: Bool = true) {
+    /// - Parameters:
+    ///   - browses: Whether to find Macs with Bonjour. Tests pass endpoints instead.
+    ///   - openURL: Opens GitHub's pages in this Mac's browser for a host that a dashboard shows.
+    init(
+        store: any SecretStore, name: String, role: PairingRole, browses: Bool = true,
+        openURL: @escaping @MainActor (URL) -> Bool = { NSWorkspace.shared.open($0) }
+    ) {
         self.store = store
         self.name = name
         self.role = role
         self.browses = browses
+        self.openURL = openURL
         do {
             macs = try store.read().map { try JSONDecoder().decode([PairedMac].self, from: $0) } ?? []
             for mac in macs { settings[mac.id] = PairedMacSettings() }
@@ -341,8 +362,11 @@ final class PairedMacs {
         let changeCount = settings[id]?.changeCount
         let status: Status
         var report: HostSettingsReport?
+        var github: GitHubReport?
         do {
             report = try await requestSettings(.read, from: mac, at: endpoint)
+            // A dashboard shows the host's GitHub settings too. A managing host has its own.
+            if role == .dashboard { github = try await requestGitHub(.read, from: mac, at: endpoint) }
             status = .online
         } catch HostLinkError.rejected {
             status = .rejected
@@ -355,6 +379,7 @@ final class PairedMacs {
         statuses[id] = status
         if let report, let settings = settings[id], settings.changeCount == changeCount, !settings.isChanging {
             settings.show(report)
+            if let github { settings.show(github) }
         }
     }
 
@@ -432,6 +457,67 @@ final class PairedMacs {
         )
         switch reply {
         case .settings(let report): return report
+        case .refused(let message): throw HostLinkError.refused(message)
+        default: throw HostLinkError.unexpectedReply
+        }
+    }
+
+    /// Starts the host's GitHub sign-in and opens GitHub's page for its code in this Mac's browser.
+    func signIn(to id: HostPairing.ID) async {
+        guard let code = await changeGitHub(.signIn, of: id)?.signInCode else { return }
+        if !openURL(code.verificationURI) { settings[id]?.githubError = "Could not open your browser." }
+    }
+
+    func cancelSignIn(to id: HostPairing.ID) async { await changeGitHub(.cancelSignIn, of: id) }
+    func signOut(of id: HostPairing.ID) async { await changeGitHub(.signOut, of: id) }
+    func reloadRepositories(of id: HostPairing.ID) async { await changeGitHub(.reloadRepositories, of: id) }
+
+    /// Saves the repository selection edited for a host. The host then registers and removes runners.
+    func applyRepositorySelection(of id: HostPairing.ID) async {
+        guard let settings = settings[id] else { return }
+        guard let saved = await changeGitHub(.applySelection(settings.selectedRepositoryIDs), of: id) else { return }
+        settings.selectedRepositoryIDs = saved.savedRepositoryIDs
+    }
+
+    /// Opens the page that installs the host's GitHub App on repositories, in this Mac's browser.
+    func addRepositories(to id: HostPairing.ID) {
+        guard let settings = settings[id], let url = settings.github?.installationURL else { return }
+        settings.githubError = openURL(url) ? nil : "Could not open your browser."
+    }
+
+    /// Sends a change to a host's GitHub settings and shows the settings that the host answers with.
+    @discardableResult
+    private func changeGitHub(_ request: GitHubRequest, of id: HostPairing.ID) async -> GitHubReport? {
+        guard let mac = mac(id), let settings = settings[id], !settings.isChangingGitHub else { return nil }
+        settings.isChangingGitHub = true
+        settings.beginChange()
+        defer {
+            settings.isChangingGitHub = false
+            settings.endChange()
+        }
+        do {
+            let report = try await requestGitHub(request, from: mac)
+            settings.githubError = nil
+            settings.show(report)
+            return report
+        } catch {
+            settings.githubError = Self.changeFailure(error, on: mac)
+            return nil
+        }
+    }
+
+    private func requestGitHub(
+        _ request: GitHubRequest, from mac: PairedMac, at endpoint: NWEndpoint? = nil
+    ) async throws -> GitHubReport {
+        guard let endpoint = endpoint ?? endpoints[mac.id] else {
+            throw HostLinkError.unreachable("\(mac.name) was not found on the local network.")
+        }
+        let timeout = if case .read = request { HostLink.requestTimeout } else { Self.changeTimeout }
+        let reply = try await HostLink.send(
+            .github(request), to: endpoint, key: mac.pairing.symmetricKey, identity: mac.id.uuidString, timeout: timeout
+        )
+        switch reply {
+        case .github(let report): return report
         case .refused(let message): throw HostLinkError.refused(message)
         default: throw HostLinkError.unexpectedReply
         }

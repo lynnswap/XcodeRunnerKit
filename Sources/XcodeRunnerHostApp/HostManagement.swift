@@ -113,6 +113,17 @@ final class HostManagement {
                             await settings.github.synchronize()
                         }
                         try delivery.get()
+                    case .github(let request):
+                        guard let github = await self.settings?.github else {
+                            try await reply(.refused("\(self.name) cannot share its GitHub settings."))
+                            return
+                        }
+                        let answer = await github.answer(request)
+                        // The selection is saved, so registering its runners does not depend on the reply arriving.
+                        let delivery: Result<Void, any Error>
+                        do { delivery = .success(try await reply(answer)) } catch { delivery = .failure(error) }
+                        if case .applySelection = request, case .github = answer { await github.synchronizeDashboardSelection() }
+                        try delivery.get()
                     case .runners(let request):
                         guard role == .manager, let github = await self.settings?.github else {
                             try await reply(.refused(role == .manager

@@ -159,26 +159,7 @@ struct PairedMacView: View {
         let report = status == .online ? settings?.report : nil
         Form {
             Section {
-                LabeledContent("Connection") {
-                    Label {
-                        Text(status.title)
-                    } icon: {
-                        Image(systemName: status.systemImage).foregroundStyle(status.tint)
-                    }
-                }
-                switch status {
-                case .notFound:
-                    Text("\(mac.name) appears here while XcodeHomeRunner runs on it and both Macs are on the same local network. \(endedElsewhere)")
-                        .font(.callout).foregroundStyle(.secondary)
-                case .rejected:
-                    Text("\(mac.name) no longer accepts this Mac. Remove it, then pair again.")
-                        .font(.callout).foregroundStyle(.secondary)
-                case .unreachable(let message): ErrorText(message)
-                case .checking, .online: EmptyView()
-                }
-                if report == nil, let readAt = settings?.readAt {
-                    LabeledContent("Settings last read") { Text(readAt, format: .dateTime) }
-                }
+                PairedMacConnectionRows(macs: macs, mac: mac)
                 if let report { HostStatusRows(settings: report) }
                 if let message = macs.message { ErrorText(message) }
             }
@@ -214,6 +195,38 @@ struct PairedMacView: View {
             }
         }
         .task(id: mac.id) { await macs.watchSettings(of: mac.id) }
+    }
+
+}
+
+/// Whether a paired Mac answers and, while it does not, when its settings were last read.
+@MainActor
+struct PairedMacConnectionRows: View {
+    let macs: PairedMacs
+    let mac: PairedMac
+
+    var body: some View {
+        let status = macs.status(of: mac.id)
+        LabeledContent("Connection") {
+            Label {
+                Text(status.title)
+            } icon: {
+                Image(systemName: status.systemImage).foregroundStyle(status.tint)
+            }
+        }
+        switch status {
+        case .notFound:
+            Text("\(mac.name) appears here while XcodeHomeRunner runs on it and both Macs are on the same local network. \(endedElsewhere)")
+                .font(.callout).foregroundStyle(.secondary)
+        case .rejected:
+            Text("\(mac.name) no longer accepts this Mac. Remove it, then pair again.")
+                .font(.callout).foregroundStyle(.secondary)
+        case .unreachable(let message): ErrorText(message)
+        case .checking, .online: EmptyView()
+        }
+        if status != .online, let readAt = macs.settings[mac.id]?.readAt {
+            LabeledContent("Settings last read") { Text(readAt, format: .dateTime) }
+        }
     }
 
     /// What to do here when the pairing was ended on the other Mac.

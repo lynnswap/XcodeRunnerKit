@@ -118,8 +118,16 @@ private struct HostPaneView: View {
         @Bindable var navigation = navigation
         Group {
             switch navigation.pane {
-            case .overview: HostOverviewView(model: settings, navigation: navigation)
-            case .github: GitHubSettingsView(model: settings.github).disabled(settings.isSaving)
+            case .overview:
+                HostOverviewView(settings: settings, github: settings.github.report, mac: .thisMac, actions: settings.github.actions) {
+                    navigation.pane = .github
+                }
+            case .github:
+                @Bindable var github = settings.github
+                GitHubSettingsView(
+                    github: github.report, selection: $github.selectedRepositoryIDs, mac: .thisMac, actions: github.actions
+                )
+                .disabled(settings.isSaving)
             case .mac: HostMacSettingsView(model: settings)
             case .managedMac(let id):
                 if let mac = settings.managedMacs.mac(id) {
@@ -148,23 +156,26 @@ private struct HostPaneView: View {
     }
 }
 
+/// A Mac's status, setup steps, and repositories, in its own window or on a dashboard.
 @MainActor
-private struct HostOverviewView: View {
-    let model: HostSettingsModel
-    let navigation: HostWindowNavigation
-
-    private var github: GitHubHostSettings { model.github }
+struct HostOverviewView<Settings: HostSettingsDisplay>: View {
+    let settings: Settings
+    let github: GitHubReport
+    let mac: MacReference
+    let actions: GitHubActions
+    /// Shows the GitHub pane, where the sign-in code and the repository selection are.
+    let showGitHub: () -> Void
 
     var body: some View {
         Form {
             // A managed Mac's runners are registered by its managing host, so it needs no sign-in or selection.
-            if model.management.manager == nil, github.hasRestored && (github.account == nil || github.savedRepositoryIDs.isEmpty) {
+            if github.managerName == nil, github.hasRestored && (github.accountLogin == nil || github.savedRepositoryIDs.isEmpty) {
                 setup
             }
-            Section(HostPane.macName) { HostStatusRows(settings: model) }
+            Section(mac.name ?? HostPane.macName) { HostStatusRows(settings: settings) }
             Section {
-                if let manager = model.management.manager {
-                    Text("\(manager.name) registers runners on this Mac for the repositories selected there.")
+                if let manager = github.managerName {
+                    Text("\(manager) registers runners on \(mac.object) for the repositories selected there.")
                         .foregroundStyle(.secondary)
                 } else {
                     repositories
@@ -172,7 +183,7 @@ private struct HostOverviewView: View {
             } header: {
                 Text("Repositories")
             } footer: {
-                if !model.managedMacs.macs.isEmpty { Text("Counts include the Macs that this Mac manages.") }
+                if github.managesMacs { Text("Counts include the Macs that \(mac.object) manages.") }
             }
         }
     }
@@ -188,7 +199,7 @@ private struct HostOverviewView: View {
         }
         ForEach(github.runnerStatuses) { status in
             VStack(alignment: .leading, spacing: 4) {
-                LabeledContent(status.repository.fullName) {
+                LabeledContent(status.fullName) {
                     if status.isUnlinked {
                         // Without a listing from GitHub, the runners still to remove are not counted.
                         if status.registeredCount > 0 {
@@ -218,7 +229,7 @@ private struct HostOverviewView: View {
     /// The first unfinished step offers its action, so the order of setup stays visible.
     private var setup: some View {
         let steps = [
-            github.account != nil,
+            github.accountLogin != nil,
             !github.selectableRepositories.isEmpty,
             !github.savedRepositoryIDs.isEmpty,
         ]
@@ -226,18 +237,18 @@ private struct HostOverviewView: View {
         return Section("Get Started") {
             setupStep("Sign in to GitHub", isDone: steps[0], isCurrent: current == 0) {
                 Button("Connect GitHub…") {
-                    navigation.pane = .github
-                    github.signIn()
+                    showGitHub()
+                    actions.signIn()
                 }
                 .disabled(github.isBusy)
             }
             setupStep("Install the app on your repositories", isDone: steps[1], isCurrent: current == 1) {
-                Button("Add Repositories on GitHub…") { github.installApp() }
-                Button("Reload") { Task { await github.reloadRepositories() } }
+                Button("Add Repositories on GitHub…", action: actions.addRepositories)
+                Button("Reload", action: actions.reloadRepositories)
                     .disabled(!github.canReloadRepositories)
             }
             setupStep("Choose the repositories to run", isDone: steps[2], isCurrent: current == 2) {
-                Button("Choose Repositories…") { navigation.pane = .github }
+                Button("Choose Repositories…", action: showGitHub)
             }
         }
     }
@@ -345,27 +356,7 @@ private func previewHostSplitViewController(
     pane: HostPane, isSignedIn: Bool, pairing: PreviewPairing = .none
 ) -> NSSplitViewController {
     let installation = HostInstallation(homeDirectory: .temporaryDirectory.appending(path: UUID().uuidString))
-    let repositories = #"{"repositories":[{"id":1,"full_name":"lynnswap/XcodeRunnerKit"},{"id":2,"full_name":"lynnswap/tweetpd"},{"id":3,"full_name":"lynnswap/pd-site"}]}"#
-    let store = PreviewSecretStore()
-    if isSignedIn {
-        try? GitHubHostConfiguration(repositories: [
-            GitHubRepository(id: 1, fullName: "lynnswap/XcodeRunnerKit"), GitHubRepository(id: 2, fullName: "lynnswap/tweetpd"),
-        ]).save(to: installation.hostRoot.appending(path: "github-host.json"))
-        try? store.write(JSONEncoder().encode(GitHubCredentials(
-            clientID: GitHubApp.xcodeHomeRunner.clientID, account: GitHubAccount(id: 1, login: "lynnswap"), accessToken: "preview",
-            refreshToken: nil, expiresAt: nil, refreshExpiresAt: nil
-        )))
-    }
-    let client = GitHubClient(transport: { request in
-        let body = request.url?.path == "/user/installations" ? #"{"installations":[{"id":1}]}"# : repositories
-        return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
-    })
-    let pool = HostExecutionPool(directory: installation.poolDirectory)
-    let github = GitHubHostSettings(
-        installation: installation, pool: pool, client: client,
-        authentication: GitHubAuthentication(clientID: GitHubApp.xcodeHomeRunner.clientID, client: client, store: store),
-        openURL: { _ in false }
-    )
+    let github = previewGitHubSettings(installation: installation, isSignedIn: isSignedIn)
     let managingHost = PreviewSecretStore()
     let managedMacStore = PreviewSecretStore()
     switch pairing {
@@ -417,6 +408,31 @@ private func previewHostSplitViewController(
     return split
 }
 
+/// GitHub settings that are answered in memory, with two selected repositories when signed in.
+@MainActor
+private func previewGitHubSettings(installation: HostInstallation, isSignedIn: Bool) -> GitHubHostSettings {
+    let repositories = #"{"repositories":[{"id":1,"full_name":"lynnswap/XcodeRunnerKit"},{"id":2,"full_name":"lynnswap/tweetpd"},{"id":3,"full_name":"lynnswap/pd-site"}]}"#
+    let store = PreviewSecretStore()
+    if isSignedIn {
+        try? GitHubHostConfiguration(repositories: [
+            GitHubRepository(id: 1, fullName: "lynnswap/XcodeRunnerKit"), GitHubRepository(id: 2, fullName: "lynnswap/tweetpd"),
+        ]).save(to: installation.hostRoot.appending(path: "github-host.json"))
+        try? store.write(JSONEncoder().encode(GitHubCredentials(
+            clientID: GitHubApp.xcodeHomeRunner.clientID, account: GitHubAccount(id: 1, login: "lynnswap"), accessToken: "preview",
+            refreshToken: nil, expiresAt: nil, refreshExpiresAt: nil
+        )))
+    }
+    let client = GitHubClient(transport: { request in
+        let body = request.url?.path == "/user/installations" ? #"{"installations":[{"id":1}]}"# : repositories
+        return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    })
+    return GitHubHostSettings(
+        installation: installation, pool: HostExecutionPool(directory: installation.poolDirectory), client: client,
+        authentication: GitHubAuthentication(clientID: GitHubApp.xcodeHomeRunner.clientID, client: client, store: store),
+        openURL: { _ in false }
+    )
+}
+
 /// Answers as `mac` over the loopback interface with its own settings, and has `macs` read them as browsing does.
 @MainActor
 func connectPreviewMac(_ mac: PairedMac, to macs: PairedMacs, stopsAnswering: Bool) {
@@ -429,7 +445,7 @@ func connectPreviewMac(_ mac: PairedMac, to macs: PairedMacs, stopsAnswering: Bo
     try? store.write(JSONEncoder().encode(record))
     let installation = HostInstallation(homeDirectory: .temporaryDirectory.appending(path: UUID().uuidString))
     let settings = HostSettingsModel(
-        installation: installation,
+        installation: installation, github: previewGitHubSettings(installation: installation, isSignedIn: true),
         management: HostManagement(store: store, name: mac.name, advertises: false),
         managedMacs: PairedMacs(store: PreviewSecretStore(), name: mac.name, role: .manager, browses: false)
     )
@@ -442,6 +458,7 @@ func connectPreviewMac(_ mac: PairedMac, to macs: PairedMacs, stopsAnswering: Bo
     Task {
         await settings.configureDefaultPool()
         await settings.refreshPoolStatus()
+        await settings.github.restore()
         // The preview shows the Mac as not found if it cannot listen.
         while settings.management.ports[mac.id] == nil {
             do { try await Task.sleep(for: .milliseconds(10)) } catch { return }
