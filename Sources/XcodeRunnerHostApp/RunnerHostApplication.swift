@@ -426,6 +426,9 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     }
 
     private func reconcile() async throws {
+        // The services that run need no scan of the runner folders, so a folder that cannot be read does not keep a
+        // paused Mac taking jobs.
+        let finishing = try await stopServicesWhilePaused()
         let scan = try RunnerDirectory.scan(root)
         if let unreadable = scan.unreadable.first { throw unreadable.error }
         // A runner marked while the services below stop keeps running until the next scan stops it.
@@ -443,43 +446,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             try FileManager.default.removeItem(at: directory.url)
             print("Removed \(directory.name).")
         }
-        // A service that stopped when its job ended is removed even if the Mac resumed since, so that it starts again.
-        for (directory, runner) in runners where runner.stoppedAfterJob {
-            runners[directory] = nil
-            await runner.task.value
-            print("Paused \(directory.lastPathComponent).")
-        }
         // Read after the waits above, during which the Mac can be paused or resumed.
         let isPaused = settings.isPaused
-        // A paused host lets each runner finish the job that it runs, and stops the others. The official runner has
-        // no way to refuse jobs while it runs, so a job that it takes in the instant before its service stops is
-        // cancelled, as when the host quits.
-        var finishing: Set<URL> = []
-        if isPaused {
-            var stopping: [(directory: URL, task: Task<Void, Never>)] = []
-            for (directory, runner) in runners {
-                // A service that just ended has no processes to list, and no job.
-                if runner.state == .running, let group = runner.processGroup,
-                   let worker = (try? Self.jobWorker(inGroup: group)) ?? nil {
-                    finishing.insert(directory)
-                    if runner.jobWatch?.worker != worker {
-                        runner.jobWatch?.source.cancel()
-                        runners[directory]?.jobWatch = (worker, stopService(of: directory, after: worker))
-                    }
-                    continue
-                }
-                runner.jobWatch?.source.cancel()
-                runners[directory] = nil
-                // Every idle runner is asked to stop before any of them is waited for, so none takes a job meanwhile.
-                runner.task.cancel()
-                stopping.append((directory, runner.task))
-            }
-            for runner in stopping {
-                await runner.task.value
-                print("Paused \(runner.directory.lastPathComponent).")
-            }
-            try Task.checkCancellation()
-        }
         var individual: Set<URL> = []
         for runner in requested where runners[runner.url] == nil {
             if try runner.hasIndividualService() {
@@ -491,7 +459,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         }
         settings.runnerScanError = nil
         settings.runners = requested.sorted { $0.name < $1.name }.map { runner in
-            let state: RunnerServiceState = if finishing.contains(runner.url) {
+            let state: RunnerServiceState = if isPaused, finishing.contains(runner.url) {
                 .finishing
             } else if let hosted = runners[runner.url] {
                 hosted.state
@@ -500,6 +468,47 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             }
             return RunnerSettingsRow.read(runner, state: state)
         }
+    }
+
+    /// While the Mac is paused, stops the services of the runners that run no job.
+    ///
+    /// The official runner has no way to refuse jobs while it runs, so a job that it takes in the instant before
+    /// its service stops is cancelled, as when the host quits.
+    ///
+    /// - Returns: The runners that finish a job, whose services stop when it ends.
+    private func stopServicesWhilePaused() async throws -> Set<URL> {
+        // A service that stopped when its job ended is removed even if the Mac resumed since, so that it starts again.
+        for (directory, runner) in runners where runner.stoppedAfterJob {
+            runners[directory] = nil
+            await runner.task.value
+            print("Paused \(directory.lastPathComponent).")
+        }
+        guard settings.isPaused else { return [] }
+        var finishing: Set<URL> = []
+        var stopping: [(directory: URL, task: Task<Void, Never>)] = []
+        for (directory, runner) in runners {
+            // A service that just ended has no processes to list, and no job.
+            if runner.state == .running, let group = runner.processGroup,
+               let worker = (try? Self.jobWorker(inGroup: group)) ?? nil {
+                finishing.insert(directory)
+                if runner.jobWatch?.worker != worker {
+                    runner.jobWatch?.source.cancel()
+                    runners[directory]?.jobWatch = (worker, stopService(of: directory, after: worker))
+                }
+                continue
+            }
+            runner.jobWatch?.source.cancel()
+            runners[directory] = nil
+            // Every idle runner is asked to stop before any of them is waited for, so none takes a job meanwhile.
+            runner.task.cancel()
+            stopping.append((directory, runner.task))
+        }
+        for runner in stopping {
+            await runner.task.value
+            print("Paused \(runner.directory.lastPathComponent).")
+        }
+        try Task.checkCancellation()
+        return finishing
     }
 
     /// Stops a paused runner's service as soon as its job's worker ends. A runner whose repository has jobs waiting
