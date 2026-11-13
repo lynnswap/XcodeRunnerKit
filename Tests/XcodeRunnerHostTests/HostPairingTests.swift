@@ -91,6 +91,14 @@ struct HostPairingTests {
             return
         }
 
+        // A Mac that listens for the pairing under another key no longer has this one.
+        await #expect(throws: HostLinkError.rejected) {
+            try await HostLink.send(
+                .settings(.read), to: try local(management.managementPort), key: SymmetricKey(size: .bits256),
+                identity: mac.id.uuidString
+            )
+        }
+
         await macs.remove(mac.id)
         #expect(macs.macs.isEmpty)
         #expect(macs.message == nil)
