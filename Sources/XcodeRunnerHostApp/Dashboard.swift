@@ -158,6 +158,9 @@ private struct DashboardHostView: View {
                     Label("No Macs", systemImage: "desktopcomputer")
                 } description: {
                     Text("Choose Add Mac… to show a Mac that runs XcodeHomeRunner. This Mac shows its status and changes its settings without running jobs itself.")
+                    // A Mac's pane shows this message while one is listed. It also reports a Mac that was removed
+                    // here but could not be told, and pairings that could not be read.
+                    if let message = hosts.message { ErrorText(message) }
                 } actions: {
                     Button("Add Mac…") { navigation.isAddingMac = true }
                 }

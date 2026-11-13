@@ -210,8 +210,10 @@ its pairings, in that Mac's Keychain.
 While the host answers, the dashboard shows its status, runner services, Xcode
 job counts, job limit, Simulator retention, and storage folder. **Apply** and
 **Save** change them with the same checks as the host's own window. After a
-changed job limit, the host registers its runners itself. When the host does not
-answer, the dashboard hides these values and shows when they were last read.
+changed job limit, the host registers its runners itself; for a host that
+another Mac manages, that Mac does at its next synchronization. When the host
+does not answer, the dashboard hides these values and shows when they were last
+read.
 
 A dashboard does not take over a host. The host keeps its GitHub sign-in, the
 Macs it manages, and its managing Mac if it has one, and it accepts several
