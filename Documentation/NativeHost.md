@@ -421,7 +421,13 @@ update them for the new physical work path before restarting.
 ## Updates and troubleshooting
 
 To update, repeat [the installation steps](#install). The installer keeps the
-previous app, including its CLI, as `XcodeHomeRunner.previous.app`. Earlier
+previous app, including its CLI, as `XcodeHomeRunner.previous.app`.
+
+Update every Mac of a setup, dashboards included, to the same version. Paired
+Macs that run different versions keep their pairing but do not exchange
+settings: each Mac's pane for the other shows **Runs another version** and names
+the Mac to update, and **Add Mac…** lists a waiting Mac of another version
+without pairing with it. They connect again once both run the same version. Earlier
 versions installed the CLI separately with `install-host-tools.sh`; the first
 installation of an app that contains the CLI keeps that copy as
 `bin/xcode-runner.previous`.
