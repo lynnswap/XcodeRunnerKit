@@ -84,6 +84,11 @@ final class RelayedMacs: MacList {
         }
     }
 
+    func restart(_ id: HostPairing.ID) async {
+        guard let settings = settings[id], let mac = listedMacs.first(where: { $0.id == id }) else { return }
+        await settings.restart(on: mac.name) { try await self.change(.restart(mac: id), of: id) }
+    }
+
     func remove(_ id: HostPairing.ID) async { await send(.remove(mac: id)) }
 
     func discoverPairableMacs() {

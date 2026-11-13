@@ -26,6 +26,9 @@ final class PairedMacSettings {
     private(set) var isSavingStorage = false
     private(set) var saveError: String?
     private(set) var storageSaveError: String?
+    private(set) var isRestarting = false
+    /// Why the Mac refused to restart, or why it did not confirm that it restarts.
+    private(set) var restartError: String?
     /// The host's GitHub settings, which a dashboard reads with the settings above.
     private(set) var github: GitHubReport?
     /// The repository selection being edited.
@@ -39,7 +42,7 @@ final class PairedMacSettings {
 
     var canApplyPoolConfiguration: Bool { report?.canApplyPoolConfiguration == true && !isSaving }
 
-    var isChanging: Bool { isSaving || isSavingStorage || isChangingGitHub }
+    var isChanging: Bool { isSaving || isSavingStorage || isRestarting || isChangingGitHub }
 
     /// Shows newly read GitHub settings, with the saved selection in a selection that was not edited.
     fileprivate func show(_ github: GitHubReport) {
@@ -115,6 +118,25 @@ final class PairedMacSettings {
             storageDirectoryInput = report.savedStorageDirectory?.path(percentEncoded: false) ?? ""
         } catch {
             storageSaveError = Self.changeFailure(error, on: macName)
+        }
+    }
+
+    /// Restarts the Mac's host, which applies its saved storage folder.
+    ///
+    /// - Parameter send: Asks the Mac named `macName` to restart and returns the settings it answers with first.
+    func restart(on macName: String, send: () async throws -> HostSettingsReport) async {
+        guard report?.canRestart == true, !isRestarting else { return }
+        isRestarting = true
+        beginChange()
+        defer {
+            isRestarting = false
+            endChange()
+        }
+        do {
+            show(try await send())
+            restartError = nil
+        } catch {
+            restartError = Self.changeFailure(error, on: macName)
         }
     }
 
@@ -553,6 +575,11 @@ final class PairedMacs: MacList {
         }
     }
 
+    func restart(_ id: HostPairing.ID) async {
+        guard let mac = mac(id), let settings = settings[id] else { return }
+        await settings.restart(on: mac.name) { try await self.requestSettings(.restart, from: mac) }
+    }
+
     /// Changes a Mac's settings for a dashboard, and shows the result in this host's pane for the Mac as well.
     func relay(_ request: HostSettingsRequest, to id: HostPairing.ID) async throws -> HostSettingsReport {
         guard let mac = mac(id), let settings = settings[id] else {
@@ -690,7 +717,7 @@ final class PairedMacs: MacList {
         let timeout = switch request {
         case .read(refreshing: nil), .discover, .pair, .confirmCode, .cancelPairing: HostLink.requestTimeout
         case .read: HostLink.requestTimeout * 3
-        case .configurePool, .saveStorage, .remove: Self.changeTimeout
+        case .configurePool, .saveStorage, .restart, .remove: Self.changeTimeout
         }
         let reply = try await send(.macs(request), to: mac, at: endpoint, timeout: timeout)
         switch reply {

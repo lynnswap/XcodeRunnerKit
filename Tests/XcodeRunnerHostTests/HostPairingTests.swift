@@ -134,6 +134,22 @@ struct HostPairingTests {
         #expect(managed.savedStorageDirectory == (try managed.installation.requestedStorageDirectory()))
         #expect(settings.report?.savedStorageDirectory == managed.savedStorageDirectory)
 
+        // The saved folder waits for the Mac's next launch. A host that launchd started restarts itself when asked.
+        #expect(settings.report?.storageChangeIsPending == true)
+        #expect(settings.report?.canRestart == false)
+        var restarts = 0
+        managed.restartHost = { restarts += 1 }
+        await macs.checkStatus(of: mac.id, at: endpoint)
+        #expect(settings.report?.canRestart == true)
+        await macs.restart(mac.id)
+        #expect(settings.restartError == nil)
+        try await waitUntil { restarts == 1 }
+        // A host that someone started another way is restarted by them.
+        managed.restartHost = nil
+        await macs.restart(mac.id)
+        #expect(settings.restartError == "\(HostPane.macName) cannot restart XcodeHomeRunner by itself. Restart it on that Mac.")
+        #expect(restarts == 1)
+
         // A Mac that stops answering keeps only when its settings were last read.
         let readAt = settings.readAt
         await managed.management.shutDown()
@@ -471,6 +487,8 @@ struct HostPairingTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let host = managedMac(named: "Host", at: root.appending(path: "Host"))
         let runner = managedMac(named: "Runner", at: root.appending(path: "Runner"))
+        var restarts = 0
+        runner.restartHost = { restarts += 1 }
         await runner.configureDefaultPool()
         await runner.refreshPoolStatus()
         let managed = try await pair(host.managedMacs, with: runner.management)
@@ -502,6 +520,9 @@ struct HostPairingTests {
         settings.storageDirectoryInput = "Storage"
         await macs.saveStorageDirectory(of: managed.id)
         #expect(settings.storageSaveError == "Enter an absolute folder path.")
+        await macs.restart(managed.id)
+        #expect(settings.restartError == nil)
+        try await waitUntil { restarts == 1 }
 
         // The host pairs with a waiting Mac, and the person compares the code on the dashboard.
         let other = HostManagement(store: MemorySecretStore(), name: "Other", advertises: false)

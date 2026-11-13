@@ -401,7 +401,12 @@ Tools and service logs stay under
 To move job data, choose a folder in this Mac's pane under **Runners** >
 **Storage** and select **Save**. The change
 takes effect on the next host launch. Wait for running jobs and other users of
-that data to finish, then restart the host.
+that data to finish, then choose **Restart to Apply…** in the same section. It
+shows the Xcode jobs that are running and, once confirmed, stops the Mac's
+runner services and restarts its host. The button also appears in the Mac's pane
+on its managing Mac and on a dashboard, so the Mac does not have to be restarted
+at its own screen. A host that was not started by its LaunchAgent has no such
+button; restart it the way it was started.
 
 The host copies the data and keeps the originals. The destination must not
 already contain `Work`, `CompilationCache`, or `Build`. If the saved folder is
