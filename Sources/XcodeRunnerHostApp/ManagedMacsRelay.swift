@@ -32,15 +32,20 @@ struct ManagedMacsReport: Codable, Equatable, Sendable {
         let readAt: Date?
     }
 
+    /// Names the host process that counts `revision`, which starts again when the host restarts.
+    let session: UUID
+    /// Orders one session's reports by when the host made them. Answers can arrive in another order, and an answer to
+    /// a read can be older than the answer to a change that was sent before it.
+    let revision: Int
     let macs: [Mac]
     let message: String?
     /// Whether the host can pair with another Mac. A host that another Mac manages cannot.
     let canAddMacs: Bool
     let waitingMacs: [WaitingMac]
     let discoveryMessage: String?
-    /// The last pairing that a dashboard started.
+    /// The last pairing that the dashboard reading this report started.
     let pairingAttempt: UUID?
-    /// The code of `pairingAttempt`, for the dashboard that started it to compare and confirm.
+    /// The code of `pairingAttempt`, for that dashboard to compare and confirm.
     let codeConfirmation: PairedMacs.CodeConfirmation?
     /// Whether the host is still pairing for `pairingAttempt`.
     let isPairing: Bool
@@ -59,8 +64,11 @@ final class ManagedMacsRelay {
 
     private let macs: PairedMacs
     private let canAddMacs: @MainActor () -> Bool
+    private let session = UUID()
+    private var revision = 0
     private var pairing: Task<Void, Never>?
-    private var pairingAttempt: UUID?
+    /// The last pairing that a dashboard started, and that dashboard. Only it reads, confirms, and cancels the pairing.
+    private var pairingAttempt: (id: UUID, dashboard: HostPairing.ID)?
     private var pairedMac: ListedMac?
     private var pairingError: String?
     private var discovery: Task<Void, Never>?
@@ -71,8 +79,14 @@ final class ManagedMacsRelay {
         self.canAddMacs = canAddMacs
     }
 
-    var report: ManagedMacsReport {
-        ManagedMacsReport(
+    /// What this host tells `dashboard` about its Macs now.
+    func report(for dashboard: HostPairing.ID) -> ManagedMacsReport {
+        revision += 1
+        // A pairing from this host's own Add Mac sheet, or from another dashboard, shows its code there.
+        let attempt = pairingAttempt?.dashboard == dashboard ? pairingAttempt?.id : nil
+        let isPairing = attempt != nil && pairing != nil
+        return ManagedMacsReport(
+            session: session, revision: revision,
             macs: macs.macs.map { mac in
                 let settings = macs.settings(of: mac.id)
                 return .init(
@@ -80,16 +94,18 @@ final class ManagedMacsRelay {
                 )
             },
             message: macs.message, canAddMacs: canAddMacs(), waitingMacs: macs.waitingMacs,
-            discoveryMessage: macs.discoveryMessage, pairingAttempt: pairingAttempt,
-            // A pairing from this host's own Add Mac sheet shows its code there.
-            codeConfirmation: pairing != nil ? macs.codeConfirmation : nil,
-            isPairing: pairing != nil, pairedMac: pairedMac, pairingError: pairingError
+            discoveryMessage: macs.discoveryMessage, pairingAttempt: attempt,
+            codeConfirmation: isPairing ? macs.codeConfirmation : nil, isPairing: isPairing,
+            pairedMac: attempt != nil ? pairedMac : nil, pairingError: attempt != nil ? pairingError : nil
         )
     }
 
+    /// - Parameter dashboard: The pairing of the dashboard that sent the request.
     /// - Returns: The reply, and whether a Mac saved an edited job limit, so that this host registers its runners
     ///   as it does after Apply in its own pane for the Mac.
-    func answer(_ request: ManagedMacsRequest) async -> (reply: HostLinkReply, limitChanged: Bool) {
+    func answer(
+        _ request: ManagedMacsRequest, from dashboard: HostPairing.ID
+    ) async -> (reply: HostLinkReply, limitChanged: Bool) {
         var limitChanged = false
         do {
             switch request {
@@ -112,7 +128,7 @@ final class ManagedMacsRelay {
                 try requireCanAddMacs()
                 // This host's own Add Mac sheet, or another dashboard, may be pairing.
                 guard pairing == nil, !macs.isPairing else { throw PairedMacs.alreadyPairing }
-                pairingAttempt = attempt
+                pairingAttempt = (attempt, dashboard)
                 pairedMac = nil
                 pairingError = nil
                 pairing = Task {
@@ -125,14 +141,14 @@ final class ManagedMacsRelay {
                     pairing = nil
                 }
             case .confirmCode(let attempt):
-                guard attempt == pairingAttempt, pairing != nil else { break }
+                guard pairingAttempt.map({ $0 == (attempt, dashboard) }) == true, pairing != nil else { break }
                 macs.confirmCode()
             case .cancelPairing(let attempt):
-                guard attempt == pairingAttempt else { break }
+                guard pairingAttempt.map({ $0 == (attempt, dashboard) }) == true else { break }
                 pairing?.cancel()
                 await pairing?.value
             }
-            return (.macs(report), limitChanged)
+            return (.macs(report(for: dashboard)), limitChanged)
         } catch {
             return (.refused(error.localizedDescription), false)
         }

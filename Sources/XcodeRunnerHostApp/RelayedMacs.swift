@@ -19,9 +19,8 @@ final class RelayedMacs: MacList {
     private var discovering: Task<Void, Never>?
     /// The pairing that this dashboard started on the host. The host pairs for one dashboard at a time.
     private var pairingAttempt: UUID?
-    /// Requests are numbered as they are sent, because their answers can arrive in another order.
-    private var lastRequest = 0
-    private var lastShownRequest = 0
+    /// The host's session and revision of the report that is shown.
+    private var shown: (session: UUID, revision: Int)?
 
     init(hosts: PairedMacs, host: HostPairing.ID) {
         self.hosts = hosts
@@ -46,17 +45,11 @@ final class RelayedMacs: MacList {
     func status(of id: HostPairing.ID) -> PairedMacs.Status { report?.macs.first { $0.id == id }?.status ?? .notFound }
     func settings(of id: HostPairing.ID) -> PairedMacSettings? { settings[id] }
 
-    /// Numbers a request that is about to be sent, for `show(_:answering:)`.
-    func nextRequest() -> Int {
-        lastRequest += 1
-        return lastRequest
-    }
-
-    /// Shows what the host answered, unless the answer to a later request is already shown: the earlier answer can
-    /// list a Mac that was removed since, or settings from before a change.
-    func show(_ report: ManagedMacsReport, answering request: Int) {
-        guard request > lastShownRequest else { return }
-        lastShownRequest = request
+    /// Shows what the host answered, unless a report that the host made later is already shown. Answers can arrive in
+    /// another order, and the earlier one can list a Mac that was removed since, or settings from before a change.
+    func show(_ report: ManagedMacsReport) {
+        if let shown, shown.session == report.session, report.revision <= shown.revision { return }
+        shown = (report.session, report.revision)
         var next: [HostPairing.ID: PairedMacSettings] = [:]
         for mac in report.macs {
             let settings = settings[mac.id] ?? PairedMacSettings()
@@ -154,9 +147,8 @@ final class RelayedMacs: MacList {
     /// Sends a request and shows what the host answered.
     @discardableResult
     private func request(_ request: ManagedMacsRequest) async throws -> ManagedMacsReport {
-        let number = nextRequest()
         let report = try await hosts.requestManagedMacs(request, from: host)
-        show(report, answering: number)
+        show(report)
         return report
     }
 

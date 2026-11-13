@@ -514,6 +514,12 @@ struct HostPairingTests {
         try await waitUntil { macs.codeConfirmation != nil && other.pairingWindow?.request?.code != nil }
         #expect(macs.codeConfirmation?.code == other.pairingWindow?.request?.code)
         #expect(other.pairingWindow?.request?.requesterName == "Host")
+        // Only the dashboard that started the pairing gets its code and confirms it.
+        let anotherDashboard = UUID()
+        let attempt = try #require(host.managedMacsRelay.report(for: shown.id).pairingAttempt)
+        #expect(host.managedMacsRelay.report(for: anotherDashboard).codeConfirmation == nil)
+        _ = await host.managedMacsRelay.answer(.confirmCode(attempt: attempt), from: anotherDashboard)
+        #expect(host.managedMacs.codeConfirmation?.isConfirmed == false)
         macs.confirmCode()
         other.allowPairing()
         let added = try await adding.value
