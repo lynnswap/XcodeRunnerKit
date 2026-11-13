@@ -2,8 +2,8 @@ import Foundation
 import Network
 import Observation
 
-/// A Mac that this host manages.
-struct ManagedMac: Codable, Equatable, Identifiable, Sendable {
+/// A Mac that this Mac paired with: one that this host manages, or a host that this dashboard shows.
+struct PairedMac: Codable, Equatable, Identifiable, Sendable {
     let pairing: HostPairing
     /// The Mac's identity across pairings.
     let hostID: UUID
@@ -12,9 +12,9 @@ struct ManagedMac: Codable, Equatable, Identifiable, Sendable {
     var name: String { pairing.name }
 }
 
-/// The settings that this host last read from a Mac it manages, and the changes being edited for that Mac.
+/// The settings that this Mac last read from a Mac paired with it, and the changes being edited for that Mac.
 @MainActor @Observable
-final class ManagedMacSettings {
+final class PairedMacSettings {
     private(set) var report: HostSettingsReport?
     /// When `report` was read.
     private(set) var readAt: Date?
@@ -49,7 +49,7 @@ final class ManagedMacSettings {
 /// The runner folders of a Mac that this host manages, read and changed over the pairing connection.
 struct PairedRunnerMac: RunnerMac {
     let id: HostPairing.ID
-    let macs: ManagedMacs
+    let macs: PairedMacs
 
     func hostName() async throws -> String {
         guard case .hostName(let name) = try await macs.requestRunners(.hostName, from: id) else {
@@ -87,11 +87,12 @@ struct PairedRunnerMac: RunnerMac {
     }
 }
 
-/// The Macs that this host manages, and whether each one can be reached.
+/// The Macs that this Mac paired with, and whether each one can be reached: the Macs that a host manages, or the
+/// hosts that a dashboard shows.
 @MainActor @Observable
-final class ManagedMacs {
+final class PairedMacs {
     enum Status: Equatable {
-        /// The Mac does not advertise its management service on the local network.
+        /// The Mac does not advertise this pairing's service on the local network.
         case notFound
         case checking
         case online
@@ -126,11 +127,13 @@ final class ManagedMacs {
 
     private let store: any SecretStore
     private let name: String
+    /// What this Mac does with the Macs it pairs with.
+    let role: PairingRole
     private let browses: Bool
-    private(set) var macs: [ManagedMac] = []
+    private(set) var macs: [PairedMac] = []
     private(set) var statuses: [HostPairing.ID: Status] = [:]
     /// Kept while a Mac is not found, so that its pane can show when the settings were last read.
-    private(set) var settings: [HostPairing.ID: ManagedMacSettings] = [:]
+    private(set) var settings: [HostPairing.ID: PairedMacSettings] = [:]
     private(set) var pairableMacs: [PairableMac] = []
     private(set) var message: String?
     private(set) var discoveryMessage: String?
@@ -144,22 +147,23 @@ final class ManagedMacs {
     private var pairableBrowsing: Task<Void, Never>?
 
     /// - Parameter browses: Whether to find Macs with Bonjour. Tests pass endpoints instead.
-    init(store: any SecretStore, name: String, browses: Bool = true) {
+    init(store: any SecretStore, name: String, role: PairingRole, browses: Bool = true) {
         self.store = store
         self.name = name
+        self.role = role
         self.browses = browses
         do {
-            macs = try store.read().map { try JSONDecoder().decode([ManagedMac].self, from: $0) } ?? []
-            for mac in macs { settings[mac.id] = ManagedMacSettings() }
+            macs = try store.read().map { try JSONDecoder().decode([PairedMac].self, from: $0) } ?? []
+            for mac in macs { settings[mac.id] = PairedMacSettings() }
         } catch {
             message = "Could not read the paired Macs: \(error.localizedDescription)"
         }
     }
 
-    func mac(_ id: HostPairing.ID) -> ManagedMac? { macs.first { $0.id == id } }
+    func mac(_ id: HostPairing.ID) -> PairedMac? { macs.first { $0.id == id } }
     func status(of id: HostPairing.ID) -> Status { statuses[id] ?? .notFound }
 
-    /// Finds the paired Macs on the local network. Browsing waits for the first pairing, so a host that manages
+    /// Finds the paired Macs on the local network. Browsing waits for the first pairing, so a Mac that paired with
     /// no Macs does not ask for local network access.
     func start() {
         guard browses, browsing == nil, !macs.isEmpty else { return }
@@ -192,13 +196,13 @@ final class ManagedMacs {
         for task in tasks { await task?.value }
     }
 
-    /// Lists Macs that wait to pair until `stopDiscoveringPairableMacs()`.
+    /// Lists Macs that wait to pair with a Mac of this role until `stopDiscoveringPairableMacs()`.
     func discoverPairableMacs() {
         guard browses, pairableBrowsing == nil else { return }
         discoveryMessage = nil
         pairableBrowsing = Task {
             // The browser calls these handlers on the main actor, where they are created.
-            let browser = NetworkBrowser(for: .bonjour(HostLink.pairingService))
+            let browser = NetworkBrowser(for: .bonjour(HostLink.pairingService, includeTxtRecord: true))
                 .onStateUpdate { _, state in
                     guard case .waiting(let error) = state else { return }
                     self.showDiscoveryWaiting(error)
@@ -224,29 +228,43 @@ final class ManagedMacs {
     /// The pairing finishes after the person confirms `codeConfirmation` with `confirmCode()` and allows the
     /// pairing on the Mac.
     @discardableResult
-    func pair(at endpoint: NWEndpoint) async throws -> ManagedMac {
+    func pair(at endpoint: NWEndpoint) async throws -> PairedMac {
         defer { codeConfirmation = nil }
-        let (pairing, hostID) = try await HostLink.requestPairing(at: endpoint, pairingID: UUID(), managerName: name) { macName, code in
+        let (pairing, hostID) = try await HostLink.requestPairing(
+            at: endpoint, pairingID: UUID(), requesterName: name, role: role
+        ) { macName, code in
             try await self.waitForConfirmation(of: code, from: macName)
         }
         let macName = pairing.name
-        let mac = ManagedMac(pairing: pairing, hostID: hostID)
+        let mac = PairedMac(pairing: pairing, hostID: hostID)
         let replaced = macs.filter { $0.hostID == hostID }
         let next = macs.filter { $0.hostID != hostID } + [mac]
         do {
             try save(next)
         } catch {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey:
-                "\(macName) paired, but this Mac could not save the pairing: \(error.localizedDescription) Choose Stop Management on \(macName), then pair again."
+                "\(macName) paired, but this Mac could not save the pairing: \(error.localizedDescription) \(endingInstruction(on: macName)), then pair again."
             ])
         }
+        var keepsEarlierPairing = false
         for mac in replaced {
+            // A Mac replaces its managing host by itself, and keeps every dashboard until told.
+            if role == .dashboard {
+                let reply: HostLinkReply? = if let endpoint = endpoints[mac.id] {
+                    try? await HostLink.send(.unpair, to: endpoint, key: mac.pairing.symmetricKey, identity: mac.id.uuidString)
+                } else {
+                    nil
+                }
+                if case .unpaired? = reply {} else { keepsEarlierPairing = true }
+            }
             forgetStatus(of: mac.id)
             settings[mac.id] = nil
         }
         macs = next
-        settings[mac.id] = ManagedMacSettings()
-        message = nil
+        settings[mac.id] = PairedMacSettings()
+        message = keepsEarlierPairing
+            ? "\(macName) could not be told to forget this Mac's earlier pairing. It lists this Mac twice under Dashboards until you remove one there."
+            : nil
         if browsing == nil { start() } else { advertisedServicesChanged() }
         return mac
     }
@@ -276,8 +294,8 @@ final class ManagedMacs {
         }
     }
 
-    /// Ends the pairing on both Macs. A Mac that cannot be told keeps this host as its managing host until it stops
-    /// management itself.
+    /// Ends the pairing on both Macs. A Mac that cannot be told keeps accepting this Mac until the person ends the
+    /// pairing there.
     func remove(_ id: HostPairing.ID) async {
         guard let mac = mac(id) else { return }
         var notice: String?
@@ -288,10 +306,10 @@ final class ManagedMacs {
                     if case .refused(let message) = reply { throw HostLinkError.refused(message) }
                     guard case .unpaired = reply else { throw HostLinkError.unexpectedReply }
                 } catch {
-                    notice = "\(mac.name) could not be told: \(error.localizedDescription) It accepts this Mac as its managing host until you choose Stop Management on it."
+                    notice = "\(mac.name) could not be told: \(error.localizedDescription) \(remainingAccess(on: mac.name))"
                 }
             } else {
-                notice = "\(mac.name) was not found on the local network. It accepts this Mac as its managing host until you choose Stop Management on it."
+                notice = "\(mac.name) was not found on the local network. \(remainingAccess(on: mac.name))"
             }
         }
         let next = macs.filter { $0.id != id }
@@ -312,7 +330,7 @@ final class ManagedMacs {
         }
     }
 
-    /// Reads the settings of the Mac at `endpoint`, which also shows whether it accepts this host. Browsing calls this
+    /// Reads the settings of the Mac at `endpoint`, which also shows whether it accepts this Mac. Browsing calls this
     /// when a paired Mac is found.
     func checkStatus(of id: HostPairing.ID, at endpoint: NWEndpoint) async {
         guard let mac = mac(id), !checking.contains(id) else { return }
@@ -403,7 +421,7 @@ final class ManagedMacs {
     }
 
     private func requestSettings(
-        _ request: HostSettingsRequest, from mac: ManagedMac, at endpoint: NWEndpoint? = nil
+        _ request: HostSettingsRequest, from mac: PairedMac, at endpoint: NWEndpoint? = nil
     ) async throws -> HostSettingsReport {
         guard let endpoint = endpoint ?? endpoints[mac.id] else {
             throw HostLinkError.unreachable("\(mac.name) was not found on the local network.")
@@ -444,12 +462,27 @@ final class ManagedMacs {
     }
 
     /// The Mac's own message when it refused the change. Otherwise the change may or may not have been applied.
-    private static func changeFailure(_ error: any Error, on mac: ManagedMac) -> String {
+    private static func changeFailure(_ error: any Error, on mac: PairedMac) -> String {
         if case .refused(let message) = error as? HostLinkError { return message }
         return "\(mac.name) did not confirm the change: \(error.localizedDescription)"
     }
 
-    private func save(_ macs: [ManagedMac]) throws {
+    /// How the person ends this pairing on the other Mac.
+    private func endingInstruction(on macName: String) -> String {
+        switch role {
+        case .manager: "Choose Stop Management on \(macName)"
+        case .dashboard: "Remove this Mac under Dashboards on \(macName)"
+        }
+    }
+
+    private func remainingAccess(on macName: String) -> String {
+        switch role {
+        case .manager: "It accepts this Mac as its managing host until you choose Stop Management on it."
+        case .dashboard: "It accepts this Mac as a dashboard until you remove this Mac under Dashboards on it."
+        }
+    }
+
+    private func save(_ macs: [PairedMac]) throws {
         if macs.isEmpty { try store.remove() } else { try store.write(JSONEncoder().encode(macs)) }
     }
 
@@ -489,7 +522,8 @@ final class ManagedMacs {
     private func pairableMacsChanged(_ found: [Bonjour.Endpoint]) {
         guard pairableBrowsing != nil else { return }
         discoveryMessage = nil
-        pairableMacs = found.map { PairableMac(id: $0.id, name: $0.name, endpoint: $0.nwEndpoint) }
+        // A Mac waits for one role, and refuses a request for the other.
+        pairableMacs = found.filter { $0.txtRecord[HostLink.roleKeyName] == role.rawValue }.map { PairableMac(id: $0.id, name: $0.name, endpoint: $0.nwEndpoint) }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 

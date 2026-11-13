@@ -47,7 +47,7 @@ struct RunnerSettingsRow: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
-/// A job limit and Simulator retention being edited, for this Mac or for a Mac that this host manages.
+/// A job limit and Simulator retention being edited, for this Mac or for a Mac paired with it.
 struct PoolSettingsDraft: Equatable {
     /// The edited settings. A setting that matches the saved one is `nil`, so Apply leaves its saved value as it is.
     struct Changes: Codable, Equatable, Sendable {
@@ -117,8 +117,7 @@ struct PoolSettingsDraft: Equatable {
     }
 }
 
-/// A Mac's host status and execution settings, as the settings window shows them for this Mac and for the Macs that
-/// this host manages.
+/// A Mac's host status and execution settings, as a window shows them for this Mac and for the Macs paired with it.
 @MainActor
 protocol HostSettingsDisplay {
     var hostState: HostState { get }
@@ -174,7 +173,7 @@ extension HostSettingsDisplay {
     }
 }
 
-/// What a Mac sends the host that manages it about its status and settings.
+/// What a Mac sends the Macs paired with it about its status and settings.
 struct HostSettingsReport: Codable, Equatable, Sendable {
     let hostState: HostState
     let runners: [RunnerSettingsRow]
@@ -216,10 +215,10 @@ final class HostSettingsModel: HostSettingsDisplay {
     let installation: HostInstallation
     let pool: HostExecutionPool
     let github: GitHubHostSettings
-    /// This Mac's pairing with the host that manages it.
+    /// This Mac's pairings with the host that manages it and the dashboards that show it.
     let management: HostManagement
     /// The Macs that this host manages.
-    let managedMacs: ManagedMacs
+    let managedMacs: PairedMacs
     let settingsService: HostSettingsService
     var hostState = HostState.starting
     var runners: [RunnerSettingsRow] = []
@@ -241,7 +240,7 @@ final class HostSettingsModel: HostSettingsDisplay {
 
     init(
         installation: HostInstallation, github: GitHubHostSettings? = nil,
-        management: HostManagement? = nil, managedMacs: ManagedMacs? = nil
+        management: HostManagement? = nil, managedMacs: PairedMacs? = nil
     ) {
         self.installation = installation
         // Reading status leaves an unconfigured pool unchanged.
@@ -251,8 +250,8 @@ final class HostSettingsModel: HostSettingsDisplay {
         self.management = management ?? HostManagement(
             store: KeychainSecretStore.managingHost(hostRoot: installation.hostRoot), name: HostPane.macName
         )
-        self.managedMacs = managedMacs ?? ManagedMacs(
-            store: KeychainSecretStore.managedMacs(hostRoot: installation.hostRoot), name: HostPane.macName
+        self.managedMacs = managedMacs ?? PairedMacs(
+            store: KeychainSecretStore.managedMacs(hostRoot: installation.hostRoot), name: HostPane.macName, role: .manager
         )
         do {
             savedStorageDirectory = try installation.requestedStorageDirectory() ?? installation.storage()?.directory
@@ -260,7 +259,7 @@ final class HostSettingsModel: HostSettingsDisplay {
         } catch {
             storageSaveError = "Could not read the saved storage folder: \(error.localizedDescription)"
         }
-        // The managing host reads and changes this Mac's settings through the owner of this Mac's window.
+        // The Macs paired with this Mac read and change its settings through the owner of this Mac's window.
         self.management.settings = self
         self.github.pairedMacs = self.managedMacs
         self.github.management = self.management
@@ -301,9 +300,9 @@ final class HostSettingsModel: HostSettingsDisplay {
         }
     }
 
-    /// Saves a storage folder from this Mac's window or from the managing host.
+    /// Saves a storage folder from this Mac's window or from a Mac paired with it.
     private func saveStorageDirectory(_ path: String) async throws(HostSettingsError) -> URL {
-        // The managing host's pane cannot choose a folder on this Mac, so the message offers only a path.
+        // Another Mac's pane cannot choose a folder on this Mac, so the message offers only a path.
         guard path.hasPrefix("/") else { throw HostSettingsError("Enter an absolute folder path.") }
         let previous = savedStorageDirectory?.path(percentEncoded: false) ?? ""
         isSavingStorage = true
@@ -337,9 +336,9 @@ final class HostSettingsModel: HostSettingsDisplay {
         }
     }
 
-    /// A Mac either manages other Macs or is managed by one, so that one host owns each Mac's settings.
+    /// A Mac either manages other Macs or is managed by one, so that one host registers each Mac's runners.
     var canAllowManagement: Bool { managedMacs.macs.isEmpty }
-    var canAddMacs: Bool { management.manager == nil && management.pairingWindow == nil }
+    var canAddMacs: Bool { management.manager == nil && management.pairingWindow?.role != .manager }
 
     func trimSimulatorPool() async {
         do {
@@ -431,13 +430,13 @@ final class HostSettingsModel: HostSettingsDisplay {
         }
     }
 
-    /// Answers the managing host's request to read or change this Mac's settings, the way this Mac's window does.
+    /// Answers a paired Mac's request to read or change this Mac's settings, the way this Mac's window does.
     func answer(_ request: HostSettingsRequest) async -> HostLinkReply {
         do {
             switch request {
             case .read: break
-            case .configurePool(let changes): try await applyManagingHostChanges(changes)
-            case .saveStorage(let directory): try await saveManagingHostStorage(directory)
+            case .configurePool(let changes): try await applyPairedMacChanges(changes)
+            case .saveStorage(let directory): try await savePairedMacStorage(directory)
             }
             return .settings(HostSettingsReport(self))
         } catch {
@@ -445,8 +444,9 @@ final class HostSettingsModel: HostSettingsDisplay {
         }
     }
 
-    /// Applies the managing host's changes. The managing host then registers runners for a changed limit.
-    private func applyManagingHostChanges(_ changes: PoolSettingsDraft.Changes) async throws(HostSettingsError) {
+    /// Applies a paired Mac's changes. Runners for a changed limit are registered afterwards: by the managing host, or
+    /// by this Mac after a dashboard's change.
+    private func applyPairedMacChanges(_ changes: PoolSettingsDraft.Changes) async throws(HostSettingsError) {
         guard canApplyPoolConfiguration else {
             throw HostSettingsError("\(HostPane.macName) cannot apply these settings now. Try again in a moment.")
         }
@@ -461,7 +461,7 @@ final class HostSettingsModel: HostSettingsDisplay {
     }
 
     // With this guard's `throw` inline in `answer(_:)`, the Xcode 27.1 optimizer crashes while compiling it for Release.
-    private func saveManagingHostStorage(_ directory: String) async throws(HostSettingsError) {
+    private func savePairedMacStorage(_ directory: String) async throws(HostSettingsError) {
         guard canEditStorage else {
             throw HostSettingsError("\(HostPane.macName) cannot save a storage folder now. Try again in a moment.")
         }
@@ -488,8 +488,9 @@ struct HostMacSettingsView: View {
 
     var body: some View {
         Form {
-            // A managing host's changes to this Mac's settings appear below, so who manages the Mac comes first.
+            // Other Macs' changes to this Mac's settings appear below, so who can make them comes first.
             HostManagementSection(model: model)
+            HostDashboardsSection(model: model)
             RunnerServicesSection(settings: model) {
                 Text("Processes on this Mac. Overview shows each repository's connection and job counts from GitHub.")
             }
@@ -509,7 +510,7 @@ struct HostMacSettingsView: View {
     }
 }
 
-/// A Mac's runner services, in its own window or in the managing host's pane for it.
+/// A Mac's runner services, in its own window or in a paired Mac's pane for it.
 @MainActor
 struct RunnerServicesSection<Settings: HostSettingsDisplay, Footer: View>: View {
     let settings: Settings
@@ -540,7 +541,7 @@ struct RunnerServicesSection<Settings: HostSettingsDisplay, Footer: View>: View 
     }
 }
 
-/// A Mac's job limit and Simulator retention, in its own window or in the managing host's pane for it.
+/// A Mac's job limit and Simulator retention, in its own window or in a paired Mac's pane for it.
 @MainActor
 struct XcodeExecutionSection<Settings: HostSettingsDisplay>: View {
     let settings: Settings
@@ -584,14 +585,14 @@ struct XcodeExecutionSection<Settings: HostSettingsDisplay>: View {
     }
 }
 
-/// A Mac's storage folder, in its own window or in the managing host's pane for it.
+/// A Mac's storage folder, in its own window or in a paired Mac's pane for it.
 @MainActor
 struct StorageSection<Settings: HostSettingsDisplay>: View {
     let settings: Settings
     @Binding var directory: String
     let isSaving: Bool
     let saveError: String?
-    /// Chooses a folder on this Mac. The managing host's pane has no folder panel for another Mac.
+    /// Chooses a folder on this Mac. A paired Mac's pane has no folder panel for another Mac.
     let choose: (() -> Void)?
     let save: () -> Void
 

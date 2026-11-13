@@ -49,6 +49,10 @@ The installer places the app in `~/Applications` and starts it through a user
 LaunchAgent. An ad-hoc signature (`-`) is not accepted. Use the same team for
 updates so macOS can retain the app's access permissions.
 
+Opening the app on a Mac where the installer set up a host starts that host. On
+a Mac without a host, the app opens as a [dashboard](#show-a-host-on-another-mac)
+instead.
+
 Hosts installed before the app was renamed from XcodeRunnerHost are migrated by
 the same installer: it stops the `dev.lynnswap.XcodeRunnerHost` service, removes
 its LaunchAgent, and keeps the old app as `XcodeRunnerHost.previous.app`. Runner
@@ -186,6 +190,41 @@ and its runners are removed. A newly paired Mac gets its runners at the next
 synchronization, or when you change its job limit in its pane. While a Mac is
 managed, it does not register runners from its own sign-in; the runners that it
 registered before stay. **Remove Mac…** leaves the runners on that Mac.
+
+## Show a host on another Mac
+
+A Mac that runs no host can show a host's status and change its settings. Copy
+`XcodeHomeRunner.app` to that Mac and open it without running the installer.
+Opened this way, the app is a dashboard: it creates no runner folders or
+execution pool, registers no runners, and needs no GitHub sign-in. It keeps only
+its pairings, in that Mac's Keychain.
+
+1. On the host, open **Settings…**, select that Mac under **Runners**, and choose
+   **Allow Dashboard…**. The host waits five minutes for a dashboard.
+2. On the other Mac, open XcodeHomeRunner, choose **Add Mac…**, select the host,
+   and choose **Continue**. Both Macs show a six-digit code.
+3. If the codes match, choose **Pair** on the dashboard and **Allow** on the
+   host. A different code means that another device answered, so choose
+   **Don't Allow**.
+
+While the host answers, the dashboard shows its status, runner services, Xcode
+job counts, job limit, Simulator retention, and storage folder. **Apply** and
+**Save** change them with the same checks as the host's own window. After a
+changed job limit, the host registers its runners itself; for a host that
+another Mac manages, that Mac does at its next synchronization. When the host
+does not answer, the dashboard hides these values and shows when they were last
+read.
+
+A dashboard does not take over a host. The host keeps its GitHub sign-in, the
+Macs it manages, and its managing Mac if it has one, and it accepts several
+dashboards. A host waits for either a managing Mac or a dashboard at a time, and
+refuses a request for the other. The GitHub pane and the Macs that a host
+manages do not appear on a dashboard.
+
+**Remove Mac…** on the dashboard ends the pairing on both Macs. **Remove…**
+under **Dashboards** on the host ends it there; the dashboard then shows the
+host as not found until you remove it. Dashboards find hosts with Bonjour on the
+local network, as pairing Macs does.
 
 ## Settings from CLI and MCP
 

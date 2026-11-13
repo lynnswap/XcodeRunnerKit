@@ -103,7 +103,7 @@
         "INFOPLIST_KEY_CFBundleDisplayName": "XcodeHomeRunner",
         "INFOPLIST_KEY_LSApplicationCategoryType": "public.app-category.developer-tools",
         "INFOPLIST_KEY_LSUIElement": "YES",
-        "INFOPLIST_KEY_NSLocalNetworkUsageDescription": "Pairs this Mac with your other Macs on the local network so that one of them can manage their runners.",
+        "INFOPLIST_KEY_NSLocalNetworkUsageDescription": "Finds and connects to your other Macs on the local network, to manage their runners or to show them on this Mac.",
         "INFOPLIST_KEY_NSPrincipalClass": "NSApplication",
         "INFOPLIST_KEY_NSRemovableVolumesUsageDescription": "Runs your build and test jobs from storage you selected.",
         "LD_RUNPATH_SEARCH_PATHS": "@executable_path/../Frameworks",

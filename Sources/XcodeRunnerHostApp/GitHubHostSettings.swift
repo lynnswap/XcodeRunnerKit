@@ -39,7 +39,7 @@ final class GitHubHostSettings {
     private let pool: HostExecutionPool
     private let openURL: @MainActor (URL) -> Bool
     /// The Macs that this host manages. They register runners for the same repositories as this Mac.
-    @ObservationIgnored weak var pairedMacs: ManagedMacs?
+    @ObservationIgnored weak var pairedMacs: PairedMacs?
     /// This Mac's pairing with a managing host, which then registers this Mac's runners instead.
     @ObservationIgnored weak var management: HostManagement?
     private var pairedProvisioners: [HostPairing.ID: RunnerProvisioner] = [:]
@@ -341,7 +341,7 @@ final class GitHubHostSettings {
 
     /// Reconciles the runners of a Mac that this host manages, with that Mac's job limit.
     private func pairedStatuses(
-        of mac: ManagedMac, in pairedMacs: ManagedMacs,
+        of mac: PairedMac, in pairedMacs: PairedMacs,
         repositories: [GitHubRepository], unlinked: [GitHubRepository], token: String
     ) async throws -> [RepositoryRunnerStatus] {
         // A Mac that does not answer keeps its runners until both sides are read again at the next synchronization.

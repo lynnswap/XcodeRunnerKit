@@ -121,6 +121,21 @@ wait "$PID"
     return directory
 
 
+# Opened without --host on a Mac where no host is installed, the app is a dashboard and creates nothing for a host.
+with tempfile.TemporaryDirectory(prefix='Dashboard test ') as temporary:
+    home = Path(temporary)/'home'
+    home.mkdir()
+    with (Path(temporary)/'dashboard.log').open('wb') as log:
+        watched = HostOutput([executable, '--home-directory', str(home)], log)
+        try:
+            wait_for(lambda: watched.contains('Dashboard started.'), 'The app did not open as a dashboard')
+            assert not any(home.iterdir()), f'The dashboard created host files: {sorted(home.rglob("*"))}'
+        finally:
+            watched.process.kill()
+            watched.process.wait()
+            watched.close()
+
+
 with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as temporary:
     root = Path(temporary)
     home = root / 'home'
@@ -133,7 +148,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     first = fixture(runners, '.hidden-first')
     excluded = fixture(runners, 'individual')
     (excluded / '.service').touch()
-    arguments = [executable, '--home-directory', str(home)]
+    arguments = [executable, '--host', '--home-directory', str(home)]
     environment = {**os.environ, 'HOME':str(home),
                    'PATH':str(Path(executable).parent)+os.pathsep+os.environ['PATH']}
     with (root/'host.log').open('w') as log:
@@ -293,7 +308,7 @@ with open(sys.argv[1], 'a+b') as coordinator:
     try:
         wait_for(ready.exists, 'External process did not hold the storage coordinator')
         with (root/'host.log').open('wb') as log:
-            watched = HostOutput([executable, '--home-directory', str(home)], log, env=environment)
+            watched = HostOutput([executable, '--host', '--home-directory', str(home)], log, env=environment)
             host = watched.process
             wait_for(lambda: watched.contains('Runner host started for '),
                      'Host did not announce startup while storage was locked')
@@ -342,7 +357,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost unavailable storage ') as te
     unavailable = root/'Disconnected storage'
     source.rename(unavailable)
     with (root/'host.log').open('wb') as log:
-        watched = HostOutput([executable, '--home-directory', str(home)], log, env=environment)
+        watched = HostOutput([executable, '--host', '--home-directory', str(home)], log, env=environment)
         host = watched.process
         try:
             wait_for(lambda: watched.contains('Waiting for runner storage'),
@@ -381,7 +396,7 @@ with open(sys.argv[1], 'a+b') as coordinator:
     try:
         wait_for(ready.exists, 'External process did not hold the pool coordinator')
         first = fixture(runners, 'first')
-        arguments = [executable, '--home-directory', str(home)]
+        arguments = [executable, '--host', '--home-directory', str(home)]
         with (root/'host.log').open('w') as log:
             host = subprocess.Popen(arguments, stdout=log, stderr=log)
             try:
@@ -413,7 +428,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost storage change ') as tempora
     first = fixture(runners, 'first')
     credential = b'unchanged registration credentials'
     (first/'.credentials').write_bytes(credential)
-    arguments = [executable, '--home-directory', str(home)]
+    arguments = [executable, '--host', '--home-directory', str(home)]
     with (root/'host.log').open('w') as log:
         host = subprocess.Popen(arguments, stdout=log, stderr=log)
         try:
@@ -477,4 +492,4 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost storage change ') as tempora
         finally:
             stop_host(host, runners)
 
-print('PASS: runner lifecycle, hidden runner discovery, removal of runners unregistered from GitHub, prompt shutdown while storage is locked, recovery when unavailable storage returns, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')
+print('PASS: dashboard launch without host files, runner lifecycle, hidden runner discovery, removal of runners unregistered from GitHub, prompt shutdown while storage is locked, recovery when unavailable storage returns, pool-lock independence, storage snapshot, next-launch migration, retained source and credentials, visible failure without listeners, and recovery with another storage folder')

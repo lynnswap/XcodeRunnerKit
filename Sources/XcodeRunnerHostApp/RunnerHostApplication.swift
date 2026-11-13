@@ -9,10 +9,12 @@ import XcodeRunnerKit
 struct HostOptions: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "XcodeHomeRunner",
-        abstract: "Host opted-in GitHub Actions runners in a macOS menu bar app."
+        abstract: "Host opted-in GitHub Actions runners in a macOS menu bar app, or show hosts on other Macs."
     )
 
     @Option(help: .hidden) var homeDirectory: String?
+    /// Runs the menu bar host. The installed LaunchAgent passes this; opening the app without it shows a dashboard.
+    @Flag(help: .hidden) var host = false
     @Flag(help: .hidden) var settingsService = false
 
     @Option(help: .hidden) var serviceDirectory: String?
@@ -22,11 +24,21 @@ struct HostOptions: ParsableCommand {
     var installation: HostInstallation {
         HostInstallation(homeDirectory: homeDirectory.map { URL(filePath: $0) } ?? HostInstallation.defaultHomeDirectory)
     }
+
+    func validate() throws {
+        // A LaunchAgent written before dashboards passes only this flag. Starting a dashboard for it would leave the
+        // Mac's runners stopped without an error.
+        if settingsService && !host {
+            throw ValidationError("--settings-service requires --host. Run the installer in this app to update the LaunchAgent.")
+        }
+    }
 }
 
 /// The host app's entry point. The app target calls `main()` from its `main.swift`.
 public enum RunnerHostApplication {
-    /// Runs the menu bar host, or a runner service helper when launched with `--service-directory`.
+    /// Runs the menu bar host when launched with `--host`, and a runner service helper when launched with
+    /// `--service-directory`. Opened without either, the app starts the host that the installer set up on this Mac,
+    /// or shows a dashboard of hosts on other Macs when this Mac has none.
     @MainActor public static func main() {
         do {
             let options = try HostOptions.parse()
@@ -43,8 +55,24 @@ public enum RunnerHostApplication {
                 withExtendedLifetime(service) { dispatchMain() }
             }
             let installation = options.installation
-            let host = try RunnerHost(installation: installation, settingsService: options.settingsService)
             let application = NSApplication.shared
+            if !options.host {
+                guard let label = Bundle.main.bundleIdentifier, hasInstalledHost(label, in: installation) else {
+                    // Only the pairings are kept, in the Keychain: a dashboard creates nothing under the host's folders.
+                    let dashboard = Dashboard(hosts: PairedMacs(
+                        store: KeychainSecretStore.dashboardHosts(hostRoot: installation.hostRoot), name: HostPane.macName,
+                        role: .dashboard
+                    ))
+                    application.setActivationPolicy(.regular)
+                    application.delegate = dashboard
+                    withExtendedLifetime(dashboard) { application.run() }
+                    return
+                }
+                // This Mac's host owns its runners, so opening the app starts it, as it did before dashboards. If
+                // launchd cannot start its service, the host runs in this process without the settings service.
+                if startInstalledHost(label) { return }
+            }
+            let host = try RunnerHost(installation: installation, settingsService: options.settingsService)
             application.setActivationPolicy(.accessory)
             application.delegate = host
             withExtendedLifetime(host) { application.run() }
@@ -52,6 +80,22 @@ public enum RunnerHostApplication {
             HostOptions.exit(withError: error)
         }
     }
+}
+
+/// Whether the installer set up a host for this user, which it does by writing the host's LaunchAgent.
+private func hasInstalledHost(_ label: String, in installation: HostInstallation) -> Bool {
+    let agent = installation.homeDirectory.appending(path: "Library/LaunchAgents/\(label).plist")
+    return FileManager.default.fileExists(atPath: agent.path(percentEncoded: false))
+}
+
+/// Asks launchd to start the installed host's service.
+private func startInstalledHost(_ label: String) -> Bool {
+    let launchctl = Process()
+    launchctl.executableURL = URL(filePath: "/bin/launchctl")
+    launchctl.arguments = ["kickstart", "gui/\(getuid())/\(label)"]
+    do { try launchctl.run() } catch { return false }
+    launchctl.waitUntilExit()
+    return launchctl.terminationStatus == 0
 }
 
 private extension Subprocess.PlatformOptions {

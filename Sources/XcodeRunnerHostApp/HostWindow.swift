@@ -123,7 +123,12 @@ private struct HostPaneView: View {
             case .mac: HostMacSettingsView(model: settings)
             case .managedMac(let id):
                 if let mac = settings.managedMacs.mac(id) {
-                    ManagedMacView(model: settings, mac: mac, navigation: navigation)
+                    PairedMacView(
+                        macs: settings.managedMacs, mac: mac,
+                        // This Mac registers the Mac's runners, so a changed limit is applied to them here.
+                        limitChanged: { await settings.github.synchronize() },
+                        removed: { navigation.pane = .mac }
+                    )
                 } else {
                     ContentUnavailableView("This Mac was removed", systemImage: "desktopcomputer")
                 }
@@ -313,7 +318,7 @@ final class PreviewSecretStore: SecretStore {
 
 /// The Macs that previews list under Runners.
 private let previewManagedMacs = ["m1pro", "Mac Studio"].enumerated().map { index, name in
-    ManagedMac(
+    PairedMac(
         pairing: HostPairing(id: UUID(uuidString: "6F1C0B7E-2D7A-4C55-9E0B-3E0D2B7C1A0\(index)")!, name: name, key: Data(count: 32)),
         hostID: UUID()
     )
@@ -328,6 +333,10 @@ private enum PreviewPairing {
     case waitingToPair
     /// Another Mac asks to manage this one.
     case asked(by: String)
+    /// Manages the preview Macs while other Macs show this one.
+    case shown(on: [String])
+    /// Another Mac asks to show this one.
+    case askedToShow(by: String)
 }
 
 /// A host window's content with settings in a temporary folder, GitHub answered in memory, and no Bonjour.
@@ -364,20 +373,30 @@ private func previewHostSplitViewController(
     case .managed(let name):
         let manager = HostPairing(id: UUID(), name: name, key: Data(count: 32))
         try? managingHost.write(JSONEncoder().encode(HostManagement.Record(hostID: UUID(), manager: manager)))
-    case .none, .waitingToPair, .asked: break
+    case .shown(let names):
+        try? managedMacStore.write(JSONEncoder().encode(previewManagedMacs))
+        let dashboards = names.map { HostPairing(id: UUID(), name: $0, key: Data(count: 32)) }
+        try? managingHost.write(JSONEncoder().encode(HostManagement.Record(hostID: UUID(), dashboards: dashboards)))
+    case .none, .waitingToPair, .asked, .askedToShow: break
     }
     let settings = HostSettingsModel(
         installation: installation, github: github,
         management: HostManagement(store: managingHost, name: HostPane.macName, advertises: false),
-        managedMacs: ManagedMacs(store: managedMacStore, name: HostPane.macName, browses: false)
+        managedMacs: PairedMacs(store: managedMacStore, name: HostPane.macName, role: .manager, browses: false)
     )
     switch pairing {
     case .waitingToPair: settings.management.allowManagement()
     case .asked(let name):
-        requestPreviewPairing(from: ManagedMacs(store: PreviewSecretStore(), name: name, browses: false), with: settings.management)
+        requestPreviewPairing(
+            from: PairedMacs(store: PreviewSecretStore(), name: name, role: .manager, browses: false), with: settings.management
+        )
+    case .askedToShow(let name):
+        requestPreviewPairing(
+            from: PairedMacs(store: PreviewSecretStore(), name: name, role: .dashboard, browses: false), with: settings.management
+        )
     case .managingConnected(let stopsAnswering):
         connectPreviewMac(previewManagedMacs[0], to: settings.managedMacs, stopsAnswering: stopsAnswering)
-    case .none, .managing, .managed: break
+    case .none, .managing, .managed, .shown: break
     }
     settings.hostState = .running
     settings.storageDidBecomeAvailable(HostInstallation.Storage(directory: installation.hostRoot.appending(path: "Storage")))
@@ -400,30 +419,34 @@ private func previewHostSplitViewController(
 
 /// Answers as `mac` over the loopback interface with its own settings, and has `macs` read them as browsing does.
 @MainActor
-private func connectPreviewMac(_ mac: ManagedMac, to macs: ManagedMacs, stopsAnswering: Bool) {
+func connectPreviewMac(_ mac: PairedMac, to macs: PairedMacs, stopsAnswering: Bool) {
     let store = PreviewSecretStore()
-    let manager = HostPairing(id: mac.id, name: HostPane.macName, key: mac.pairing.key)
-    try? store.write(JSONEncoder().encode(HostManagement.Record(hostID: mac.hostID, manager: manager)))
+    let pairing = HostPairing(id: mac.id, name: HostPane.macName, key: mac.pairing.key)
+    let record = switch macs.role {
+    case .manager: HostManagement.Record(hostID: mac.hostID, manager: pairing)
+    case .dashboard: HostManagement.Record(hostID: mac.hostID, dashboards: [pairing])
+    }
+    try? store.write(JSONEncoder().encode(record))
     let installation = HostInstallation(homeDirectory: .temporaryDirectory.appending(path: UUID().uuidString))
     let settings = HostSettingsModel(
         installation: installation,
         management: HostManagement(store: store, name: mac.name, advertises: false),
-        managedMacs: ManagedMacs(store: PreviewSecretStore(), name: mac.name, browses: false)
+        managedMacs: PairedMacs(store: PreviewSecretStore(), name: mac.name, role: .manager, browses: false)
     )
     settings.hostState = .running
     settings.storageDidBecomeAvailable(HostInstallation.Storage(directory: installation.hostRoot.appending(path: "Storage")))
     settings.runners = [
-        RunnerSettingsRow(directory: installation.runnersRoot.appending(path: "1"), name: "m1pro-XcodeRunnerKit-1", state: .running, configurationError: nil),
+        RunnerSettingsRow(directory: installation.runnersRoot.appending(path: "1"), name: "\(mac.name)-XcodeRunnerKit-1", state: .running, configurationError: nil),
     ]
     settings.management.start()
     Task {
         await settings.configureDefaultPool()
         await settings.refreshPoolStatus()
         // The preview shows the Mac as not found if it cannot listen.
-        while settings.management.managementPort == nil {
+        while settings.management.ports[mac.id] == nil {
             do { try await Task.sleep(for: .milliseconds(10)) } catch { return }
         }
-        guard let port = settings.management.managementPort else { return }
+        guard let port = settings.management.ports[mac.id] else { return }
         let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: port)
         await macs.checkStatus(of: mac.id, at: endpoint)
         if stopsAnswering {
@@ -450,6 +473,12 @@ private func connectPreviewMac(_ mac: ManagedMac, to macs: ManagedMacs, stopsAns
 }
 #Preview("Managed by Another Mac", traits: .fixedLayout(width: 760, height: 620)) {
     previewHostSplitViewController(pane: .mac, isSignedIn: true, pairing: .managed(by: "m6mini"))
+}
+#Preview("Shown on Dashboards", traits: .fixedLayout(width: 760, height: 620)) {
+    previewHostSplitViewController(pane: .mac, isSignedIn: true, pairing: .shown(on: ["MacBook Pro", "Mac Studio"]))
+}
+#Preview("Dashboard Pairing Request", traits: .fixedLayout(width: 760, height: 620)) {
+    previewHostSplitViewController(pane: .mac, isSignedIn: true, pairing: .askedToShow(by: "MacBook Pro"))
 }
 #Preview("Overview Managed by Another Mac", traits: .fixedLayout(width: 760, height: 620)) {
     previewHostSplitViewController(pane: .overview, isSignedIn: true, pairing: .managed(by: "m6mini"))

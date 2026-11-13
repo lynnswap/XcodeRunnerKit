@@ -86,7 +86,7 @@ identifier="lynnpd.xcodehomerunner"
 plist=Path.home()/"Library/LaunchAgents"/(identifier+".plist")
 plist.write_bytes(plistlib.dumps({
     "Label": identifier,
-    "ProgramArguments": [str(app/"Contents/MacOS/XcodeHomeRunner"), "--settings-service"],
+    "ProgramArguments": [str(app/"Contents/MacOS/XcodeHomeRunner"), "--host", "--settings-service"],
     "MachServices": {"lynnpd.xcodehomerunner.settings": True},
     "AssociatedBundleIdentifiers": [identifier],
     "RunAtLoad": True,
