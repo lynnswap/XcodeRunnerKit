@@ -248,6 +248,9 @@ final class HostSettingsModel: HostSettingsDisplay {
     var storageDirectoryInput = ""
     /// Stops the host and has launchd start it again. `nil` for a host that launchd did not start.
     var restartHost: (@MainActor () -> Void)?
+    /// Whether this Mac accepted a paired Mac's request to restart. It then takes no other change, whatever state the
+    /// host reaches before it stops.
+    private var hasAcceptedRestart = false
 
     init(
         installation: HostInstallation, github: GitHubHostSettings? = nil,
@@ -299,10 +302,12 @@ final class HostSettingsModel: HostSettingsDisplay {
     }
 
     /// Whether the storage folder can be edited and saved. It stays available while the host needs attention.
-    var canEditStorage: Bool { !isSavingStorage && hostState != .stopping }
+    var canEditStorage: Bool { !isSavingStorage && hostState != .stopping && !hasAcceptedRestart }
 
     /// A restart waits for a save in progress, whose folder or limit the next launch would otherwise not have.
-    var canRestart: Bool { restartHost != nil && hostState != .stopping && !isSaving && !isSavingStorage }
+    var canRestart: Bool {
+        restartHost != nil && hostState != .stopping && !hasAcceptedRestart && !isSaving && !isSavingStorage
+    }
 
     /// Restarts the host, which applies a saved storage folder. Runner services stop until it has started again.
     func restart() {
@@ -425,7 +430,9 @@ final class HostSettingsModel: HostSettingsDisplay {
         }
     }
 
-    var canApplyPoolConfiguration: Bool { hasLoadedPoolStatus && !isSaving && !github.isBusy && hostState != .stopping }
+    var canApplyPoolConfiguration: Bool {
+        hasLoadedPoolStatus && !isSaving && !github.isBusy && hostState != .stopping && !hasAcceptedRestart
+    }
 
     func applyPoolConfiguration() async {
         guard canApplyPoolConfiguration else { return }
@@ -487,7 +494,7 @@ final class HostSettingsModel: HostSettingsDisplay {
         guard canRestart else {
             throw HostSettingsError("\(HostPane.macName) cannot restart XcodeHomeRunner by itself. Restart it on that Mac.")
         }
-        hostState = .stopping
+        hasAcceptedRestart = true
     }
 
     /// Restarts the host once the paired Mac that asked has the reply.
