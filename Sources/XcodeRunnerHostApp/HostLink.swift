@@ -27,6 +27,7 @@ struct HostPairing: Codable, Equatable, Identifiable, Sendable {
 enum HostLinkRequest: Codable, Sendable {
     case settings(HostSettingsRequest)
     case github(GitHubRequest)
+    case macs(ManagedMacsRequest)
     case runners(RunnerRequest)
     /// Asks the Mac to forget this pairing.
     case unpair
@@ -66,6 +67,7 @@ enum RunnerRequest: Codable, Sendable {
 enum HostLinkReply: Codable, Sendable {
     case settings(HostSettingsReport)
     case github(GitHubReport)
+    case macs(ManagedMacsReport)
     case hostName(String)
     case runners(RunnerInventory)
     case archive(URL)

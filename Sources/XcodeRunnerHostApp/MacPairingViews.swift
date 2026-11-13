@@ -1,13 +1,13 @@
 import SwiftUI
 
-/// Pairs this Mac with a Mac that waits to pair: a Mac for this host to manage, or a host for this dashboard to show.
+/// Pairs with a Mac that waits to pair: a Mac for a host to manage, or a host for this dashboard to show.
 @MainActor
-struct AddMacView: View {
-    let macs: PairedMacs
-    let paired: (PairedMac) -> Void
+struct AddMacView<Macs: MacList>: View {
+    let macs: Macs
+    let paired: (ListedMac) -> Void
     let cancel: () -> Void
-    @State private var selection: PairedMacs.PairableMac.ID?
-    @State private var pairing: (mac: PairedMacs.PairableMac, task: Task<Void, Never>)?
+    @State private var selection: WaitingMac.ID?
+    @State private var pairing: (mac: WaitingMac, task: Task<Void, Never>)?
     @State private var errorMessage: String?
 
     var body: some View {
@@ -56,14 +56,14 @@ struct AddMacView: View {
             pairing?.task.cancel()
             macs.stopDiscoveringPairableMacs()
         }
-        .onChange(of: macs.pairableMacs, initial: true) {
-            if selectedMac == nil { selection = macs.pairableMacs.first?.id }
+        .onChange(of: macs.waitingMacs, initial: true) {
+            if selectedMac == nil { selection = macs.waitingMacs.first?.id }
         }
     }
 
     private var macList: some View {
         Section {
-            if macs.pairableMacs.isEmpty {
+            if macs.waitingMacs.isEmpty {
                 if let message = macs.discoveryMessage {
                     ErrorText(message)
                 } else {
@@ -74,7 +74,7 @@ struct AddMacView: View {
                 }
             } else {
                 Picker("Mac", selection: $selection) {
-                    ForEach(macs.pairableMacs) { mac in Text(mac.name).tag(Optional(mac.id)) }
+                    ForEach(macs.waitingMacs) { mac in Text(mac.name).tag(Optional(mac.id)) }
                 }
                 .pickerStyle(.radioGroup)
                 .labelsHidden()
@@ -107,14 +107,14 @@ struct AddMacView: View {
         }
     }
 
-    private var selectedMac: PairedMacs.PairableMac? { macs.pairableMacs.first { $0.id == selection } }
+    private var selectedMac: WaitingMac? { macs.waitingMacs.first { $0.id == selection } }
 
     private func pair() {
         guard let mac = selectedMac else { return }
         errorMessage = nil
         let task = Task {
             do {
-                paired(try await macs.pair(at: mac.endpoint))
+                paired(try await macs.pair(with: mac.id))
             } catch is CancellationError {
             } catch {
                 errorMessage = "Could not pair with \(mac.name): \(error.localizedDescription)"
@@ -140,11 +140,11 @@ struct PairingCode: View {
     }
 }
 
-/// A Mac that this Mac paired with: one that this host manages, or a host that this dashboard shows.
+/// A Mac in a list of paired Macs: one that a host manages, or a host that this dashboard shows.
 @MainActor
-struct PairedMacView: View {
-    let macs: PairedMacs
-    let mac: PairedMac
+struct PairedMacView<Macs: MacList>: View {
+    let macs: Macs
+    let mac: ListedMac
     /// Called after the Mac saved a different job limit. A managing host then registers the Mac's runners.
     let limitChanged: () async -> Void
     /// Called after the pairing ended and the Mac left the list.
@@ -153,10 +153,9 @@ struct PairedMacView: View {
     @State private var isRemoving = false
 
     var body: some View {
-        let status = macs.status(of: mac.id)
-        let settings = macs.settings[mac.id]
+        let settings = macs.settings(of: mac.id)
         // Settings from an earlier read may have changed since, so they appear only while the Mac answers.
-        let report = status == .online ? settings?.report : nil
+        let report = macs.status(of: mac.id) == .online ? settings?.report : nil
         Form {
             Section {
                 PairedMacConnectionRows(macs: macs, mac: mac)
@@ -183,13 +182,13 @@ struct PairedMacView: View {
                 Task {
                     await macs.remove(mac.id)
                     isRemoving = false
-                    if macs.mac(mac.id) == nil { removed() }
+                    if !macs.listedMacs.contains(mac) { removed() }
                 }
             }
         } message: {
             switch macs.role {
             case .manager:
-                Text("\(mac.name) stops accepting this Mac as its managing host. To manage it again, pair the Macs again.")
+                Text("\(mac.name) stops accepting \(macs.pairedWith.object) as its managing host. To manage it again, pair the Macs again.")
             case .dashboard:
                 Text("\(mac.name) stops accepting this Mac as a dashboard. To show it again, pair the Macs again.")
             }
@@ -201,9 +200,9 @@ struct PairedMacView: View {
 
 /// Whether a paired Mac answers and, while it does not, when its settings were last read.
 @MainActor
-struct PairedMacConnectionRows: View {
-    let macs: PairedMacs
-    let mac: PairedMac
+struct PairedMacConnectionRows<Macs: MacList>: View {
+    let macs: Macs
+    let mac: ListedMac
 
     var body: some View {
         let status = macs.status(of: mac.id)
@@ -216,17 +215,22 @@ struct PairedMacConnectionRows: View {
         }
         switch status {
         case .notFound:
-            Text("\(mac.name) appears here while XcodeHomeRunner runs on it and both Macs are on the same local network. \(endedElsewhere)")
+            Text("\(mac.name) appears here while XcodeHomeRunner runs on it and \(sameNetwork). \(endedElsewhere)")
                 .font(.callout).foregroundStyle(.secondary)
         case .rejected:
-            Text("\(mac.name) no longer accepts this Mac. Remove it, then pair again.")
+            Text("\(mac.name) no longer accepts \(macs.pairedWith.object). Remove it, then pair again.")
                 .font(.callout).foregroundStyle(.secondary)
         case .unreachable(let message): ErrorText(message)
         case .checking, .online: EmptyView()
         }
-        if status != .online, let readAt = macs.settings[mac.id]?.readAt {
+        if status != .online, let readAt = macs.settings(of: mac.id)?.readAt {
             LabeledContent("Settings last read") { Text(readAt, format: .dateTime) }
         }
+    }
+
+    /// Where the Mac has to be for the Mac that is paired with it to find it.
+    private var sameNetwork: String {
+        macs.pairedWith.name.map { "it is on the same local network as \($0)" } ?? "both Macs are on the same local network"
     }
 
     /// What to do here when the pairing was ended on the other Mac.
@@ -240,9 +244,9 @@ struct PairedMacConnectionRows: View {
 
 /// A paired Mac's runner services and execution settings, with the controls of the Mac's own window.
 @MainActor
-private struct PairedMacSettingsSections: View {
-    let macs: PairedMacs
-    let mac: PairedMac
+private struct PairedMacSettingsSections<Macs: MacList>: View {
+    let macs: Macs
+    let mac: ListedMac
     @Bindable var settings: PairedMacSettings
     let report: HostSettingsReport
     let limitChanged: () async -> Void
@@ -416,7 +420,7 @@ private struct PairingWindowRows: View {
     private var instruction: String {
         switch window.role {
         case .manager: "On the managing Mac, choose Add Mac… and select \(HostPane.macName)."
-        case .dashboard: "On the other Mac, open XcodeHomeRunner, choose Add Mac…, and select \(HostPane.macName)."
+        case .dashboard: "On the other Mac, open XcodeHomeRunner, choose Add Mac… > Show a Mac on This Dashboard…, and select \(HostPane.macName)."
         }
     }
 }

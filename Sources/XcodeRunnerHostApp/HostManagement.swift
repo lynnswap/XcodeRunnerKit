@@ -127,6 +127,20 @@ final class HostManagement {
                         do { delivery = .success(try await reply(answer)) } catch { delivery = .failure(error) }
                         if case .applySelection = request, case .github = answer { await github.synchronizeDashboardSelection() }
                         try delivery.get()
+                    case .macs(let request):
+                        // The Macs that this Mac manages accept it, and a dashboard reaches them through it.
+                        guard role == .dashboard, let settings = await self.settings else {
+                            try await reply(.refused(role == .dashboard
+                                ? "\(self.name) cannot share its Macs."
+                                : "\(self.name) shares its Macs only with a dashboard."))
+                            return
+                        }
+                        let answer = await settings.managedMacsRelay.answer(request, from: pairing.id)
+                        // The limit is saved, so registering runners for it does not depend on the reply arriving.
+                        let delivery: Result<Void, any Error>
+                        do { delivery = .success(try await reply(answer.reply)) } catch { delivery = .failure(error) }
+                        if answer.limitChanged { await settings.github.synchronize() }
+                        try delivery.get()
                     case .runners(let request):
                         guard role == .manager, let github = await self.settings?.github else {
                             try await reply(.refused(role == .manager

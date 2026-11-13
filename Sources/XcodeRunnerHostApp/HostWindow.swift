@@ -132,7 +132,7 @@ private struct HostPaneView: View {
             case .managedMac(let id):
                 if let mac = settings.managedMacs.mac(id) {
                     PairedMacView(
-                        macs: settings.managedMacs, mac: mac,
+                        macs: settings.managedMacs, mac: mac.listed,
                         // This Mac registers the Mac's runners, so a changed limit is applied to them here.
                         limitChanged: { await settings.github.synchronize() },
                         removed: { navigation.pane = .mac }
@@ -162,8 +162,9 @@ struct HostOverviewView<Settings: HostSettingsDisplay>: View {
     let settings: Settings
     let github: GitHubReport
     let mac: MacReference
-    /// Why the Mac refused the last GitHub request from a dashboard, or why it did not confirm it.
-    var requestError: String?
+    /// What a dashboard's last requests to the Mac left to tell: a refusal, or a Mac that was removed but could not
+    /// be told.
+    var notices: [String] = []
     let actions: GitHubActions
     /// Shows the GitHub pane, where the sign-in code and the repository selection are.
     let showGitHub: () -> Void
@@ -187,8 +188,8 @@ struct HostOverviewView<Settings: HostSettingsDisplay>: View {
             } footer: {
                 if github.managesMacs { Text("Counts include the Macs that \(mac.object) manages.") }
             }
-            if let requestError {
-                Section { ErrorText(requestError) }
+            if !notices.isEmpty {
+                Section { ForEach(notices, id: \.self) { ErrorText($0) } }
             }
         }
     }
@@ -439,8 +440,10 @@ private func previewGitHubSettings(installation: HostInstallation, isSignedIn: B
 }
 
 /// Answers as `mac` over the loopback interface with its own settings, and has `macs` read them as browsing does.
+///
+/// - Parameter managing: A Mac that the answering Mac manages, which a dashboard then lists under it.
 @MainActor
-func connectPreviewMac(_ mac: PairedMac, to macs: PairedMacs, stopsAnswering: Bool) {
+func connectPreviewMac(_ mac: PairedMac, to macs: PairedMacs, stopsAnswering: Bool, managing managed: PairedMac? = nil) {
     let store = PreviewSecretStore()
     let pairing = HostPairing(id: mac.id, name: HostPane.macName, key: mac.pairing.key)
     let record = switch macs.role {
@@ -449,11 +452,14 @@ func connectPreviewMac(_ mac: PairedMac, to macs: PairedMacs, stopsAnswering: Bo
     }
     try? store.write(JSONEncoder().encode(record))
     let installation = HostInstallation(homeDirectory: .temporaryDirectory.appending(path: UUID().uuidString))
+    let managedMacs = PreviewSecretStore()
+    if let managed { try? managedMacs.write(JSONEncoder().encode([managed])) }
     let settings = HostSettingsModel(
         installation: installation, github: previewGitHubSettings(installation: installation, isSignedIn: true),
         management: HostManagement(store: store, name: mac.name, advertises: false),
-        managedMacs: PairedMacs(store: PreviewSecretStore(), name: mac.name, role: .manager, browses: false)
+        managedMacs: PairedMacs(store: managedMacs, name: mac.name, role: .manager, browses: false)
     )
+    if let managed { connectPreviewMac(managed, to: settings.managedMacs, stopsAnswering: false) }
     settings.hostState = .running
     settings.storageDidBecomeAvailable(HostInstallation.Storage(directory: installation.hostRoot.appending(path: "Storage")))
     settings.runners = [

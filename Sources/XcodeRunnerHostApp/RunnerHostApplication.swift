@@ -359,6 +359,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             for runner in runners.values { runner.task.cancel() }
             await settings.github.shutDown()
             await settings.management.shutDown()
+            await settings.managedMacsRelay.shutDown()
             await settings.managedMacs.shutDown()
             await storagePreparation?.value
             await monitoring?.value
