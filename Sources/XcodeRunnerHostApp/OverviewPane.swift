@@ -97,38 +97,18 @@ final class OverviewModel {
 
 /// The Overview pane: a Mac's status, setup steps, and repositories.
 @MainActor
-final class OverviewViewController: NSViewController {
-    private let model: OverviewModel
-    private var watching: Task<Void, Never>?
-
+final class OverviewViewController: NSHostingController<OverviewView> {
     init(model: OverviewModel) {
-        self.model = model
-        super.init(nibName: nil, bundle: nil)
+        super.init(rootView: OverviewView(model: model))
+        // The split view and the window decide the pane's size.
+        sizingOptions = []
     }
 
     required init?(coder: NSCoder) { nil }
-
-    override func loadView() {
-        let hosting = NSHostingView(rootView: OverviewView(model: model))
-        // The split view and the window decide the pane's size.
-        hosting.sizingOptions = []
-        view = hosting
-    }
-
-    override func viewWillAppear() {
-        super.viewWillAppear()
-        watching = Task { [model] in await model.watch() }
-    }
-
-    override func viewDidDisappear() {
-        super.viewDidDisappear()
-        watching?.cancel()
-        watching = nil
-    }
 }
 
 @MainActor
-private struct OverviewView: View {
+struct OverviewView: View {
     let model: OverviewModel
 
     var body: some View {
@@ -160,6 +140,7 @@ private struct OverviewView: View {
             }
         }
         .formStyle(.grouped)
+        .task { await model.watch() }
     }
 
     @ViewBuilder

@@ -293,42 +293,27 @@ final class MacPaneModel {
 
 /// A Mac's pane: its pairings, runner services, and execution settings.
 @MainActor
-final class MacViewController: NSViewController {
-    private let model: MacPaneModel
-    private var watching: Task<Void, Never>?
-
+final class MacViewController: NSHostingController<MacPaneView> {
     init(model: MacPaneModel) {
-        self.model = model
-        super.init(nibName: nil, bundle: nil)
+        super.init(rootView: MacPaneView(model: model))
+        // The split view and the window decide the pane's size.
+        sizingOptions = []
     }
 
     required init?(coder: NSCoder) { nil }
-
-    override func loadView() {
-        let hosting = NSHostingView(rootView: MacPaneView(model: model))
-        // The split view and the window decide the pane's size.
-        hosting.sizingOptions = []
-        view = hosting
-    }
-
-    override func viewWillAppear() {
-        super.viewWillAppear()
-        watching = Task { [model] in await model.watch() }
-    }
-
-    override func viewDidDisappear() {
-        super.viewDidDisappear()
-        watching?.cancel()
-        watching = nil
-    }
 }
 
 @MainActor
-private struct MacPaneView: View {
+struct MacPaneView: View {
     @Bindable var model: MacPaneModel
     @State private var isConfirmingRemoval = false
 
     var body: some View {
+        content.task { await model.watch() }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         if model.isRemoved {
             ContentUnavailableView("This Mac was removed", systemImage: "desktopcomputer")
         } else {

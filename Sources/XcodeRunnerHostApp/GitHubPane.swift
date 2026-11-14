@@ -124,38 +124,18 @@ final class GitHubPaneModel {
 
 /// The GitHub pane: a Mac's GitHub sign-in and repository selection.
 @MainActor
-final class GitHubViewController: NSViewController {
-    private let model: GitHubPaneModel
-    private var watching: Task<Void, Never>?
-
+final class GitHubViewController: NSHostingController<GitHubPaneView> {
     init(model: GitHubPaneModel) {
-        self.model = model
-        super.init(nibName: nil, bundle: nil)
+        super.init(rootView: GitHubPaneView(model: model))
+        // The split view and the window decide the pane's size.
+        sizingOptions = []
     }
 
     required init?(coder: NSCoder) { nil }
-
-    override func loadView() {
-        let hosting = NSHostingView(rootView: GitHubPaneView(model: model))
-        // The split view and the window decide the pane's size.
-        hosting.sizingOptions = []
-        view = hosting
-    }
-
-    override func viewWillAppear() {
-        super.viewWillAppear()
-        watching = Task { [model] in await model.watch() }
-    }
-
-    override func viewDidDisappear() {
-        super.viewDidDisappear()
-        watching?.cancel()
-        watching = nil
-    }
 }
 
 @MainActor
-private struct GitHubPaneView: View {
+struct GitHubPaneView: View {
     @Bindable var model: GitHubPaneModel
 
     var body: some View {
@@ -176,6 +156,7 @@ private struct GitHubPaneView: View {
         }
         .formStyle(.grouped)
         .disabled(model.isWaiting)
+        .task { await model.watch() }
     }
 
     private func account(_ github: GitHubReport) -> some View {

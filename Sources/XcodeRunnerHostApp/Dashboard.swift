@@ -302,28 +302,18 @@ final class DashboardSplitViewController: PaneSplitViewController {
 
 /// The dashboard's pane while it shows no host.
 @MainActor
-final class NoMacsViewController: NSViewController {
-    private let hosts: PairedMacs
-    private let addMac: @MainActor () -> Void
-
+final class NoMacsViewController: NSHostingController<NoMacsView> {
     /// - Parameter addMac: Pairs the dashboard with a Mac that runs a host.
     init(hosts: PairedMacs, addMac: @escaping @MainActor () -> Void) {
-        self.hosts = hosts
-        self.addMac = addMac
-        super.init(nibName: nil, bundle: nil)
+        super.init(rootView: NoMacsView(hosts: hosts, addMac: addMac))
+        sizingOptions = []
     }
 
     required init?(coder: NSCoder) { nil }
-
-    override func loadView() {
-        let hosting = NSHostingView(rootView: NoMacsView(hosts: hosts, addMac: addMac))
-        hosting.sizingOptions = []
-        view = hosting
-    }
 }
 
 @MainActor
-private struct NoMacsView: View {
+struct NoMacsView: View {
     let hosts: PairedMacs
     let addMac: @MainActor () -> Void
 
