@@ -170,8 +170,8 @@ One host can list the other XcodeHomeRunner hosts on your local network under
 
 1. On the Mac to add, open **Settings…**, select that Mac under **Runners**, and
    choose **Allow Management…**. The Mac waits five minutes for a managing Mac.
-2. On the managing Mac, choose **Add Mac…** at the bottom of the sidebar, select
-   the Mac, and choose **Continue**. Both Macs show a six-digit code.
+2. On the managing Mac, choose **Add Mac** in the window's toolbar, select the
+   Mac, and choose **Continue**. Both Macs show a six-digit code.
 3. If the codes match, choose **Pair** on the managing Mac and **Allow** on the
    added Mac. A different code means that another device answered, so choose
    **Don't Allow**.
@@ -181,7 +181,7 @@ the pairing key in its Keychain, and the key never crosses the network. The
 added Mac considers one request at a time. It stops waiting when you choose
 **Don't Allow** or when a request ends before the Macs pair; choose **Allow
 Management…** again to retry. Pairing uses Bonjour, so macOS asks for local
-network access the first time you choose **Allow Management…** or **Add Mac…**.
+network access the first time you choose **Allow Management…** or **Add Mac**.
 If you declined, allow XcodeHomeRunner in **System Settings > Privacy &
 Security > Local Network**.
 
@@ -218,8 +218,9 @@ only its pairings, in that Mac's Keychain.
 
 1. On the host, open **Settings…**, select that Mac under **Runners**, and choose
    **Allow Dashboard…**. The host waits five minutes for a dashboard.
-2. On the other Mac, open XcodeHomeRunner, choose **Add Mac…** > **Show a Mac on
-   This Dashboard…**, select the host, and choose **Continue**. Both Macs show a
+2. On the other Mac, open XcodeHomeRunner, choose **Add Mac** in the toolbar and
+   then **Show a Mac on This Dashboard…**, select the host, and choose
+   **Continue**. The **File** menu has the same command. Both Macs show a
    six-digit code.
 3. If the codes match, choose **Pair** on the dashboard and **Allow** on the
    host. A different code means that another device answered, so choose
@@ -246,7 +247,7 @@ appear within a few seconds.
 The dashboard reaches the Macs that a host manages through the host and does
 not pair with them. Their panes show what the host's own panes for them show,
 with the same controls, and a Mac that the host cannot reach appears that way.
-To have a host manage another Mac, choose **Add Mac…** > **Add a Mac for** the
+To have a host manage another Mac, choose **Add Mac** > **Add a Mac for** the
 host **to Manage…**. The host looks for Macs that wait after **Allow
 Management…**, and the dashboard shows the code: choose **Pair** on the
 dashboard and **Allow** on the Mac being added. **Remove Mac…** in a managed
@@ -525,7 +526,7 @@ previous app, including its CLI, as `XcodeHomeRunner.previous.app`.
 Update every Mac of a setup, dashboards included, to the same version. Paired
 Macs that run different versions keep their pairing but do not exchange
 settings: each Mac's pane for the other shows **Runs another version** and names
-the Mac to update, and **Add Mac…** lists a waiting Mac of another version
+the Mac to update, and **Add Mac** lists a waiting Mac of another version
 without pairing with it. They connect again once both run the same version. Earlier
 versions installed the CLI separately with `install-host-tools.sh`; the first
 installation of an app that contains the CLI keeps that copy as

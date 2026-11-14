@@ -215,7 +215,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private var settingsServer: HostSettingsServer?
     private var statusItem: NSStatusItem?
     private var poolMenuItem: NSMenuItem?
-    private var settingsWindow: NSWindow?
+    private var settingsWindow: PaneWindowController?
     private var monitoring: Task<Void, Never>?
     private var poolMonitoring: Task<Void, Never>?
     private var githubMonitoring: Task<Void, Never>?
@@ -378,9 +378,9 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showSettings(_ sender: Any?) {
-        if settingsWindow == nil { settingsWindow = makeHostWindow(settings: settings) }
+        if settingsWindow == nil { settingsWindow = makeHostWindowController(settings: settings) }
         NSApplication.shared.activate()
-        settingsWindow?.makeKeyAndOrderFront(nil)
+        settingsWindow?.showWindow(nil)
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

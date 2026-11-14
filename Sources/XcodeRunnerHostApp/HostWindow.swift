@@ -25,11 +25,11 @@ enum HostPane: Hashable {
         }
     }
 
-    var icon: Image {
+    var icon: SidebarRow.Icon {
         switch self {
-        case .overview: Image(systemName: "gauge.with.dots.needle.50percent")
-        case .github: Image("github-mark", bundle: .module)
-        case .mac, .managedMac: Image(systemName: "desktopcomputer")
+        case .overview: .symbol("gauge.with.dots.needle.50percent")
+        case .github: .template("github-mark")
+        case .mac, .managedMac: .symbol("desktopcomputer")
         }
     }
 
@@ -43,70 +43,40 @@ final class HostWindowNavigation {
     var isAddingMac = false
 }
 
-/// Creates the host window: a sidebar of panes beside the selected pane.
+/// Creates the host window: a sidebar of panes beside the selected pane, with Add Mac in its toolbar.
 @MainActor
-func makeHostWindow(settings: HostSettingsModel) -> NSWindow {
+func makeHostWindowController(settings: HostSettingsModel) -> PaneWindowController {
     let navigation = HostWindowNavigation()
-    let window = NSWindow(contentViewController: makeHostSplitViewController(settings: settings, navigation: navigation))
-    window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
-    window.toolbarStyle = .unified
-    window.title = navigation.pane.title(in: settings)
-    window.isReleasedWhenClosed = false
-    window.setContentSize(NSSize(width: 760, height: 620))
-    window.contentMinSize = NSSize(width: 640, height: 420)
-    window.setFrameAutosaveName("XcodeHomeRunnerSettings")
-    window.center()
-    return window
+    let controller = PaneWindowController(
+        split: makeHostSplitViewController(settings: settings, navigation: navigation), autosaveName: "XcodeHomeRunnerSettings",
+        addMac: .init(
+            toolTip: "Pair a Mac on the local network so that this Mac manages its runners. A Mac that another Mac manages cannot add Macs.",
+            isEnabled: { settings.canAddMacs }, perform: { navigation.isAddingMac = true }
+        )
+    )
+    // The selected pane's navigation title names the window from then on. The bridge does not apply the first title
+    // before the view is in the window.
+    controller.window?.title = navigation.pane.title(in: settings)
+    return controller
 }
 
 @MainActor
 private func makeHostSplitViewController(settings: HostSettingsModel, navigation: HostWindowNavigation) -> NSSplitViewController {
-    let sidebar = NSSplitViewItem(sidebarWithViewController: NSHostingController(rootView: HostSidebar(settings: settings, navigation: navigation)))
-    sidebar.canCollapse = false
-    sidebar.minimumThickness = 180
+    func row(_ pane: HostPane) -> SidebarRow { SidebarRow(pane: pane, title: pane.title(in: settings), icon: pane.icon) }
+    let sidebar = SidebarViewController(
+        groups: {
+            [
+                SidebarGroup(title: nil, rows: [row(.overview), row(.github)]),
+                SidebarGroup(title: "Runners", rows: [row(.mac)] + settings.managedMacs.macs.map { row(.managedMac($0.id)) }),
+            ]
+        },
+        selection: { navigation.pane },
+        // A pane always stays selected.
+        select: { if let pane = $0.base as? HostPane { navigation.pane = pane } }
+    )
     let detail = NSHostingController(rootView: HostPaneView(settings: settings, navigation: navigation))
-    // The selected pane's navigation title names the window. The window sets the first title because the bridge
-    // does not apply it before the view is in the window.
     detail.sceneBridgingOptions = [.title]
-    let split = NSSplitViewController()
-    split.addSplitViewItem(sidebar)
-    split.addSplitViewItem(NSSplitViewItem(viewController: detail))
-    return split
-}
-
-@MainActor
-private struct HostSidebar: View {
-    let settings: HostSettingsModel
-    let navigation: HostWindowNavigation
-
-    var body: some View {
-        // A sidebar click can deselect the row; a pane always stays selected.
-        let selection = Binding<HostPane?>(get: { navigation.pane }, set: { if let pane = $0 { navigation.pane = pane } })
-        List(selection: selection) {
-            row(.overview)
-            row(.github)
-            Section("Runners") {
-                row(.mac)
-                ForEach(settings.managedMacs.macs) { mac in row(.managedMac(mac.id)) }
-            }
-        }
-        .listStyle(.sidebar)
-        .safeAreaInset(edge: .bottom) {
-            HStack {
-                Button("Add Mac…", systemImage: "plus.circle") { navigation.isAddingMac = true }
-                    .buttonStyle(.borderless)
-                    .disabled(!settings.canAddMacs)
-                    .help(settings.canAddMacs ? "Pair a Mac on the local network so that this Mac manages its runners." : "This Mac is managed by another Mac, so it cannot add Macs.")
-                    .accessibilityIdentifier("add-mac")
-                Spacer()
-            }
-            .padding(10)
-        }
-    }
-
-    private func row(_ pane: HostPane) -> some View {
-        Label { Text(pane.title(in: settings)) } icon: { pane.icon }.tag(pane)
-    }
+    return makePaneSplitViewController(sidebar: sidebar, detail: detail)
 }
 
 @MainActor
