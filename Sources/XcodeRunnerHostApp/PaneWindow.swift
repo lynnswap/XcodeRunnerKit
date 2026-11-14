@@ -183,26 +183,41 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 }
 
+/// The detail side of a window: the view controller of the pane that is selected in the sidebar.
+@MainActor
+final class PaneContainerViewController: NSViewController {
+    override func loadView() { view = NSView() }
+
+    /// Shows a pane in place of the one shown before.
+    func show(_ pane: NSViewController) {
+        for child in children {
+            child.view.removeFromSuperview()
+            child.removeFromParent()
+        }
+        addChild(pane)
+        pane.view.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(pane.view)
+        NSLayoutConstraint.activate([
+            pane.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            pane.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            pane.view.topAnchor.constraint(equalTo: view.topAnchor),
+            pane.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+    }
+}
+
 /// A window's content: a sidebar of panes beside the selected pane. It gives its window the toolbar that hides the
 /// sidebar and adds Macs, so that every window that shows it has one, a preview's window included.
+///
+/// A subclass lists the panes of its window in the sidebar, shows the selected one in `detail`, and pairs with Macs.
 @MainActor
-final class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSToolbarItemValidation {
-    /// The command that pairs with a Mac. People also find it in the menu bar where the app has one.
-    struct AddMac {
-        let toolTip: String
-        /// The choices, when the window can add more than one kind of Mac. Its delegate fills it when it opens.
-        var menu: NSMenu?
-        var isEnabled: @MainActor () -> Bool = { true }
-        var perform: @MainActor () -> Void = {}
-    }
-
+class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSToolbarItemValidation {
     private static let addMacIdentifier = NSToolbarItem.Identifier("AddMac")
-    private let addMac: AddMac
+    let detail = PaneContainerViewController()
     private let autosaveName: String
 
     /// - Parameter autosaveName: Names the saved sidebar width and the toolbar.
-    init(sidebar: SidebarViewController, detail: NSViewController, addMac: AddMac, autosaveName: String) {
-        self.addMac = addMac
+    init(sidebar: SidebarViewController, autosaveName: String) {
         self.autosaveName = autosaveName
         super.init(nibName: nil, bundle: nil)
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
@@ -217,6 +232,32 @@ final class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, N
     }
 
     required init?(coder: NSCoder) { nil }
+
+    /// What the Add Mac toolbar item's help tag says about the Macs that the window adds.
+    var addMacToolTip: String { "" }
+    /// The Add Mac toolbar item's choices, in a window that adds more than one kind of Mac. The menu's delegate fills
+    /// it when it opens.
+    var addMacMenu: NSMenu? { nil }
+    var canAddMac: Bool { !isAddingMac }
+
+    /// Pairs with a Mac, in a window whose Add Mac toolbar item has no menu.
+    @objc func addMac(_ sender: Any?) {}
+
+    /// Whether the sheet that pairs with a Mac is open. One sheet pairs at a time.
+    var isAddingMac: Bool { presentedViewControllers?.contains { $0 is AddMacViewController } == true }
+
+    /// Opens the sheet that pairs with a Mac for `macs`.
+    ///
+    /// - Parameter paired: Called with the Mac after the sheet closed, unless the person cancelled.
+    func presentAddMacSheet(for macs: any MacList, paired: @escaping @MainActor (ListedMac) -> Void) {
+        let model = AddMacModel(macs: macs)
+        let sheet = AddMacViewController(model: model)
+        model.onFinish = { [weak self, weak sheet] mac in
+            if let sheet { self?.dismiss(sheet) }
+            if let mac { paired(mac) }
+        }
+        presentAsSheet(sheet)
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -247,7 +288,7 @@ final class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, N
     ) -> NSToolbarItem? {
         guard itemIdentifier == Self.addMacIdentifier else { return nil }
         let item: NSToolbarItem
-        if let menu = addMac.menu {
+        if let menu = addMacMenu {
             let menuItem = NSMenuToolbarItem(itemIdentifier: itemIdentifier)
             menuItem.menu = menu
             menuItem.showsIndicator = true
@@ -255,19 +296,17 @@ final class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, N
         } else {
             item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.target = self
-            item.action = #selector(performAddMac(_:))
+            item.action = #selector(addMac(_:))
         }
         item.label = "Add Mac"
-        item.toolTip = addMac.toolTip
+        item.toolTip = addMacToolTip
         item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Mac")
         return item
     }
 
     func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
-        item.itemIdentifier != Self.addMacIdentifier || addMac.isEnabled()
+        item.itemIdentifier != Self.addMacIdentifier || canAddMac
     }
-
-    @objc private func performAddMac(_ sender: Any?) { addMac.perform() }
 }
 
 /// Creates a window for panes, which keeps its frame under `autosaveName`.

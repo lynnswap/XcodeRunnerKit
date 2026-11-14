@@ -732,54 +732,10 @@ final class HostSettingsModel: HostSettingsDisplay {
     }
 }
 
-@MainActor
-struct HostMacSettingsView: View {
-    @Bindable var model: HostSettingsModel
-
-    var body: some View {
-        Form {
-            // Other Macs' changes to this Mac's settings appear below, so who can make them comes first.
-            HostManagementSection(model: model)
-            HostDashboardsSection(model: model)
-            RunnerServicesSection(
-                settings: model, mac: .thisMac, isChangingPause: false, pauseError: model.pauseError,
-                setPaused: { model.setPaused($0) }
-            ) {
-                Text("Processes on this Mac. Overview shows each repository's connection and job counts from GitHub.")
-            }
-            RunnerLabelsSection(
-                labels: $model.runnerLabelsInput, isSaving: model.isSavingRunnerLabels, saveError: model.runnerLabelsError,
-                mac: .thisMac
-            ) {
-                Task { await model.saveRunnerLabelsInput() }
-            }
-            XcodeExecutionSection(
-                settings: model, draft: $model.poolDraft, isSaving: model.isSaving, canApply: model.canApplyPoolConfiguration,
-                saveError: model.saveError
-            ) {
-                Task { await model.applyPoolConfiguration() }
-            }
-            XcodeSection(
-                settings: model, selection: $model.xcodeSelectionInput, isSaving: model.isSavingXcode,
-                saveError: model.xcodeSaveError, mac: .thisMac
-            ) {
-                Task { await model.saveXcodeSelection() }
-            }
-            StorageSection(
-                settings: model, directory: $model.storageDirectoryInput, isSaving: model.isSavingStorage,
-                saveError: model.storageSaveError, mac: .thisMac, isRestarting: model.hostState == .stopping, restartError: nil,
-                choose: { Task { await model.chooseStorageDirectory() } }, restart: { model.restart() }
-            ) {
-                Task { await model.saveStorageSelection() }
-            }
-        }
-    }
-}
-
 /// A Mac's runner services, in its own window or in a paired Mac's pane for it.
 @MainActor
-struct RunnerServicesSection<Settings: HostSettingsDisplay, Footer: View>: View {
-    let settings: Settings
+struct RunnerServicesSection<Footer: View>: View {
+    let settings: HostSettingsReport
     let mac: MacReference
     let isChangingPause: Bool
     /// Why the Mac did not pause or resume.
@@ -851,8 +807,8 @@ struct RunnerLabelsSection: View {
 
 /// A Mac's job limit and Simulator retention, in its own window or in a paired Mac's pane for it.
 @MainActor
-struct XcodeExecutionSection<Settings: HostSettingsDisplay>: View {
-    let settings: Settings
+struct XcodeExecutionSection: View {
+    let settings: HostSettingsReport
     @Binding var draft: PoolSettingsDraft
     let isSaving: Bool
     let canApply: Bool
@@ -895,8 +851,8 @@ struct XcodeExecutionSection<Settings: HostSettingsDisplay>: View {
 
 /// The Xcode that a Mac's jobs use when they name none, in its own window or in a paired Mac's pane for it.
 @MainActor
-struct XcodeSection<Settings: HostSettingsDisplay>: View {
-    let settings: Settings
+struct XcodeSection: View {
+    let settings: HostSettingsReport
     /// The selected Xcode's `Contents/Developer` directory, or an empty string for the system selection.
     @Binding var selection: String
     let isSaving: Bool
@@ -941,8 +897,8 @@ struct XcodeSection<Settings: HostSettingsDisplay>: View {
 
 /// A Mac's storage folder, in its own window or in a paired Mac's pane for it.
 @MainActor
-struct StorageSection<Settings: HostSettingsDisplay>: View {
-    let settings: Settings
+struct StorageSection: View {
+    let settings: HostSettingsReport
     @Binding var directory: String
     let isSaving: Bool
     let saveError: String?
