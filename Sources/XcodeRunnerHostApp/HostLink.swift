@@ -128,6 +128,8 @@ enum HostLinkReply: Codable, Sendable {
     case completed
     case unpaired
     case refused(String)
+    /// The Mac could not read the request, which a version of the app that it does not run sent.
+    case unsupported
 }
 
 /// A message from the Mac that asks to pair to a Mac that waits to pair.
@@ -158,7 +160,8 @@ struct PairingRefusal: Error {
     init(_ message: String) { self.message = message }
 }
 
-/// How another Mac's app version compares with the version of the Mac that connects to it or lists it.
+/// How the app version of a Mac that cannot do what another Mac asks compares with that Mac's: one that runs a version
+/// from before `HostLink.oldestVersion`, or one that does not know a request or cannot read a reply.
 enum VersionMismatch: String, Codable, Equatable, Sendable {
     /// The other Mac runs an older version.
     case older
@@ -169,8 +172,8 @@ enum VersionMismatch: String, Codable, Equatable, Sendable {
     init(theirs version: Int, own: Int) { self = version < own ? .older : .newer }
 }
 
-/// A request or a reply with the version of its sender's messages, so that Macs that run different versions can say
-/// so instead of failing to read each other.
+/// A request or a reply with the version of its sender's messages, so that a Mac that cannot read one can say which
+/// Mac to update.
 struct Versioned<Payload: Codable & Sendable>: Codable, Sendable {
     let version: Int
     /// `nil` when the payload could not be read, as when another version sent it.
@@ -192,7 +195,7 @@ struct Versioned<Payload: Codable & Sendable>: Codable, Sendable {
 enum HostLinkError: LocalizedError, Equatable {
     /// The TLS handshake failed: the other Mac does not have this key.
     case rejected
-    /// The other Mac runs another version of the app, and the Macs cannot read each other's messages.
+    /// The other Mac runs another version of the app, and one of the Macs could not read the other's message.
     case incompatible(VersionMismatch)
     case unreachable(String)
     case timedOut
@@ -213,7 +216,7 @@ enum HostLinkError: LocalizedError, Equatable {
         switch self {
         case .rejected: "The Mac did not accept the key."
         case .incompatible(.older): "The Mac runs an older version of XcodeHomeRunner. Update it."
-        case .incompatible(.newer): "The Mac runs a newer version of XcodeHomeRunner. Update this version to match it."
+        case .incompatible(.newer): "The Mac runs a newer version of XcodeHomeRunner. Update this Mac."
         case .unreachable(let message): "The Mac could not be reached: \(message)"
         case .timedOut: "The Mac did not answer."
         case .refused(let message): message
@@ -290,9 +293,23 @@ enum HostLink {
     static let roleKeyName = "role"
     /// The TXT record key of both services holding `version`, so a Mac can tell before it connects.
     static let versionKeyName = "version"
-    /// The version of the messages that paired Macs exchange. Raise it with every change after which a Mac running
-    /// the previous version could not read a request, a reply, or a report.
-    static let version = 6
+    /// The version of the messages that paired Macs exchange. Raise it with every change to them, so that the Macs
+    /// can tell which one runs the older version.
+    ///
+    /// Macs of different versions work together, so the messages change by addition:
+    /// - A new request or reply is a new case. A Mac that does not know a request answers `unsupported`, and a Mac
+    ///   that cannot read a reply reports the other Mac's version.
+    /// - A request that asks for more than an existing one is a new case too, and existing requests gain no values.
+    ///   A Mac ignores a value that it does not know, and would answer as if it had done what the value asks.
+    /// - A new value in a reply or a report is optional.
+    /// - A state that a report names is a type that keeps a raw value it does not know, as `HostState` does. Enums
+    ///   that reports carry gain no cases.
+    static let version = 7
+    /// The oldest version whose messages this version reads. A Mac that runs an earlier one is shown as running
+    /// another version, and the Macs do not pair. Versions before 7 answered only their own version.
+    ///
+    /// Raise it to `version` only with a change that cannot keep to the rules above.
+    static let oldestVersion = 7
     /// A connection whose key the other Mac rejects keeps waiting instead of failing, so requests stop after this long.
     static let requestTimeout = Duration.seconds(10)
 
@@ -329,7 +346,8 @@ enum HostLink {
 
     /// Sends one request and returns the reply, failing promptly when the Mac rejects the key or cannot be reached.
     ///
-    /// Throws `HostLinkError.incompatible` when the Mac answers with another version.
+    /// Throws `HostLinkError.incompatible` when the Mac's version does not know the request, or when this Mac
+    /// cannot read its reply.
     ///
     /// - Parameters:
     ///   - version: The version of this Mac's messages.
@@ -349,7 +367,8 @@ enum HostLink {
     /// One connection's messages, for a request that takes several.
     struct Exchange: Sendable {
         let send: @Sendable (HostLinkRequest) async throws -> Void
-        /// Throws `HostLinkError.incompatible` when the Mac answers with another version.
+        /// Throws `HostLinkError.incompatible` when the Mac's version does not know the request, or when this Mac
+        /// cannot read its reply.
         let receive: @Sendable () async throws -> HostLinkReply
     }
 
@@ -367,11 +386,15 @@ enum HostLink {
                 send: { try await connection.send(Versioned($0, version: version)) },
                 receive: {
                     let reply = try await connection.receive().content
-                    guard reply.version == version else {
+                    // A version from before `oldestVersion` answers only its own version.
+                    guard reply.version >= oldestVersion else { throw HostLinkError.incompatible(.older) }
+                    switch reply.payload {
+                    case .unsupported?, nil:
+                        // One of the Macs could not read the other's message. Macs of one version read each other's.
+                        guard reply.version != version else { throw HostLinkError.unexpectedReply }
                         throw HostLinkError.incompatible(VersionMismatch(theirs: reply.version, own: version))
+                    case let payload?: return payload
                     }
-                    guard let payload = reply.payload else { throw HostLinkError.unexpectedReply }
-                    return payload
                 }
             ))
         }
@@ -379,7 +402,9 @@ enum HostLink {
 
     /// Accepts connections that use `key` until the task is cancelled.
     ///
-    /// A request from a Mac that runs another version is answered with this Mac's version and not handled.
+    /// A request that this Mac cannot read, or one from a version before `oldestVersion`, is answered with
+    /// `unsupported` and not handled. So is a following message that this Mac cannot read, which ends its request.
+    /// The sender tells from the reply's version which Mac to update.
     ///
     /// - Parameters:
     ///   - version: The version of this Mac's messages.
@@ -407,14 +432,13 @@ enum HostLink {
                 while true {
                     let message = try await connection.receive().content
                     await connected(message.version)
-                    guard message.version == version, let request = message.payload else {
-                        // The sender reads this reply's version and not its payload.
-                        try await connection.send(Versioned(HostLinkReply.refused("The Macs run different versions."), version: version))
+                    guard message.version >= oldestVersion, let request = message.payload else {
+                        try await connection.send(Versioned(HostLinkReply.unsupported, version: version))
                         continue
                     }
                     try await handle(request, { try await connection.send(Versioned($0, version: version)) }) {
-                        let following = try await connection.receive().content
-                        guard following.version == version, let request = following.payload else {
+                        guard let request = try await connection.receive().content.payload else {
+                            try await connection.send(Versioned(HostLinkReply.unsupported, version: version))
                             throw HostLinkError.unexpectedReply
                         }
                         return request
@@ -498,7 +522,7 @@ enum HostLink {
     ///   - save: Keeps the pairing once the person allowed it and the asking Mac confirmed the code.
     ///   - ended: Called after each connection, once the asking Mac got the reply.
     static func acceptPairing(
-        name: String, hostID: UUID, role: PairingRole, version: Int = version, advertising service: BonjourListenerProvider?,
+        name: String, hostID: UUID, role: PairingRole, advertising service: BonjourListenerProvider?,
         ready: @escaping @Sendable (NWEndpoint.Port) async -> Void,
         begin: @escaping @Sendable (_ connection: UUID, _ requesterName: String) async throws -> Void,
         allow: @escaping @Sendable (_ connection: UUID, _ code: String) async throws -> Void,
@@ -515,7 +539,7 @@ enum HostLink {
         try await listener.run { connection in
             let id = UUID()
             await answerPairing(
-                on: connection, name: name, hostID: hostID, role: role, version: version,
+                on: connection, name: name, hostID: hostID, role: role,
                 begin: { requesterName in try await begin(id, requesterName) },
                 allow: { code in try await allow(id, code) },
                 save: save
@@ -526,7 +550,7 @@ enum HostLink {
 
     /// Answers one Mac's request to pair, with the pairing's proof or the reason this Mac refused.
     private static func answerPairing(
-        on connection: NetworkConnection<PairingServerProtocol>, name: String, hostID: UUID, role: PairingRole, version: Int,
+        on connection: NetworkConnection<PairingServerProtocol>, name: String, hostID: UUID, role: PairingRole,
         begin: @escaping @Sendable (_ requesterName: String) async throws -> Void,
         allow: @escaping @Sendable (_ code: String) async throws -> Void,
         save: @escaping @Sendable (HostPairing) async throws -> Void
@@ -540,11 +564,9 @@ enum HostLink {
                         = try await within(requestTimeout, { try await connection.receive().content }) else {
                     throw notVerified
                 }
-                // Macs that run different versions cannot read each other's messages after they pair.
-                guard requesterVersion == version else {
-                    throw PairingRefusal(VersionMismatch(theirs: requesterVersion ?? 0, own: version) == .older
-                        ? "\(name) runs a newer version of XcodeHomeRunner. Update \(requesterName) to pair."
-                        : "\(name) runs an older version of XcodeHomeRunner. Update it to pair.")
+                // This Mac would not answer the requests of a version that it does not read.
+                guard let requesterVersion, requesterVersion >= oldestVersion else {
+                    throw PairingRefusal("\(name) runs a newer version of XcodeHomeRunner. Update \(requesterName) to pair.")
                 }
                 // The person opened this Mac to one role, so a request cannot choose another.
                 guard requestedRole == role else {

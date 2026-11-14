@@ -24,6 +24,24 @@ struct HostPairingTests {
         return try local(management.pairingWindow?.port)
     }
 
+    /// A Mac that answers requests with `handle`, in place of a paired Mac's settings.
+    private func listener(
+        key: SymmetricKey,
+        handle: @escaping @Sendable (
+            HostLinkRequest, _ reply: @escaping @Sendable (HostLinkReply) async throws -> Void,
+            _ next: @escaping @Sendable () async throws -> HostLinkRequest
+        ) async throws -> Void
+    ) async throws -> (task: Task<Void, any Error>, endpoint: NWEndpoint) {
+        let (ports, port) = AsyncStream<NWEndpoint.Port>.makeStream()
+        let task = Task {
+            try await HostLink.listen(
+                key: key, identity: "listener", advertising: nil, ready: { port.yield($0) }, connected: { _ in }, handle: handle
+            )
+        }
+        var found = ports.makeAsyncIterator()
+        return (task, try local(await found.next()))
+    }
+
     /// Pairs the Macs as a person does after seeing the same code on both.
     private func pair(_ macs: PairedMacs, with management: HostManagement) async throws -> PairedMac {
         let endpoint = try await waitToPair(management, as: macs.role)
@@ -809,7 +827,7 @@ struct HostPairingTests {
         await host.management.shutDown()
     }
 
-    @Test func macsThatRunDifferentVersionsSayWhichOneToUpdate() async throws {
+    @Test func macsThatRunDifferentVersionsWorkTogether() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let managerStore = MemorySecretStore()
@@ -820,37 +838,145 @@ struct HostPairingTests {
         try await waitUntil { management.managementPort != nil }
         let endpoint = try local(management.managementPort)
 
-        // The managing host is updated first. Each Mac names the other one's version, and neither reads its messages.
+        // The managing host is updated first, and still reads and changes the Mac.
         let updated = PairedMacs(
             store: managerStore, name: "Manager", role: .manager, browses: false, version: HostLink.version + 1
         )
         await updated.checkStatus(of: mac.id, at: endpoint)
-        #expect(updated.status(of: mac.id) == .incompatible(.older))
-        #expect(management.versionMismatches == [mac.id: .newer])
-        #expect(updated.settings[mac.id]?.report == nil)
+        #expect(updated.status(of: mac.id) == .online)
+        #expect(management.versionMismatches.isEmpty)
+        let settings = try #require(updated.settings[mac.id])
+        settings.runnerLabelsInput = "fast"
+        #expect(await updated.saveRunnerLabels(of: mac.id))
+        #expect(managed.runnerLabels == ["fast"])
 
-        // The pairing is kept, so the Macs connect again once they run the same version.
+        // A request that only the newer version has fails by itself, and the Mac answers the next one.
+        let connection = NetworkConnection(
+            to: endpoint,
+            using: .parameters(initialParameters: HostLink.tlsParameters(key: mac.pairing.symmetricKey, identity: mac.id.uuidString)) {
+                Coder(sending: Versioned<LaterRequest>.self, receiving: Versioned<HostLinkReply>.self, using: .json) { TCP() }
+            }
+        )
+        try await connection.send(Versioned(LaterRequest.later, version: HostLink.version + 1))
+        let unknown = try await connection.receive().content
+        #expect(unknown.version == HostLink.version)
+        guard case .unsupported? = unknown.payload else {
+            Issue.record("The Mac answered a request that it cannot read with \(String(describing: unknown.payload))")
+            return
+        }
+        try await connection.send(Versioned(LaterRequest.settings(.read), version: HostLink.version + 1))
+        guard case .settings? = try await connection.receive().content.payload else {
+            Issue.record("The Mac did not answer the request after the one that it could not read")
+            return
+        }
+
+        // A message that only the newer version has is answered the same way after a request that takes several.
+        let key = SymmetricKey(size: .bits256)
+        let waiting = try await listener(key: key) { _, reply, next in
+            _ = try await next()
+            try await reply(.completed)
+        }
+        let following = NetworkConnection(
+            to: waiting.endpoint, using: .parameters(initialParameters: HostLink.tlsParameters(key: key, identity: "listener")) {
+                Coder(sending: Versioned<LaterRequest>.self, receiving: Versioned<HostLinkReply>.self, using: .json) { TCP() }
+            }
+        )
+        try await following.send(Versioned(LaterRequest.settings(.read), version: HostLink.version + 1))
+        try await following.send(Versioned(LaterRequest.later, version: HostLink.version + 1))
+        guard case .unsupported? = try await following.receive().content.payload else {
+            Issue.record("The Mac did not say that it cannot read a following message")
+            return
+        }
+        waiting.task.cancel()
+
+        // The newer Mac names the Mac to update for the request that its version does not have.
+        let older = try await listener(key: key) { _, reply, _ in try await reply(.unsupported) }
+        await #expect(throws: HostLinkError.incompatible(.older)) {
+            try await HostLink.send(
+                .settings(.read), to: older.endpoint, key: key, identity: "listener", version: HostLink.version + 1
+            )
+        }
+        older.task.cancel()
+
+        // Macs of different versions pair.
+        let other = HostManagement(store: MemorySecretStore(), name: "Other", advertises: false)
+        let paired = try await pair(updated, with: other)
+        #expect(other.manager?.id == paired.id)
+        await other.shutDown()
+
+        await management.shutDown()
+        await macs.shutDown()
+        await updated.shutDown()
+    }
+
+    @Test func aMacWhoseVersionIsNotReadSaysWhichOneToUpdate() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let managerStore = MemorySecretStore()
+        let managed = managedMac(at: root)
+        let management = managed.management
+        let macs = PairedMacs(store: managerStore, name: "Manager", role: .manager, browses: false)
+        let mac = try await pair(macs, with: management)
+        try await waitUntil { management.managementPort != nil }
+        let endpoint = try local(management.managementPort)
+
+        // The Mac is updated, and the managing host still runs a version from before the Mac's oldest one. The Mac
+        // does not answer it, and each Mac names the other one's version.
+        let outdated = PairedMacs(
+            store: managerStore, name: "Manager", role: .manager, browses: false, version: HostLink.oldestVersion - 1
+        )
+        await outdated.checkStatus(of: mac.id, at: endpoint)
+        #expect(outdated.status(of: mac.id) == .incompatible(.newer))
+        #expect(management.versionMismatches == [mac.id: .older])
+        #expect(outdated.settings[mac.id]?.report == nil)
+
+        // The pairing is kept, so the Macs connect again once the managing host is updated.
         await macs.checkStatus(of: mac.id, at: endpoint)
         #expect(macs.status(of: mac.id) == .online)
         #expect(management.versionMismatches.isEmpty)
 
-        // A Mac that waits to pair with another version is listed with the reason, and does not pair.
-        updated.discoverPairableMacs()
-        updated.pairableMacsChanged([.init(id: "waiting", name: "Waiting", endpoint: endpoint, version: HostLink.version)])
-        #expect(updated.waitingMacs == [WaitingMac(id: "waiting", name: "Waiting", mismatch: .older)])
-        await #expect(throws: HostLinkError.incompatible(.older)) { try await updated.pair(with: "waiting") }
-        // A Mac that waits refuses a Mac of another version that asks without having listed it.
+        // A Mac that waits to pair with such a version is listed with the reason, and does not pair.
+        macs.discoverPairableMacs()
+        macs.pairableMacsChanged([
+            .init(id: "waiting", name: "Waiting", endpoint: endpoint, version: HostLink.oldestVersion - 1),
+        ])
+        #expect(macs.waitingMacs == [WaitingMac(id: "waiting", name: "Waiting", mismatch: .older)])
+        await #expect(throws: HostLinkError.incompatible(.older)) { try await macs.pair(with: "waiting") }
+        // A Mac that waits refuses a Mac of such a version that asks without having listed it.
         let other = HostManagement(store: MemorySecretStore(), name: "Other", advertises: false)
         let waiting = try await waitToPair(other)
-        await #expect(throws: HostLinkError.refused("Other runs an older version of XcodeHomeRunner. Update it to pair.")) {
-            try await updated.pair(at: waiting)
+        await #expect(throws: HostLinkError.refused("Other runs a newer version of XcodeHomeRunner. Update Manager to pair.")) {
+            try await outdated.pair(at: waiting)
         }
         #expect(other.manager == nil)
         await other.shutDown()
 
         await management.shutDown()
         await macs.shutDown()
-        await updated.shutDown()
+        await outdated.shutDown()
+    }
+
+    @Test func aReportFromANewerVersionIsReadWithWhatThisVersionDoesNotKnow() throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let managed = managedMac(at: root)
+        managed.runners = [
+            RunnerSettingsRow(directory: root.appending(path: "runner"), name: "runner", state: .running, configurationError: nil),
+        ]
+        var report = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(HostSettingsReport(managed))) as? [String: Any]
+        )
+        // A newer version adds a value, and names states that this version does not have.
+        report["laterValue"] = ["enabled": true]
+        report["hostState"] = "Updating"
+        var runner = try #require((report["runners"] as? [[String: Any]])?.first)
+        runner["state"] = "Draining"
+        report["runners"] = [runner]
+
+        let read = try JSONDecoder().decode(HostSettingsReport.self, from: JSONSerialization.data(withJSONObject: report))
+        #expect(read.hostState.rawValue == "Updating")
+        #expect(read.runners.map(\.state.rawValue) == ["Draining"])
+        #expect(read.runners.map(\.name) == ["runner"])
     }
 
     @Test func aMacRefusesAPairingRequestForAnotherRole() async throws {
@@ -1041,6 +1167,12 @@ struct HostPairingTests {
         await management.shutDown()
         await macs.shutDown()
     }
+}
+
+/// The requests of a later version: one that this version does not have, and one that it has.
+private enum LaterRequest: Codable, Sendable {
+    case later
+    case settings(HostSettingsRequest)
 }
 
 /// Installs that a managed Mac ran, each leaving a hosted runner as the installer does.

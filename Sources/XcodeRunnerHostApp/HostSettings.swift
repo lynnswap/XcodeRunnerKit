@@ -4,25 +4,33 @@ import SwiftUI
 import XcodeRunnerHostSupport
 import XcodeRunnerKit
 
-enum HostState: String, Codable, Sendable {
-    case starting = "Starting"
-    case preparingStorage = "Preparing storage"
-    case waitingForStorage = "Waiting for storage"
-    case running = "Running"
-    case needsAttention = "Needs attention"
-    case stopping = "Stopping"
+/// What a Mac's host does, by the name that its panes show. A Mac shows the state of a paired Mac that runs a newer
+/// version by that name when it does not know the state.
+struct HostState: RawRepresentable, Codable, Hashable, Sendable {
+    let rawValue: String
+
+    static let starting = Self(rawValue: "Starting")
+    static let preparingStorage = Self(rawValue: "Preparing storage")
+    static let waitingForStorage = Self(rawValue: "Waiting for storage")
+    static let running = Self(rawValue: "Running")
+    static let needsAttention = Self(rawValue: "Needs attention")
+    static let stopping = Self(rawValue: "Stopping")
 }
 
-enum RunnerServiceState: String, Codable, Sendable {
-    case starting = "Starting"
-    case running = "Running"
-    case stopped = "Stopped"
-    case failed = "Needs attention"
-    case individualService = "Individual service"
+/// What a runner's service does, by the name that the Mac's pane shows. A Mac shows the state of a runner on a paired
+/// Mac that runs a newer version by that name when it does not know the state.
+struct RunnerServiceState: RawRepresentable, Codable, Hashable, Sendable {
+    let rawValue: String
+
+    static let starting = Self(rawValue: "Starting")
+    static let running = Self(rawValue: "Running")
+    static let stopped = Self(rawValue: "Stopped")
+    static let failed = Self(rawValue: "Needs attention")
+    static let individualService = Self(rawValue: "Individual service")
     /// The Mac is paused, and the host stopped the runner's service or did not start it.
-    case paused = "Paused"
+    static let paused = Self(rawValue: "Paused")
     /// The Mac is paused, and the runner's service stops after the job that it runs.
-    case finishing = "Finishing a job"
+    static let finishing = Self(rawValue: "Finishing a job")
 }
 
 struct RunnerSettingsRow: Codable, Equatable, Identifiable, Sendable {

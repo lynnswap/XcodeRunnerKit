@@ -11,7 +11,8 @@ struct ListedMac: Codable, Equatable, Identifiable, Sendable {
 struct WaitingMac: Codable, Equatable, Identifiable, Sendable {
     let id: String
     let name: String
-    /// Set when the Mac runs another version of the app than the Mac that would pair with it, so they cannot pair.
+    /// Set when the Mac runs a version of the app that the Mac that would pair with it does not work with, so they
+    /// cannot pair.
     var mismatch: VersionMismatch?
 }
 

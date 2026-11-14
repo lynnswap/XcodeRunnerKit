@@ -50,7 +50,8 @@ final class HostManagement {
     private(set) var pairingWindow: PairingWindow?
     /// Each pairing's listening port, for connections that do not use Bonjour.
     private(set) var ports: [HostPairing.ID: NWEndpoint.Port] = [:]
-    /// The paired Macs whose last request came from another version of the app. This Mac does not answer them.
+    /// The paired Macs whose last request came from a version of the app that this Mac does not read. This Mac does
+    /// not answer them.
     private(set) var versionMismatches: [HostPairing.ID: VersionMismatch] = [:]
     /// Why the last pairing window closed without pairing.
     private(set) var pairingMessage: String?
@@ -225,7 +226,7 @@ final class HostManagement {
                 try await withThrowingTaskGroup { group in
                     group.addTask {
                         try await HostLink.acceptPairing(
-                            name: self.name, hostID: self.hostID, role: role, version: self.version,
+                            name: self.name, hostID: self.hostID, role: role,
                             advertising: self.advertises
                                 ? .bonjour(name: self.name, type: HostLink.pairingService, txtRecord: txtRecord) : nil,
                             ready: { port in await self.pairingListenerIsReady(port, window: window.id) },
@@ -373,10 +374,10 @@ final class HostManagement {
         versionMismatches[id] = nil
     }
 
-    /// Records whether a paired Mac's request came from this Mac's version of the app.
+    /// Records whether a paired Mac's request came from a version of the app that this Mac reads.
     private func connected(_ id: HostPairing.ID, version: Int) {
         guard listeners[id] != nil else { return }
-        versionMismatches[id] = version == self.version ? nil : VersionMismatch(theirs: version, own: self.version)
+        versionMismatches[id] = version >= HostLink.oldestVersion ? nil : .older
     }
 
     private func closePairingWindow(_ window: UUID, message: String?) {
