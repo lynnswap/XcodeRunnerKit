@@ -345,7 +345,12 @@ struct HostSettingsTests {
     }
 
     @Test func installedPathsComeFromOneHomeDirectory() throws {
-        let options = try HostOptions.parse(["--home-directory", "/tmp/Fixture home"])
+        // Xcode runs the app with an argument that AppKit reads. An operation's own options follow the terminator.
+        let arguments = HostOptions.ownArguments(in: [
+            "-NSDocumentRevisionsDebugMode", "YES", "--home-directory", "/tmp/Fixture home", "--", "test", "-quiet",
+        ])
+        #expect(arguments == ["--home-directory", "/tmp/Fixture home", "--", "test", "-quiet"])
+        let options = try HostOptions.parse(Array(arguments.prefix(2)))
         #expect(options.installation.hostRoot == URL(filePath: "/tmp/Fixture home/Library/Application Support/XcodeRunnerKit"))
         #expect(options.installation.logsDirectory == options.installation.hostRoot.appending(path: "logs/runners"))
     }

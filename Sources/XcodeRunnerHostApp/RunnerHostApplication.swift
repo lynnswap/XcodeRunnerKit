@@ -26,14 +26,30 @@ struct HostOptions: ParsableCommand {
     @Option(help: .hidden) var runOnHost: String?
     /// This Mac's folder for the operation's log and result bundle.
     @Option(help: .hidden) var outputDirectory: String?
-    /// An `xcode-runner` command and its options, after `--`. Other arguments are not part of it: Xcode and AppKit
-    /// add their own when they launch the app.
+    /// An `xcode-runner` command and its options, after `--`.
     @Argument(parsing: .postTerminator, help: .hidden) var operation: [String] = []
-    /// What AppKit reads itself, such as the `-NSDocumentRevisionsDebugMode YES` that Xcode adds when it runs the app.
-    @Argument(parsing: .allUnrecognized, help: .hidden) var applicationArguments: [String] = []
 
     var installation: HostInstallation {
         HostInstallation(homeDirectory: homeDirectory.map { URL(filePath: $0) } ?? HostInstallation.defaultHomeDirectory)
+    }
+
+    /// The arguments for the options above. AppKit reads the others itself as user defaults, each a name with one
+    /// dash and its value, such as the `-NSDocumentRevisionsDebugMode YES` that Xcode adds when it runs the app.
+    static func ownArguments(in arguments: [String]) -> [String] {
+        var own: [String] = []
+        var index = arguments.startIndex
+        while index < arguments.endIndex {
+            let argument = arguments[index]
+            // What follows the terminator is the operation, with its own options.
+            if argument == "--" { return own + arguments[index...] }
+            if argument.hasPrefix("-"), !argument.hasPrefix("--") {
+                index += 2
+            } else {
+                own.append(argument)
+                index += 1
+            }
+        }
+        return own
     }
 
     func validate() throws {
@@ -56,7 +72,7 @@ public enum RunnerHostApplication {
     /// other Macs when this Mac has none.
     @MainActor public static func main() {
         do {
-            let options = try HostOptions.parse()
+            let options = try HostOptions.parse(HostOptions.ownArguments(in: Array(CommandLine.arguments.dropFirst())))
             if let directory = options.serviceDirectory {
                 guard let parent = options.parentProcessID, let ownership = options.ownershipDescriptor,
                       getpgrp() == getpid() else {
