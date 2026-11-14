@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 import SwiftUI
 #if DEBUG
 import Network
@@ -37,265 +38,90 @@ enum HostPane: Hashable {
     static let macName = Host.current().localizedName ?? "This Mac"
 }
 
+/// What the host window shows.
 @MainActor @Observable
-final class HostWindowNavigation {
+final class HostWindowModel {
+    /// The pane that is selected in the sidebar. A pane always stays selected.
     var pane = HostPane.overview
-    var isAddingMac = false
 }
 
-/// Creates the host window: a sidebar of panes beside the selected pane, with Add Mac in its toolbar.
+/// The host window's content: this Mac's panes and the Macs that it manages in a sidebar beside the selected pane, with
+/// Add Mac in the toolbar.
+@MainActor
+final class HostSplitViewController: PaneSplitViewController {
+    private let settings: HostSettingsModel
+    private let model: HostWindowModel
+    private var shownPane: HostPane?
+
+    init(settings: HostSettingsModel, model: HostWindowModel = HostWindowModel()) {
+        self.settings = settings
+        self.model = model
+        func row(_ pane: HostPane) -> SidebarRow { SidebarRow(pane: pane, title: pane.title(in: settings), icon: pane.icon) }
+        let sidebar = SidebarViewController(
+            groups: {
+                [
+                    SidebarGroup(title: nil, rows: [row(.overview), row(.github)]),
+                    SidebarGroup(title: "Runners", rows: [row(.mac)] + settings.managedMacs.macs.map { row(.managedMac($0.id)) }),
+                ]
+            },
+            selection: { model.pane },
+            select: { if let pane = $0.base as? HostPane { model.pane = pane } }
+        )
+        super.init(sidebar: sidebar, autosaveName: "XcodeHomeRunnerSettings")
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        update()
+    }
+
+    /// Shows the selected pane and names the window after it, then waits for the selection or the name to change.
+    private func update() {
+        let (pane, title) = withObservationTracking {
+            (model.pane, model.pane.title(in: settings))
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.update() }
+        }
+        self.title = title
+        guard pane != shownPane else { return }
+        shownPane = pane
+        detail.show(makeViewController(for: pane))
+    }
+
+    private func makeViewController(for pane: HostPane) -> NSViewController {
+        switch pane {
+        case .overview:
+            OverviewViewController(model: OverviewModel(settings: settings) { [model] in model.pane = .github })
+        case .github: GitHubViewController(model: GitHubPaneModel(settings: settings))
+        case .mac: MacViewController(model: MacPaneModel(settings: settings))
+        case .managedMac(let id):
+            MacViewController(model: MacPaneModel(
+                macs: settings.managedMacs, id: id,
+                // This Mac registers the Mac's runners, so a changed limit or label is applied to them here.
+                registrationsChanged: { [settings] in await settings.github.synchronize() },
+                removed: { [model] in model.pane = .mac }
+            ))
+        }
+    }
+
+    override var addMacToolTip: String {
+        "Pair a Mac on the local network so that this Mac manages its runners. A Mac that another Mac manages cannot add Macs."
+    }
+
+    override var canAddMac: Bool { super.canAddMac && settings.canAddMacs }
+
+    override func addMac(_ sender: Any?) {
+        guard canAddMac else { return }
+        presentAddMacSheet(for: settings.managedMacs) { [model] mac in model.pane = .managedMac(mac.id) }
+    }
+}
+
+/// Creates the host window.
 @MainActor
 func makeHostWindowController(settings: HostSettingsModel) -> NSWindowController {
-    let navigation = HostWindowNavigation()
-    return makePaneWindowController(
-        content: makeHostSplitViewController(settings: settings, navigation: navigation), autosaveName: "XcodeHomeRunnerSettings"
-    )
-}
-
-@MainActor
-private func makeHostSplitViewController(settings: HostSettingsModel, navigation: HostWindowNavigation) -> PaneSplitViewController {
-    func row(_ pane: HostPane) -> SidebarRow { SidebarRow(pane: pane, title: pane.title(in: settings), icon: pane.icon) }
-    let sidebar = SidebarViewController(
-        groups: {
-            [
-                SidebarGroup(title: nil, rows: [row(.overview), row(.github)]),
-                SidebarGroup(title: "Runners", rows: [row(.mac)] + settings.managedMacs.macs.map { row(.managedMac($0.id)) }),
-            ]
-        },
-        selection: { navigation.pane },
-        // A pane always stays selected.
-        select: { if let pane = $0.base as? HostPane { navigation.pane = pane } }
-    )
-    let detail = NSHostingController(rootView: HostPaneView(settings: settings, navigation: navigation))
-    detail.sceneBridgingOptions = [.title]
-    // The split view and the window decide the pane's size, also in a preview's window.
-    detail.sizingOptions = []
-    let split = PaneSplitViewController(
-        sidebar: sidebar, detail: detail,
-        addMac: .init(
-            toolTip: "Pair a Mac on the local network so that this Mac manages its runners. A Mac that another Mac manages cannot add Macs.",
-            isEnabled: { settings.canAddMacs }, perform: { navigation.isAddingMac = true }
-        ),
-        autosaveName: "XcodeHomeRunnerSettings"
-    )
-    // A window takes its first title from its content. The selected pane's navigation title names it from then on.
-    split.title = navigation.pane.title(in: settings)
-    return split
-}
-
-@MainActor
-private struct HostPaneView: View {
-    let settings: HostSettingsModel
-    let navigation: HostWindowNavigation
-
-    var body: some View {
-        @Bindable var navigation = navigation
-        Group {
-            switch navigation.pane {
-            case .overview:
-                HostOverviewView(settings: settings, github: settings.github.report, mac: .thisMac, actions: settings.github.actions) {
-                    navigation.pane = .github
-                }
-            case .github:
-                @Bindable var github = settings.github
-                GitHubSettingsView(
-                    github: github.report, selection: $github.selectedRepositoryIDs, mac: .thisMac, actions: github.actions
-                )
-                .disabled(settings.isSaving)
-            case .mac: HostMacSettingsView(model: settings)
-            case .managedMac(let id):
-                if let mac = settings.managedMacs.mac(id) {
-                    PairedMacView(
-                        macs: settings.managedMacs, mac: mac.listed,
-                        // This Mac registers the Mac's runners, so a changed limit or label is applied to them here.
-                        registrationsChanged: { await settings.github.synchronize() },
-                        removed: { navigation.pane = .mac }
-                    )
-                } else {
-                    ContentUnavailableView("This Mac was removed", systemImage: "desktopcomputer")
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .navigationTitle(navigation.pane.title(in: settings))
-        .sheet(isPresented: $navigation.isAddingMac) {
-            AddMacView(macs: settings.managedMacs) { pairing in
-                navigation.isAddingMac = false
-                navigation.pane = .managedMac(pairing.id)
-            } cancel: {
-                navigation.isAddingMac = false
-            }
-        }
-    }
-}
-
-/// A Mac's status, setup steps, and repositories, in its own window or on a dashboard.
-@MainActor
-struct HostOverviewView<Settings: HostSettingsDisplay>: View {
-    let settings: Settings
-    let github: GitHubReport
-    let mac: MacReference
-    /// What a dashboard's last requests to the Mac left to tell: a refusal, or a Mac that was removed but could not
-    /// be told.
-    var notices: [String] = []
-    let actions: GitHubActions
-    /// Shows the GitHub pane, where the sign-in code and the repository selection are.
-    let showGitHub: () -> Void
-
-    var body: some View {
-        Form {
-            // A managed Mac's runners are registered by its managing host, so it needs no sign-in or selection.
-            if github.managerName == nil, github.hasRestored && (github.accountLogin == nil || github.savedRepositoryIDs.isEmpty) {
-                setup
-            }
-            Section(mac.name ?? HostPane.macName) { HostStatusRows(settings: settings) }
-            Section {
-                if let manager = github.managerName {
-                    Text("\(manager) registers runners on \(mac.object) for the repositories selected there.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    repositories
-                }
-            } header: {
-                Text("Repositories")
-            } footer: {
-                if github.managesMacs { Text("Counts include the Macs that \(mac.object) manages.") }
-            }
-            if !notices.isEmpty {
-                Section { ForEach(notices, id: \.self) { ErrorText($0) } }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var repositories: some View {
-        if github.isSynchronizing { ProgressView("Synchronizing runner registrations…") }
-        if github.runnerStatuses.isEmpty && !github.isSynchronizing {
-            Text(github.savedRepositoryIDs.isEmpty
-                ? "No repositories are selected."
-                : "Runner counts appear after the next synchronization.")
-                .foregroundStyle(.secondary)
-        }
-        ForEach(github.runnerStatuses) { status in
-            VStack(alignment: .leading, spacing: 4) {
-                LabeledContent(status.fullName) {
-                    if status.isUnlinked {
-                        // Without a listing from GitHub, the runners still to remove are not counted.
-                        if status.registeredCount > 0 {
-                            Text("Removing \(status.registeredCount) · \(status.busyCount) busy").monospacedDigit()
-                        } else {
-                            Text("Removing")
-                        }
-                    } else {
-                        Text("\(status.onlineCount) of \(status.desiredCount) online · \(status.busyCount) busy")
-                            .monospacedDigit()
-                    }
-                }
-                if status.isUnlinked, status.busyCount > 0 {
-                    Text("Busy runners are removed after their current jobs finish.")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-                if let error = status.errorMessage { ErrorText(error) }
-                if status.excessCount > 0 {
-                    Text("\(status.excessCount) extra registrations are retained to keep existing jobs running. The shared Xcode execution limit still applies.")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-            }
-        }
-        if let error = github.errorMessage { ErrorText(error) }
-    }
-
-    /// The first unfinished step offers its action, so the order of setup stays visible.
-    private var setup: some View {
-        let steps = [
-            github.accountLogin != nil,
-            !github.selectableRepositories.isEmpty,
-            !github.savedRepositoryIDs.isEmpty,
-        ]
-        let current = steps.firstIndex(of: false)
-        return Section("Get Started") {
-            setupStep("Sign in to GitHub", isDone: steps[0], isCurrent: current == 0) {
-                Button("Connect GitHub…") {
-                    showGitHub()
-                    actions.signIn()
-                }
-                .disabled(github.isBusy)
-            }
-            setupStep("Install the app on your repositories", isDone: steps[1], isCurrent: current == 1) {
-                Button("Add Repositories on GitHub…", action: actions.addRepositories)
-                Button("Reload", action: actions.reloadRepositories)
-                    .disabled(!github.canReloadRepositories)
-            }
-            setupStep("Choose the repositories to run", isDone: steps[2], isCurrent: current == 2) {
-                Button("Choose Repositories…", action: showGitHub)
-            }
-        }
-    }
-
-    private func setupStep(
-        _ title: String, isDone: Bool, isCurrent: Bool, @ViewBuilder actions: () -> some View
-    ) -> some View {
-        LabeledContent {
-            if isCurrent { HStack { actions() } }
-        } label: {
-            Label(title, systemImage: isDone ? "checkmark.circle.fill" : "circle")
-                .foregroundStyle(isDone ? .secondary : .primary)
-        }
-    }
-
-}
-
-/// A Mac's host status and Xcode job counts, for this Mac or a Mac that this host manages.
-@MainActor
-struct HostStatusRows<Settings: HostSettingsDisplay>: View {
-    let settings: Settings
-
-    var body: some View {
-        LabeledContent("Status") {
-            // A paused Mac runs as its person chose, so it does not look like a host that needs attention.
-            Label {
-                Text(settings.showsPaused ? "Paused" : settings.hostState.rawValue)
-            } icon: {
-                Image(systemName: settings.showsPaused ? "pause.circle.fill" : settings.hostState.systemImage)
-                    .foregroundStyle(settings.showsPaused ? .secondary : settings.hostState.tint)
-            }
-        }
-        LabeledContent("Xcode jobs") { Text(settings.jobSummary).monospacedDigit() }
-        Text(settings.admissionMessage).font(.callout).foregroundStyle(.secondary)
-        if let error = settings.storageError { ErrorText(error) }
-        if let error = settings.poolError { ErrorText(error) }
-    }
-}
-
-private extension HostState {
-    var systemImage: String {
-        switch self {
-        case .running: "checkmark.circle.fill"
-        case .starting, .preparingStorage: "circle.dotted"
-        case .waitingForStorage: "clock"
-        case .needsAttention: "exclamationmark.triangle.fill"
-        case .stopping: "stop.circle"
-        }
-    }
-
-    var tint: Color {
-        switch self {
-        case .running: .green
-        case .waitingForStorage: .orange
-        case .needsAttention: .red
-        case .starting, .preparingStorage, .stopping: .secondary
-        }
-    }
-}
-
-struct ErrorText: View {
-    let message: String
-
-    init(_ message: String) { self.message = message }
-
-    var body: some View {
-        Text(message).foregroundStyle(.red).font(.callout).textSelection(.enabled)
-    }
+    makePaneWindowController(content: HostSplitViewController(settings: settings), autosaveName: "XcodeHomeRunnerSettings")
 }
 
 #if DEBUG
@@ -335,7 +161,7 @@ private enum PreviewPairing {
 @MainActor
 private func previewHostSplitViewController(
     pane: HostPane, isSignedIn: Bool, pairing: PreviewPairing = .none, isPaused: Bool = false
-) -> PaneSplitViewController {
+) -> HostSplitViewController {
     let installation = HostInstallation(homeDirectory: .temporaryDirectory.appending(path: UUID().uuidString))
     let github = previewGitHubSettings(installation: installation, isSignedIn: isSignedIn)
     let managingHost = PreviewSecretStore()
@@ -384,10 +210,9 @@ private func previewHostSplitViewController(
         await settings.refreshPoolStatus()
         await github.restore()
     }
-    let navigation = HostWindowNavigation()
-    navigation.pane = pane
-    let split = makeHostSplitViewController(settings: settings, navigation: navigation)
-    return split
+    let model = HostWindowModel()
+    model.pane = pane
+    return HostSplitViewController(settings: settings, model: model)
 }
 
 /// GitHub settings that are answered in memory, with two selected repositories when signed in.
@@ -488,7 +313,7 @@ private struct XcodeSectionPreview: View {
     var body: some View {
         Form {
             XcodeSection(
-                settings: model, selection: $model.xcodeSelectionInput, isSaving: model.isSavingXcode,
+                settings: HostSettingsReport(model), selection: $model.xcodeSelectionInput, isSaving: model.isSavingXcode,
                 saveError: model.xcodeSaveError, mac: .thisMac
             ) {
                 Task { await model.saveXcodeSelection() }

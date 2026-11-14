@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 import SwiftUI
 
 /// The app opened without a host: a window that shows the hosts paired with this Mac.
@@ -7,8 +8,8 @@ import SwiftUI
 @MainActor
 final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
     private let hosts: PairedMacs
-    private let navigation = DashboardNavigation()
     private var windowController: NSWindowController?
+    private var content: DashboardSplitViewController? { windowController?.contentViewController as? DashboardSplitViewController }
     private var stopped = false
 
     init(hosts: PairedMacs) {
@@ -41,7 +42,10 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
 
     private func showWindow(_ sender: Any?) {
         if windowController == nil {
-            windowController = makeDashboardWindowController(hosts: hosts, navigation: navigation, addMacMenu: makeAddMacMenu())
+            windowController = makePaneWindowController(
+                content: DashboardSplitViewController(hosts: hosts, addMacMenu: makeAddMacMenu()),
+                autosaveName: "XcodeHomeRunnerDashboard"
+            )
         }
         NSApplication.shared.activate()
         windowController?.showWindow(nil)
@@ -143,10 +147,10 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         // One sheet pairs at a time.
-        case #selector(showMacOnDashboard(_:)): return navigation.addition == nil
+        case #selector(showMacOnDashboard(_:)): return content?.isAddingMac != true
         case #selector(addManagedMac(_:)):
             // A host has to answer, and one that another Mac manages cannot pair with a Mac.
-            guard navigation.addition == nil, let host = item.representedObject as? HostPairing.ID else { return false }
+            guard content?.isAddingMac != true, let host = item.representedObject as? HostPairing.ID else { return false }
             return hosts.status(of: host) == .online && hosts.macsManaged(by: host).canAddMacs
         default: return true
         }
@@ -154,15 +158,15 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
 
     @objc private func showMacOnDashboard(_ sender: Any?) {
         showWindow(nil)
-        navigation.addition = .host
+        content?.showMacOnDashboard(sender)
     }
 
     @objc private func addManagedMac(_ sender: NSMenuItem) {
         guard let host = sender.representedObject as? HostPairing.ID else { return }
-        navigation.addition = .mac(managedBy: host)
+        showWindow(nil)
+        content?.addMac(managedBy: host)
     }
 }
-
 
 /// A pane in the dashboard window's sidebar, for one of the hosts.
 enum DashboardPane: Hashable {
@@ -180,198 +184,160 @@ enum DashboardPane: Hashable {
     }
 }
 
+/// What the dashboard window shows.
 @MainActor @Observable
-final class DashboardNavigation {
-    /// What the Add Mac sheet pairs: this dashboard with a host, or a host with a Mac for it to manage.
-    enum Addition: Hashable, Identifiable {
-        case host
-        case mac(managedBy: HostPairing.ID)
-
-        var id: Self { self }
-    }
-
+final class DashboardWindowModel {
+    /// The pane that is selected in the sidebar. One stays selected while a host is shown.
     var pane: DashboardPane?
-    var addition: Addition?
 }
 
-/// Creates the dashboard window: a sidebar of paired hosts and their panes beside the selected pane, with Add Mac in
-/// its toolbar.
+/// The dashboard window's content: the paired hosts and their panes in a sidebar beside the selected pane, with Add Mac
+/// in the toolbar.
 @MainActor
-func makeDashboardWindowController(hosts: PairedMacs, navigation: DashboardNavigation, addMacMenu: NSMenu) -> NSWindowController {
-    makePaneWindowController(
-        content: makeDashboardSplitViewController(hosts: hosts, navigation: navigation, addMacMenu: addMacMenu),
-        autosaveName: "XcodeHomeRunnerDashboard"
-    )
-}
+final class DashboardSplitViewController: PaneSplitViewController {
+    private let hosts: PairedMacs
+    private let model: DashboardWindowModel
+    private let toolbarMenu: NSMenu
+    /// The pane that is shown, or `nil` for the pane without a host. Nothing is shown before the view loads.
+    private var shownPane: DashboardPane??
 
-/// The name of a pane, which is its window's title, or of the window while no host is shown.
-@MainActor
-private func dashboardTitle(of pane: DashboardPane?, in hosts: PairedMacs) -> String {
-    guard let pane, let host = hosts.mac(pane.host) else { return "Dashboard" }
-    return switch pane {
-    case .overview: "Overview"
-    case .github: "GitHub"
-    case .mac: host.name
-    case .managedMac(let id, _): hosts.macsManaged(by: host.id).listedMacs.first { $0.id == id }?.name ?? "Mac"
-    }
-}
-
-@MainActor
-func makeDashboardSplitViewController(
-    hosts: PairedMacs, navigation: DashboardNavigation, addMacMenu: NSMenu
-) -> PaneSplitViewController {
-    if navigation.pane == nil { navigation.pane = hosts.macs.first.map { .overview($0.id) } }
-    let sidebar = SidebarViewController(
-        groups: {
-            hosts.macs.map { host in
-                SidebarGroup(title: host.name, rows: [
-                    SidebarRow(pane: DashboardPane.overview(host.id), title: "Overview", icon: HostPane.overview.icon),
-                    SidebarRow(pane: DashboardPane.github(host.id), title: "GitHub", icon: HostPane.github.icon),
-                    SidebarRow(pane: DashboardPane.mac(host.id), title: host.name, icon: HostPane.mac.icon),
-                ] + hosts.macsManaged(by: host.id).listedMacs.map { mac in
-                    SidebarRow(pane: DashboardPane.managedMac(mac.id, host: host.id), title: mac.name, icon: HostPane.mac.icon)
-                })
-            }
-        },
-        selection: { navigation.pane },
-        // A pane stays selected while there is a host.
-        select: { if let pane = $0.base as? DashboardPane { navigation.pane = pane } }
-    )
-    let detail = NSHostingController(rootView: DashboardPaneView(hosts: hosts, navigation: navigation))
-    // The selected pane's navigation title names the window, as the host window's panes do.
-    detail.sceneBridgingOptions = [.title]
-    // The split view and the window decide the pane's size, also in a preview's window.
-    detail.sizingOptions = []
-    let split = PaneSplitViewController(
-        sidebar: sidebar, detail: detail,
-        addMac: .init(
-            toolTip: "Pair with a Mac that runs XcodeHomeRunner to show it here, or pair one of the Macs shown here with a Mac for it to manage.",
-            menu: addMacMenu
-        ),
-        autosaveName: "XcodeHomeRunnerDashboard"
-    )
-    // A window takes its first title from its content. The selected pane's navigation title names it from then on.
-    split.title = dashboardTitle(of: navigation.pane, in: hosts)
-    return split
-}
-
-@MainActor
-private struct DashboardPaneView: View {
-    let hosts: PairedMacs
-    let navigation: DashboardNavigation
-
-    var body: some View {
-        @Bindable var navigation = navigation
-        let host = navigation.pane.flatMap { hosts.mac($0.host) }
-        Group {
-            if let pane = navigation.pane, let host {
-                switch pane {
-                case .overview:
-                    DashboardHostPane(hosts: hosts, host: host) { settings, report, github in
-                        HostOverviewView(
-                            settings: report, github: github, mac: MacReference(name: host.name),
-                            // Removing one of the host's Macs returns here, where its notice stays visible.
-                            notices: [settings.githubError, hosts.macsManaged(by: host.id).message].compactMap { $0 },
-                            actions: actions(for: host)
-                        ) {
-                            navigation.pane = .github(host.id)
-                        }
-                    }
-                case .github:
-                    DashboardHostPane(hosts: hosts, host: host) { settings, _, github in
-                        @Bindable var settings = settings
-                        GitHubSettingsView(
-                            github: github, selection: $settings.selectedRepositoryIDs, mac: MacReference(name: host.name),
-                            isRequesting: settings.isChangingGitHub, requestError: settings.githubError, actions: actions(for: host)
-                        )
-                    }
-                case .mac:
-                    // The host registers runners for a changed limit itself.
-                    PairedMacView(macs: hosts, mac: host.listed, registrationsChanged: {}) {
-                        navigation.pane = hosts.macs.first.map { .overview($0.id) }
-                    }
-                case .managedMac(let id, _):
-                    let managed = hosts.macsManaged(by: host.id)
-                    DashboardHostPane(hosts: hosts, host: host) { _, _, _ in
-                        if let mac = managed.listedMacs.first(where: { $0.id == id }) {
-                            // The host registers the Mac's runners, so it applies a changed limit to them.
-                            PairedMacView(macs: managed, mac: mac, registrationsChanged: {}) { navigation.pane = .overview(host.id) }
-                        } else {
-                            ContentUnavailableView("This Mac was removed", systemImage: "desktopcomputer")
-                        }
-                    }
+    /// - Parameter addMacMenu: The Add Mac toolbar item's choices, which the menu's delegate fills when it opens.
+    init(hosts: PairedMacs, model: DashboardWindowModel = DashboardWindowModel(), addMacMenu: NSMenu) {
+        self.hosts = hosts
+        self.model = model
+        toolbarMenu = addMacMenu
+        if model.pane == nil { model.pane = hosts.macs.first.map { .overview($0.id) } }
+        let sidebar = SidebarViewController(
+            groups: {
+                hosts.macs.map { host in
+                    SidebarGroup(title: host.name, rows: [
+                        SidebarRow(pane: DashboardPane.overview(host.id), title: "Overview", icon: HostPane.overview.icon),
+                        SidebarRow(pane: DashboardPane.github(host.id), title: "GitHub", icon: HostPane.github.icon),
+                        SidebarRow(pane: DashboardPane.mac(host.id), title: host.name, icon: HostPane.mac.icon),
+                    ] + hosts.macsManaged(by: host.id).listedMacs.map { mac in
+                        SidebarRow(pane: DashboardPane.managedMac(mac.id, host: host.id), title: mac.name, icon: HostPane.mac.icon)
+                    })
                 }
-            } else {
-                ContentUnavailableView {
-                    Label("No Macs", systemImage: "desktopcomputer")
-                } description: {
-                    Text("Add a Mac that runs XcodeHomeRunner to show it here. This Mac shows its status and changes its settings without running jobs itself.")
-                    // A Mac's pane shows this message while one is listed. It also reports a Mac that was removed
-                    // here but could not be told, and pairings that could not be read.
-                    if let message = hosts.message { ErrorText(message) }
-                } actions: {
-                    Button("Add Mac…") { navigation.addition = .host }
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .navigationTitle(dashboardTitle(of: navigation.pane, in: hosts))
-        .sheet(item: $navigation.addition) { addition in
-            switch addition {
-            case .host:
-                AddMacView(macs: hosts) { host in
-                    navigation.addition = nil
-                    navigation.pane = .overview(host.id)
-                } cancel: {
-                    navigation.addition = nil
-                }
-            case .mac(let host):
-                AddMacView(macs: hosts.macsManaged(by: host)) { mac in
-                    navigation.addition = nil
-                    navigation.pane = .managedMac(mac.id, host: host)
-                } cancel: {
-                    navigation.addition = nil
-                }
-            }
-        }
-    }
-
-    /// The GitHub controls, which act on the host. Its pages open in this Mac's browser.
-    private func actions(for host: PairedMac) -> GitHubActions {
-        GitHubActions(
-            signIn: { Task { await hosts.signIn(to: host.id) } },
-            cancelSignIn: { Task { await hosts.cancelSignIn(to: host.id) } },
-            signOut: { Task { await hosts.signOut(of: host.id) } },
-            addRepositories: { hosts.addRepositories(to: host.id) },
-            reloadRepositories: { Task { await hosts.reloadRepositories(of: host.id) } },
-            applySelection: { Task { await hosts.applyRepositorySelection(of: host.id) } }
+            },
+            selection: { model.pane },
+            select: { if let pane = $0.base as? DashboardPane { model.pane = pane } }
         )
+        super.init(sidebar: sidebar, autosaveName: "XcodeHomeRunnerDashboard")
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        update()
+    }
+
+    /// Shows the selected pane and names the window after it, then waits for the selection, the pane's host, or the
+    /// name to change.
+    private func update() {
+        let (pane, title) = withObservationTracking {
+            // A pane leaves with its host.
+            let pane = model.pane.flatMap { hosts.mac($0.host) == nil ? nil : $0 }
+            return (pane, self.title(of: pane))
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.update() }
+        }
+        self.title = title
+        guard pane != shownPane else { return }
+        shownPane = pane
+        detail.show(makeViewController(for: pane))
+    }
+
+    /// The name of a pane, or of the window while no host is shown.
+    private func title(of pane: DashboardPane?) -> String {
+        guard let pane, let host = hosts.mac(pane.host) else { return "Dashboard" }
+        return switch pane {
+        case .overview: "Overview"
+        case .github: "GitHub"
+        case .mac: host.name
+        case .managedMac(let id, _): hosts.macsManaged(by: host.id).listedMacs.first { $0.id == id }?.name ?? "Mac"
+        }
+    }
+
+    private func makeViewController(for pane: DashboardPane?) -> NSViewController {
+        guard let pane, let host = hosts.mac(pane.host) else {
+            return NoMacsViewController(hosts: hosts) { [weak self] in self?.showMacOnDashboard(nil) }
+        }
+        switch pane {
+        case .overview:
+            return OverviewViewController(model: OverviewModel(hosts: hosts, host: host) { [model] in model.pane = .github(host.id) })
+        case .github: return GitHubViewController(model: GitHubPaneModel(hosts: hosts, host: host))
+        case .mac:
+            // The host registers runners for a changed limit itself.
+            return MacViewController(model: MacPaneModel(macs: hosts, id: host.id) { [hosts, model] in
+                model.pane = hosts.macs.first.map { .overview($0.id) }
+            })
+        case .managedMac(let id, _):
+            // The host registers the Mac's runners, so it applies a changed limit to them.
+            return MacViewController(model: MacPaneModel(
+                macs: hosts.macsManaged(by: host.id), id: id, relay: (hosts, host.id),
+                removed: { [model] in model.pane = .overview(host.id) }
+            ))
+        }
+    }
+
+    override var addMacToolTip: String {
+        "Pair with a Mac that runs XcodeHomeRunner to show it here, or pair one of the Macs shown here with a Mac for it to manage."
+    }
+
+    override var addMacMenu: NSMenu? { toolbarMenu }
+
+    /// Pairs this dashboard with a Mac that runs a host, and shows that host.
+    @objc func showMacOnDashboard(_ sender: Any?) {
+        guard !isAddingMac else { return }
+        presentAddMacSheet(for: hosts) { [model] host in model.pane = .overview(host.id) }
+    }
+
+    /// Pairs a host with a Mac for it to manage, and shows that Mac.
+    func addMac(managedBy host: HostPairing.ID) {
+        guard !isAddingMac else { return }
+        presentAddMacSheet(for: hosts.macsManaged(by: host)) { [model] mac in model.pane = .managedMac(mac.id, host: host) }
     }
 }
 
-/// A pane that shows what a host last answered. Values from an earlier read may have changed since, so while the host
-/// does not answer, the pane shows only the connection.
+/// The dashboard's pane while it shows no host.
 @MainActor
-private struct DashboardHostPane<Content: View>: View {
+final class NoMacsViewController: NSViewController {
+    private let hosts: PairedMacs
+    private let addMac: @MainActor () -> Void
+
+    /// - Parameter addMac: Pairs the dashboard with a Mac that runs a host.
+    init(hosts: PairedMacs, addMac: @escaping @MainActor () -> Void) {
+        self.hosts = hosts
+        self.addMac = addMac
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func loadView() {
+        let hosting = NSHostingView(rootView: NoMacsView(hosts: hosts, addMac: addMac))
+        hosting.sizingOptions = []
+        view = hosting
+    }
+}
+
+@MainActor
+private struct NoMacsView: View {
     let hosts: PairedMacs
-    let host: PairedMac
-    @ViewBuilder let content: (PairedMacSettings, HostSettingsReport, GitHubReport) -> Content
+    let addMac: @MainActor () -> Void
 
     var body: some View {
-        Group {
-            if hosts.status(of: host.id) == .online, let settings = hosts.settings(of: host.id),
-               let report = settings.report, let github = settings.github {
-                content(settings, report, github)
-            } else {
-                Form {
-                    Section {
-                        PairedMacConnectionRows(macs: hosts, mac: host.listed)
-                        if let message = hosts.message { ErrorText(message) }
-                    }
-                }
-            }
+        ContentUnavailableView {
+            Label("No Macs", systemImage: "desktopcomputer")
+        } description: {
+            Text("Add a Mac that runs XcodeHomeRunner to show it here. This Mac shows its status and changes its settings without running jobs itself.")
+            // A Mac's pane shows this message while one is listed. It also reports a Mac that was removed here but
+            // could not be told, and pairings that could not be read.
+            if let message = hosts.message { ErrorText(message) }
+        } actions: {
+            Button("Add Mac…", action: addMac)
         }
-        .task(id: host.id) { await hosts.watchSettings(of: host.id) }
     }
 }
 
@@ -383,15 +349,15 @@ private let previewManagedMac = PairedMac(pairing: HostPairing(id: UUID(), name:
 @MainActor
 private func previewDashboardSplitViewController(
     hasHost: Bool, notFound: Bool = false, pane: (HostPairing.ID) -> DashboardPane = { .overview($0) }
-) -> PaneSplitViewController {
+) -> DashboardSplitViewController {
     let store = PreviewSecretStore()
     let host = PairedMac(pairing: HostPairing(id: UUID(), name: "m6mini", key: Data(count: 32)), hostID: UUID())
     if hasHost { try? store.write(JSONEncoder().encode([host])) }
     let hosts = PairedMacs(store: store, name: HostPane.macName, role: .dashboard, browses: false)
     if hasHost, !notFound { connectPreviewMac(host, to: hosts, stopsAnswering: false, managing: previewManagedMac) }
-    let navigation = DashboardNavigation()
-    if hasHost { navigation.pane = pane(host.id) }
-    return makeDashboardSplitViewController(hosts: hosts, navigation: navigation, addMacMenu: NSMenu(title: "Add Mac"))
+    let model = DashboardWindowModel()
+    if hasHost { model.pane = pane(host.id) }
+    return DashboardSplitViewController(hosts: hosts, model: model, addMacMenu: NSMenu(title: "Add Mac"))
 }
 
 #Preview("Dashboard") { previewDashboardSplitViewController(hasHost: true) }
@@ -409,11 +375,5 @@ private func previewDashboardSplitViewController(
 }
 #Preview("Dashboard Without Macs") {
     previewDashboardSplitViewController(hasHost: false)
-}
-#Preview("Dashboard Add Mac", traits: .sizeThatFitsLayout) {
-    AddMacView(
-        macs: PairedMacs(store: PreviewSecretStore(), name: HostPane.macName, role: .dashboard, browses: false),
-        paired: { _ in }, cancel: {}
-    )
 }
 #endif

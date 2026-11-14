@@ -15,6 +15,19 @@ struct WaitingMac: Codable, Equatable, Identifiable, Sendable {
     var mismatch: VersionMismatch?
 }
 
+/// How a pane names the Mac it shows: this Mac in its own window, or another Mac by name.
+struct MacReference {
+    /// `nil` for this Mac.
+    let name: String?
+
+    static let thisMac = MacReference(name: nil)
+
+    /// The Mac at the start of a sentence.
+    var subject: String { name ?? "This Mac" }
+    var object: String { name ?? "this Mac" }
+    var possessive: String { name.map { $0 + "'s" } ?? "this Mac's" }
+}
+
 /// The Macs that a window lists, shows, and changes: the Macs that this Mac paired with, or the Macs that a host
 /// manages, which a dashboard reaches through that host.
 @MainActor
