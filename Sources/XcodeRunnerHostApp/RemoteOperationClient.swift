@@ -142,8 +142,9 @@ struct PathRewriter {
 enum RemoteOperationClient {
     /// Finds the service that a host advertises for its pairing with this Mac.
     ///
-    /// Throws `HostLinkError.incompatible` when the host runs another version of the app.
-    static func find(_ host: PairedMac, version: Int = HostLink.version) async throws -> NWEndpoint {
+    /// Throws `HostLinkError.incompatible` when the host runs a version of the app whose messages this Mac does not
+    /// read.
+    static func find(_ host: PairedMac) async throws -> NWEndpoint {
         let identifier = host.id.uuidString
         let browser = NetworkBrowser(for: .bonjour(HostLink.managementService, includeTxtRecord: true))
         let found: (endpoint: NWEndpoint, version: Int)
@@ -160,9 +161,7 @@ enum RemoteOperationClient {
         } catch HostLinkError.timedOut {
             throw HostLinkError.unreachable("\(host.name) was not found on the local network.")
         }
-        guard found.version == version else {
-            throw HostLinkError.incompatible(VersionMismatch(theirs: found.version, own: version))
-        }
+        guard found.version >= HostLink.oldestVersion else { throw HostLinkError.incompatible(.older) }
         return found.endpoint
     }
 

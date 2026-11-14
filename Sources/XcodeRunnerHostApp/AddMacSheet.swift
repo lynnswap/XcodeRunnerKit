@@ -25,10 +25,10 @@ final class AddMacModel {
     var codeConfirmation: PairedMacs.CodeConfirmation? { macs.codeConfirmation }
     /// Why no Macs can be listed.
     var discoveryMessage: String? { macs.discoveryMessage }
-    /// The waiting Macs that run the same version of the app.
+    /// The waiting Macs that run a version of the app that this Mac's version works with.
     var pairableMacs: [WaitingMac] { macs.waitingMacs.filter { $0.mismatch == nil } }
 
-    /// Why each waiting Mac that runs another version of the app cannot pair until both run the same one.
+    /// Why each waiting Mac that runs too old a version of the app cannot pair until it is updated.
     var versionMismatches: [String] {
         macs.waitingMacs.compactMap { mac in mac.mismatch?.explanation(of: mac.name, for: macs.pairedWith) }
     }

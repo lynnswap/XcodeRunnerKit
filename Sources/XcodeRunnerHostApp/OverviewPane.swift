@@ -247,6 +247,8 @@ private extension HostState {
         case .waitingForStorage: "clock"
         case .needsAttention: "exclamationmark.triangle.fill"
         case .stopping: "stop.circle"
+        // A state of a newer version.
+        default: "circle"
         }
     }
 
@@ -255,7 +257,7 @@ private extension HostState {
         case .running: .green
         case .waitingForStorage: .orange
         case .needsAttention: .red
-        case .starting, .preparingStorage, .stopping: .secondary
+        default: .secondary
         }
     }
 }

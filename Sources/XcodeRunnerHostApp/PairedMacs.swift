@@ -286,7 +286,7 @@ final class PairedMacs: MacList {
         case online
         /// The Mac no longer has this pairing.
         case rejected
-        /// The Mac runs another version of the app, so the Macs cannot read each other's messages.
+        /// The Mac runs another version of the app, and one of the Macs cannot read the other's messages.
         case incompatible(VersionMismatch)
         case unreachable(String)
     }
@@ -385,7 +385,8 @@ final class PairedMacs: MacList {
         pairableMacs.map { mac in
             WaitingMac(
                 id: mac.id, name: mac.name,
-                mismatch: mac.version == version ? nil : VersionMismatch(theirs: mac.version, own: version)
+                // The Mac answers only its own version, so the Macs could not exchange settings after they paired.
+                mismatch: mac.version < HostLink.oldestVersion ? .older : nil
             )
         }
     }
@@ -478,9 +479,7 @@ final class PairedMacs: MacList {
         guard let mac = pairableMacs.first(where: { $0.id == id }) else {
             throw HostLinkError.unreachable("The Mac is no longer waiting to pair.")
         }
-        guard mac.version == version else {
-            throw HostLinkError.incompatible(VersionMismatch(theirs: mac.version, own: version))
-        }
+        guard mac.version >= HostLink.oldestVersion else { throw HostLinkError.incompatible(.older) }
         return try await pair(at: mac.endpoint).listed
     }
 
