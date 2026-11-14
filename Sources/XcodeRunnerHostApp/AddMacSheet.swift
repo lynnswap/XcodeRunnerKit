@@ -78,33 +78,16 @@ final class AddMacModel {
 
 /// The sheet that pairs with a Mac.
 @MainActor
-final class AddMacViewController: NSViewController {
-    private let model: AddMacModel
-
+final class AddMacViewController: NSHostingController<AddMacView> {
     init(model: AddMacModel) {
-        self.model = model
-        super.init(nibName: nil, bundle: nil)
+        super.init(rootView: AddMacView(model: model))
     }
 
     required init?(coder: NSCoder) { nil }
-
-    override func loadView() {
-        view = NSHostingView(rootView: AddMacView(model: model))
-    }
-
-    override func viewWillAppear() {
-        super.viewWillAppear()
-        model.start()
-    }
-
-    override func viewDidDisappear() {
-        super.viewDidDisappear()
-        model.stop()
-    }
 }
 
 @MainActor
-private struct AddMacView: View {
+struct AddMacView: View {
     @Bindable var model: AddMacModel
 
     var body: some View {
@@ -145,6 +128,8 @@ private struct AddMacView: View {
             .padding()
         }
         .frame(width: 440, height: 400)
+        .onAppear { model.start() }
+        .onDisappear { model.stop() }
     }
 
     private var macList: some View {

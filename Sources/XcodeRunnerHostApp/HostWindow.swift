@@ -336,6 +336,7 @@ private struct XcodeSectionPreview: View {
     previewHostSplitViewController(pane: .overview, isSignedIn: true, pairing: .managing)
 }
 #Preview("GitHub") { previewHostSplitViewController(pane: .github, isSignedIn: true) }
+#Preview("GitHub Signed Out") { previewHostSplitViewController(pane: .github, isSignedIn: false) }
 #Preview("Mac") { previewHostSplitViewController(pane: .mac, isSignedIn: true) }
 #Preview("Paused Mac") {
     previewHostSplitViewController(pane: .mac, isSignedIn: true, isPaused: true)
