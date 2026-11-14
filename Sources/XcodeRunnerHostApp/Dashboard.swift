@@ -5,10 +5,9 @@ import SwiftUI
 ///
 /// It creates no runner folders or execution pool, registers no runners, and keeps only the pairings in the Keychain.
 @MainActor
-final class Dashboard: NSObject, NSApplicationDelegate {
+final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
     private let hosts: PairedMacs
     private let navigation = DashboardNavigation()
-    private lazy var addMacMenu = DashboardAddMacMenu(hosts: hosts, navigation: navigation)
     private var windowController: NSWindowController?
     private var stopped = false
 
@@ -42,7 +41,7 @@ final class Dashboard: NSObject, NSApplicationDelegate {
 
     private func showWindow(_ sender: Any?) {
         if windowController == nil {
-            windowController = makeDashboardWindowController(hosts: hosts, navigation: navigation, addMacMenu: addMacMenu.makeMenu())
+            windowController = makeDashboardWindowController(hosts: hosts, navigation: navigation, addMacMenu: makeAddMacMenu())
         }
         NSApplication.shared.activate()
         windowController?.showWindow(nil)
@@ -84,8 +83,12 @@ final class Dashboard: NSObject, NSApplicationDelegate {
         app.addItem(.separator())
         app.addItem(item("Quit XcodeHomeRunner", #selector(NSApplication.terminate(_:)), "q"))
 
-        // The commands that add a Mac come first, and the menu's delegate lists them for the hosts shown now.
-        add(addMacMenu.makeMenu(title: "File", closing: item("Close", #selector(NSWindow.performClose(_:)), "w")))
+        let file = add(NSMenu(title: "File"))
+        let addMac = item("Add Mac", nil)
+        addMac.submenu = makeAddMacMenu()
+        file.addItem(addMac)
+        file.addItem(.separator())
+        file.addItem(item("Close", #selector(NSWindow.performClose(_:)), "w"))
 
         let edit = add(NSMenu(title: "Edit"))
         edit.addItem(item("Undo", Selector(("undo:")), "z"))
@@ -117,48 +120,42 @@ final class Dashboard: NSObject, NSApplicationDelegate {
 
         application.mainMenu = main
     }
-}
 
-/// The commands that add a Mac, in the window's toolbar and in the File menu: this dashboard pairs with a host, or a
-/// host that it shows pairs with a Mac to manage.
-@MainActor
-final class DashboardAddMacMenu: NSObject, NSMenuDelegate {
-    private let hosts: PairedMacs
-    private let navigation: DashboardNavigation
-    /// The items that follow the commands in a menu, such as Close in the File menu.
-    private var trailingItems: [ObjectIdentifier: [NSMenuItem]] = [:]
-
-    init(hosts: PairedMacs, navigation: DashboardNavigation) {
-        self.hosts = hosts
-        self.navigation = navigation
-    }
-
-    /// A menu that lists the commands for the hosts shown when it opens.
-    ///
-    /// - Parameter closing: An item after the commands and a separator.
-    func makeMenu(title: String = "Add Mac", closing: NSMenuItem? = nil) -> NSMenu {
-        let menu = NSMenu(title: title)
+    /// The Add Mac menu of the toolbar and of the File menu. It lists the commands for the hosts shown when it opens.
+    private func makeAddMacMenu() -> NSMenu {
+        let menu = NSMenu(title: "Add Mac")
         menu.delegate = self
-        trailingItems[ObjectIdentifier(menu)] = closing.map { [.separator(), $0] } ?? []
-        menuNeedsUpdate(menu)
         return menu
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        let show = NSMenuItem(title: "Show a Mac on This Dashboard…", action: #selector(addHost(_:)), keyEquivalent: "")
-        show.target = self
-        menu.addItem(show)
+        menu.addItem(withTitle: "Show a Mac on This Dashboard…", action: #selector(showMacOnDashboard(_:)), keyEquivalent: "").target = self
         for host in hosts.macs {
-            let add = NSMenuItem(title: "Add a Mac for \(host.name) to Manage…", action: #selector(addManagedMac(_:)), keyEquivalent: "")
-            add.target = self
-            add.representedObject = host.id
-            menu.addItem(add)
+            let item = menu.addItem(
+                withTitle: "Add a Mac for \(host.name) to Manage…", action: #selector(addManagedMac(_:)), keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = host.id
         }
-        for item in trailingItems[ObjectIdentifier(menu)] ?? [] { menu.addItem(item) }
     }
 
-    @objc private func addHost(_ sender: Any?) { navigation.addition = .host }
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        // One sheet pairs at a time.
+        case #selector(showMacOnDashboard(_:)): return navigation.addition == nil
+        case #selector(addManagedMac(_:)):
+            // A host has to answer, and one that another Mac manages cannot pair with a Mac.
+            guard navigation.addition == nil, let host = item.representedObject as? HostPairing.ID else { return false }
+            return hosts.status(of: host) == .online && hosts.macsManaged(by: host).canAddMacs
+        default: return true
+        }
+    }
+
+    @objc private func showMacOnDashboard(_ sender: Any?) {
+        showWindow(nil)
+        navigation.addition = .host
+    }
 
     @objc private func addManagedMac(_ sender: NSMenuItem) {
         guard let host = sender.representedObject as? HostPairing.ID else { return }
@@ -166,15 +163,6 @@ final class DashboardAddMacMenu: NSObject, NSMenuDelegate {
     }
 }
 
-extension DashboardAddMacMenu: NSMenuItemValidation {
-    func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        // One sheet pairs at a time.
-        guard navigation.addition == nil else { return false }
-        guard let host = item.representedObject as? HostPairing.ID else { return true }
-        // A host has to answer, and one that another Mac manages cannot pair with a Mac.
-        return hosts.status(of: host) == .online && hosts.macsManaged(by: host).canAddMacs
-    }
-}
 
 /// A pane in the dashboard window's sidebar, for one of the hosts.
 enum DashboardPane: Hashable {
@@ -403,8 +391,7 @@ private func previewDashboardSplitViewController(
     if hasHost, !notFound { connectPreviewMac(host, to: hosts, stopsAnswering: false, managing: previewManagedMac) }
     let navigation = DashboardNavigation()
     if hasHost { navigation.pane = pane(host.id) }
-    let menu = DashboardAddMacMenu(hosts: hosts, navigation: navigation)
-    return makeDashboardSplitViewController(hosts: hosts, navigation: navigation, addMacMenu: menu.makeMenu())
+    return makeDashboardSplitViewController(hosts: hosts, navigation: navigation, addMacMenu: NSMenu(title: "Add Mac"))
 }
 
 #Preview("Dashboard") { previewDashboardSplitViewController(hasHost: true) }
