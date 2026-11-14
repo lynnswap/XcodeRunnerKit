@@ -9,7 +9,7 @@ final class Dashboard: NSObject, NSApplicationDelegate {
     private let hosts: PairedMacs
     private let navigation = DashboardNavigation()
     private lazy var addMacMenu = DashboardAddMacMenu(hosts: hosts, navigation: navigation)
-    private var windowController: PaneWindowController?
+    private var windowController: NSWindowController?
     private var stopped = false
 
     init(hosts: PairedMacs) {
@@ -209,18 +209,11 @@ final class DashboardNavigation {
 /// Creates the dashboard window: a sidebar of paired hosts and their panes beside the selected pane, with Add Mac in
 /// its toolbar.
 @MainActor
-func makeDashboardWindowController(hosts: PairedMacs, navigation: DashboardNavigation, addMacMenu: NSMenu) -> PaneWindowController {
-    let controller = PaneWindowController(
-        split: makeDashboardSplitViewController(hosts: hosts, navigation: navigation), autosaveName: "XcodeHomeRunnerDashboard",
-        addMac: .init(
-            toolTip: "Pair with a Mac that runs XcodeHomeRunner to show it here, or pair one of the Macs shown here with a Mac for it to manage.",
-            menu: addMacMenu
-        )
+func makeDashboardWindowController(hosts: PairedMacs, navigation: DashboardNavigation, addMacMenu: NSMenu) -> NSWindowController {
+    makePaneWindowController(
+        content: makeDashboardSplitViewController(hosts: hosts, navigation: navigation, addMacMenu: addMacMenu),
+        autosaveName: "XcodeHomeRunnerDashboard"
     )
-    // The selected pane's navigation title names the window from then on. The bridge does not apply the first title
-    // before the view is in the window.
-    controller.window?.title = dashboardTitle(of: navigation.pane, in: hosts)
-    return controller
 }
 
 /// The name of a pane, which is its window's title, or of the window while no host is shown.
@@ -236,7 +229,9 @@ private func dashboardTitle(of pane: DashboardPane?, in hosts: PairedMacs) -> St
 }
 
 @MainActor
-func makeDashboardSplitViewController(hosts: PairedMacs, navigation: DashboardNavigation) -> NSSplitViewController {
+func makeDashboardSplitViewController(
+    hosts: PairedMacs, navigation: DashboardNavigation, addMacMenu: NSMenu
+) -> PaneSplitViewController {
     if navigation.pane == nil { navigation.pane = hosts.macs.first.map { .overview($0.id) } }
     let sidebar = SidebarViewController(
         groups: {
@@ -257,7 +252,19 @@ func makeDashboardSplitViewController(hosts: PairedMacs, navigation: DashboardNa
     let detail = NSHostingController(rootView: DashboardPaneView(hosts: hosts, navigation: navigation))
     // The selected pane's navigation title names the window, as the host window's panes do.
     detail.sceneBridgingOptions = [.title]
-    return makePaneSplitViewController(sidebar: sidebar, detail: detail)
+    // The split view and the window decide the pane's size, also in a preview's window.
+    detail.sizingOptions = []
+    let split = PaneSplitViewController(
+        sidebar: sidebar, detail: detail,
+        addMac: .init(
+            toolTip: "Pair with a Mac that runs XcodeHomeRunner to show it here, or pair one of the Macs shown here with a Mac for it to manage.",
+            menu: addMacMenu
+        ),
+        autosaveName: "XcodeHomeRunnerDashboard"
+    )
+    // A window takes its first title from its content. The selected pane's navigation title names it from then on.
+    split.title = dashboardTitle(of: navigation.pane, in: hosts)
+    return split
 }
 
 @MainActor
@@ -321,7 +328,6 @@ private struct DashboardPaneView: View {
         }
         .formStyle(.grouped)
         .navigationTitle(dashboardTitle(of: navigation.pane, in: hosts))
-        .frame(minWidth: 440, minHeight: 420)
         .sheet(item: $navigation.addition) { addition in
             switch addition {
             case .host:
@@ -389,7 +395,7 @@ private let previewManagedMac = PairedMac(pairing: HostPairing(id: UUID(), name:
 @MainActor
 private func previewDashboardSplitViewController(
     hasHost: Bool, notFound: Bool = false, pane: (HostPairing.ID) -> DashboardPane = { .overview($0) }
-) -> NSSplitViewController {
+) -> PaneSplitViewController {
     let store = PreviewSecretStore()
     let host = PairedMac(pairing: HostPairing(id: UUID(), name: "m6mini", key: Data(count: 32)), hostID: UUID())
     if hasHost { try? store.write(JSONEncoder().encode([host])) }
@@ -397,23 +403,24 @@ private func previewDashboardSplitViewController(
     if hasHost, !notFound { connectPreviewMac(host, to: hosts, stopsAnswering: false, managing: previewManagedMac) }
     let navigation = DashboardNavigation()
     if hasHost { navigation.pane = pane(host.id) }
-    return makeDashboardSplitViewController(hosts: hosts, navigation: navigation)
+    let menu = DashboardAddMacMenu(hosts: hosts, navigation: navigation)
+    return makeDashboardSplitViewController(hosts: hosts, navigation: navigation, addMacMenu: menu.makeMenu())
 }
 
-#Preview("Dashboard", traits: .fixedLayout(width: 760, height: 620)) { previewDashboardSplitViewController(hasHost: true) }
-#Preview("Dashboard GitHub", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Dashboard") { previewDashboardSplitViewController(hasHost: true) }
+#Preview("Dashboard GitHub") {
     previewDashboardSplitViewController(hasHost: true, pane: { .github($0) })
 }
-#Preview("Dashboard Mac", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Dashboard Mac") {
     previewDashboardSplitViewController(hasHost: true, pane: { .mac($0) })
 }
-#Preview("Dashboard Managed Mac", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Dashboard Managed Mac") {
     previewDashboardSplitViewController(hasHost: true, pane: { .managedMac(previewManagedMac.id, host: $0) })
 }
-#Preview("Dashboard Host Not Found", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Dashboard Host Not Found") {
     previewDashboardSplitViewController(hasHost: true, notFound: true)
 }
-#Preview("Dashboard Without Macs", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Dashboard Without Macs") {
     previewDashboardSplitViewController(hasHost: false)
 }
 #Preview("Dashboard Add Mac", traits: .sizeThatFitsLayout) {

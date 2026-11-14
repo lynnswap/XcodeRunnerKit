@@ -183,23 +183,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 }
 
-/// A sidebar of panes beside the selected pane, which a window and the previews show.
+/// A window's content: a sidebar of panes beside the selected pane. It gives its window the toolbar that hides the
+/// sidebar and adds Macs, so that every window that shows it has one, a preview's window included.
 @MainActor
-func makePaneSplitViewController(sidebar: SidebarViewController, detail: NSViewController) -> NSSplitViewController {
-    let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
-    sidebarItem.minimumThickness = 180
-    sidebarItem.maximumThickness = 320
-    let detailItem = NSSplitViewItem(viewController: detail)
-    detailItem.minimumThickness = 440
-    let split = NSSplitViewController()
-    split.addSplitViewItem(sidebarItem)
-    split.addSplitViewItem(detailItem)
-    return split
-}
-
-/// A window that shows one of several panes, chosen in its sidebar, and adds Macs from its toolbar.
-@MainActor
-final class PaneWindowController: NSWindowController, NSToolbarDelegate, NSToolbarItemValidation {
+final class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSToolbarItemValidation {
     /// The command that pairs with a Mac. People also find it in the menu bar where the app has one.
     struct AddMac {
         let toolTip: String
@@ -211,30 +198,41 @@ final class PaneWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
     private static let addMacIdentifier = NSToolbarItem.Identifier("AddMac")
     private let addMac: AddMac
+    private let autosaveName: String
 
-    /// - Parameters:
-    ///   - split: The window's content, from `makePaneSplitViewController`.
-    ///   - autosaveName: Names the window's saved frame and sidebar width.
-    init(split: NSSplitViewController, autosaveName: String, addMac: AddMac) {
+    /// - Parameter autosaveName: Names the saved sidebar width and the toolbar.
+    init(sidebar: SidebarViewController, detail: NSViewController, addMac: AddMac, autosaveName: String) {
         self.addMac = addMac
-        let window = NSWindow(contentViewController: split)
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
-        window.toolbarStyle = .unified
-        window.isReleasedWhenClosed = false
-        window.tabbingMode = .disallowed
-        super.init(window: window)
-        split.splitView.autosaveName = autosaveName
-        let toolbar = NSToolbar(identifier: autosaveName)
-        toolbar.delegate = self
-        toolbar.displayMode = .iconOnly
-        window.toolbar = toolbar
-        window.setContentSize(NSSize(width: 760, height: 620))
-        window.contentMinSize = NSSize(width: 640, height: 420)
-        window.center()
-        window.setFrameAutosaveName(autosaveName)
+        self.autosaveName = autosaveName
+        super.init(nibName: nil, bundle: nil)
+        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
+        sidebarItem.minimumThickness = 180
+        sidebarItem.maximumThickness = 320
+        let detailItem = NSSplitViewItem(viewController: detail)
+        detailItem.minimumThickness = 400
+        addSplitViewItem(sidebarItem)
+        addSplitViewItem(detailItem)
+        // The size of a window that opens for the first time, and of a preview's window.
+        preferredContentSize = NSSize(width: 760, height: 620)
     }
 
     required init?(coder: NSCoder) { nil }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        splitView.autosaveName = autosaveName
+    }
+
+    override func viewWillAppear() {
+        super.viewWillAppear()
+        guard let window = view.window, window.toolbar?.delegate !== self else { return }
+        let toolbar = NSToolbar(identifier: autosaveName)
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        window.styleMask.insert(.fullSizeContentView)
+        window.toolbarStyle = .unified
+        window.toolbar = toolbar
+    }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, Self.addMacIdentifier]
@@ -270,4 +268,17 @@ final class PaneWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     }
 
     @objc private func performAddMac(_ sender: Any?) { addMac.perform() }
+}
+
+/// Creates a window for panes, which keeps its frame under `autosaveName`.
+@MainActor
+func makePaneWindowController(content: PaneSplitViewController, autosaveName: String) -> NSWindowController {
+    let window = NSWindow(contentViewController: content)
+    window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+    window.isReleasedWhenClosed = false
+    window.tabbingMode = .disallowed
+    window.contentMinSize = NSSize(width: 640, height: 420)
+    window.center()
+    window.setFrameAutosaveName(autosaveName)
+    return NSWindowController(window: window)
 }

@@ -26,8 +26,11 @@ struct HostOptions: ParsableCommand {
     @Option(help: .hidden) var runOnHost: String?
     /// This Mac's folder for the operation's log and result bundle.
     @Option(help: .hidden) var outputDirectory: String?
-    /// An `xcode-runner` command and its options, after `--`.
-    @Argument(parsing: .remaining, help: .hidden) var operation: [String] = []
+    /// An `xcode-runner` command and its options, after `--`. Other arguments are not part of it: Xcode and AppKit
+    /// add their own when they launch the app.
+    @Argument(parsing: .postTerminator, help: .hidden) var operation: [String] = []
+    /// What AppKit reads itself, such as the `-NSDocumentRevisionsDebugMode YES` that Xcode adds when it runs the app.
+    @Argument(parsing: .allUnrecognized, help: .hidden) var applicationArguments: [String] = []
 
     var installation: HostInstallation {
         HostInstallation(homeDirectory: homeDirectory.map { URL(filePath: $0) } ?? HostInstallation.defaultHomeDirectory)
@@ -215,7 +218,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private var settingsServer: HostSettingsServer?
     private var statusItem: NSStatusItem?
     private var poolMenuItem: NSMenuItem?
-    private var settingsWindow: PaneWindowController?
+    private var settingsWindow: NSWindowController?
     private var monitoring: Task<Void, Never>?
     private var poolMonitoring: Task<Void, Never>?
     private var githubMonitoring: Task<Void, Never>?
