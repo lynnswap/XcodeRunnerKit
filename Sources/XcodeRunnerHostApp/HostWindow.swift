@@ -25,11 +25,11 @@ enum HostPane: Hashable {
         }
     }
 
-    var icon: Image {
+    var icon: SidebarRow.Icon {
         switch self {
-        case .overview: Image(systemName: "gauge.with.dots.needle.50percent")
-        case .github: Image("github-mark", bundle: .module)
-        case .mac, .managedMac: Image(systemName: "desktopcomputer")
+        case .overview: .symbol("gauge.with.dots.needle.50percent")
+        case .github: .template("github-mark")
+        case .mac, .managedMac: .symbol("desktopcomputer")
         }
     }
 
@@ -43,70 +43,44 @@ final class HostWindowNavigation {
     var isAddingMac = false
 }
 
-/// Creates the host window: a sidebar of panes beside the selected pane.
+/// Creates the host window: a sidebar of panes beside the selected pane, with Add Mac in its toolbar.
 @MainActor
-func makeHostWindow(settings: HostSettingsModel) -> NSWindow {
+func makeHostWindowController(settings: HostSettingsModel) -> NSWindowController {
     let navigation = HostWindowNavigation()
-    let window = NSWindow(contentViewController: makeHostSplitViewController(settings: settings, navigation: navigation))
-    window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
-    window.toolbarStyle = .unified
-    window.title = navigation.pane.title(in: settings)
-    window.isReleasedWhenClosed = false
-    window.setContentSize(NSSize(width: 760, height: 620))
-    window.contentMinSize = NSSize(width: 640, height: 420)
-    window.setFrameAutosaveName("XcodeHomeRunnerSettings")
-    window.center()
-    return window
+    return makePaneWindowController(
+        content: makeHostSplitViewController(settings: settings, navigation: navigation), autosaveName: "XcodeHomeRunnerSettings"
+    )
 }
 
 @MainActor
-private func makeHostSplitViewController(settings: HostSettingsModel, navigation: HostWindowNavigation) -> NSSplitViewController {
-    let sidebar = NSSplitViewItem(sidebarWithViewController: NSHostingController(rootView: HostSidebar(settings: settings, navigation: navigation)))
-    sidebar.canCollapse = false
-    sidebar.minimumThickness = 180
+private func makeHostSplitViewController(settings: HostSettingsModel, navigation: HostWindowNavigation) -> PaneSplitViewController {
+    func row(_ pane: HostPane) -> SidebarRow { SidebarRow(pane: pane, title: pane.title(in: settings), icon: pane.icon) }
+    let sidebar = SidebarViewController(
+        groups: {
+            [
+                SidebarGroup(title: nil, rows: [row(.overview), row(.github)]),
+                SidebarGroup(title: "Runners", rows: [row(.mac)] + settings.managedMacs.macs.map { row(.managedMac($0.id)) }),
+            ]
+        },
+        selection: { navigation.pane },
+        // A pane always stays selected.
+        select: { if let pane = $0.base as? HostPane { navigation.pane = pane } }
+    )
     let detail = NSHostingController(rootView: HostPaneView(settings: settings, navigation: navigation))
-    // The selected pane's navigation title names the window. The window sets the first title because the bridge
-    // does not apply it before the view is in the window.
     detail.sceneBridgingOptions = [.title]
-    let split = NSSplitViewController()
-    split.addSplitViewItem(sidebar)
-    split.addSplitViewItem(NSSplitViewItem(viewController: detail))
+    // The split view and the window decide the pane's size, also in a preview's window.
+    detail.sizingOptions = []
+    let split = PaneSplitViewController(
+        sidebar: sidebar, detail: detail,
+        addMac: .init(
+            toolTip: "Pair a Mac on the local network so that this Mac manages its runners. A Mac that another Mac manages cannot add Macs.",
+            isEnabled: { settings.canAddMacs }, perform: { navigation.isAddingMac = true }
+        ),
+        autosaveName: "XcodeHomeRunnerSettings"
+    )
+    // A window takes its first title from its content. The selected pane's navigation title names it from then on.
+    split.title = navigation.pane.title(in: settings)
     return split
-}
-
-@MainActor
-private struct HostSidebar: View {
-    let settings: HostSettingsModel
-    let navigation: HostWindowNavigation
-
-    var body: some View {
-        // A sidebar click can deselect the row; a pane always stays selected.
-        let selection = Binding<HostPane?>(get: { navigation.pane }, set: { if let pane = $0 { navigation.pane = pane } })
-        List(selection: selection) {
-            row(.overview)
-            row(.github)
-            Section("Runners") {
-                row(.mac)
-                ForEach(settings.managedMacs.macs) { mac in row(.managedMac(mac.id)) }
-            }
-        }
-        .listStyle(.sidebar)
-        .safeAreaInset(edge: .bottom) {
-            HStack {
-                Button("Add Mac…", systemImage: "plus.circle") { navigation.isAddingMac = true }
-                    .buttonStyle(.borderless)
-                    .disabled(!settings.canAddMacs)
-                    .help(settings.canAddMacs ? "Pair a Mac on the local network so that this Mac manages its runners." : "This Mac is managed by another Mac, so it cannot add Macs.")
-                    .accessibilityIdentifier("add-mac")
-                Spacer()
-            }
-            .padding(10)
-        }
-    }
-
-    private func row(_ pane: HostPane) -> some View {
-        Label { Text(pane.title(in: settings)) } icon: { pane.icon }.tag(pane)
-    }
 }
 
 @MainActor
@@ -144,7 +118,6 @@ private struct HostPaneView: View {
         }
         .formStyle(.grouped)
         .navigationTitle(navigation.pane.title(in: settings))
-        .frame(minWidth: 440, minHeight: 420)
         .sheet(isPresented: $navigation.isAddingMac) {
             AddMacView(macs: settings.managedMacs) { pairing in
                 navigation.isAddingMac = false
@@ -362,7 +335,7 @@ private enum PreviewPairing {
 @MainActor
 private func previewHostSplitViewController(
     pane: HostPane, isSignedIn: Bool, pairing: PreviewPairing = .none, isPaused: Bool = false
-) -> NSSplitViewController {
+) -> PaneSplitViewController {
     let installation = HostInstallation(homeDirectory: .temporaryDirectory.appending(path: UUID().uuidString))
     let github = previewGitHubSettings(installation: installation, isSignedIn: isSignedIn)
     let managingHost = PreviewSecretStore()
@@ -525,55 +498,55 @@ private struct XcodeSectionPreview: View {
     }
 }
 
-#Preview("Xcode Section", traits: .fixedLayout(width: 560, height: 360)) { XcodeSectionPreview() }
-#Preview("Runner Labels Section", traits: .fixedLayout(width: 560, height: 260)) {
+#Preview("Xcode Section") { XcodeSectionPreview() }
+#Preview("Runner Labels Section") {
     @Previewable @State var labels = "fast, xcode-27"
     Form {
         RunnerLabelsSection(labels: $labels, isSaving: false, saveError: nil, mac: MacReference(name: "m1pro")) {}
     }
     .formStyle(.grouped)
 }
-#Preview("New Mac", traits: .fixedLayout(width: 760, height: 620)) { previewHostSplitViewController(pane: .overview, isSignedIn: false) }
-#Preview("Overview", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("New Mac") { previewHostSplitViewController(pane: .overview, isSignedIn: false) }
+#Preview("Overview") {
     previewHostSplitViewController(pane: .overview, isSignedIn: true, pairing: .managing)
 }
-#Preview("GitHub", traits: .fixedLayout(width: 760, height: 620)) { previewHostSplitViewController(pane: .github, isSignedIn: true) }
-#Preview("Mac", traits: .fixedLayout(width: 760, height: 620)) { previewHostSplitViewController(pane: .mac, isSignedIn: true) }
-#Preview("Paused Mac", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("GitHub") { previewHostSplitViewController(pane: .github, isSignedIn: true) }
+#Preview("Mac") { previewHostSplitViewController(pane: .mac, isSignedIn: true) }
+#Preview("Paused Mac") {
     previewHostSplitViewController(pane: .mac, isSignedIn: true, isPaused: true)
 }
-#Preview("Paused Overview", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Paused Overview") {
     previewHostSplitViewController(pane: .overview, isSignedIn: true, isPaused: true)
 }
-#Preview("Waiting to Pair", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Waiting to Pair") {
     previewHostSplitViewController(pane: .mac, isSignedIn: true, pairing: .waitingToPair)
 }
-#Preview("Pairing Request", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Pairing Request") {
     previewHostSplitViewController(pane: .mac, isSignedIn: true, pairing: .asked(by: "m6mini"))
 }
-#Preview("Managed by Another Mac", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Managed by Another Mac") {
     previewHostSplitViewController(pane: .mac, isSignedIn: true, pairing: .managed(by: "m6mini"))
 }
-#Preview("Shown on Dashboards", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Shown on Dashboards") {
     previewHostSplitViewController(pane: .mac, isSignedIn: true, pairing: .shown(on: ["MacBook Pro", "Mac Studio"]))
 }
-#Preview("Dashboard Pairing Request", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Dashboard Pairing Request") {
     previewHostSplitViewController(pane: .mac, isSignedIn: true, pairing: .askedToShow(by: "MacBook Pro"))
 }
-#Preview("Overview Managed by Another Mac", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Overview Managed by Another Mac") {
     previewHostSplitViewController(pane: .overview, isSignedIn: true, pairing: .managed(by: "m6mini"))
 }
-#Preview("Managed Mac", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Managed Mac") {
     previewHostSplitViewController(
         pane: .managedMac(previewManagedMacs[0].id), isSignedIn: true, pairing: .managingConnected(stopsAnswering: false)
     )
 }
-#Preview("Managed Mac Not Responding", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Managed Mac Not Responding") {
     previewHostSplitViewController(
         pane: .managedMac(previewManagedMacs[0].id), isSignedIn: true, pairing: .managingConnected(stopsAnswering: true)
     )
 }
-#Preview("Managed Mac Not Found", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Managed Mac Not Found") {
     previewHostSplitViewController(pane: .managedMac(previewManagedMacs[0].id), isSignedIn: true, pairing: .managing)
 }
 #endif

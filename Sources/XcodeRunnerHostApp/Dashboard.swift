@@ -5,9 +5,10 @@ import SwiftUI
 ///
 /// It creates no runner folders or execution pool, registers no runners, and keeps only the pairings in the Keychain.
 @MainActor
-final class Dashboard: NSObject, NSApplicationDelegate {
+final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
     private let hosts: PairedMacs
-    private var window: NSWindow?
+    private let navigation = DashboardNavigation()
+    private var windowController: NSWindowController?
     private var stopped = false
 
     init(hosts: PairedMacs) {
@@ -15,16 +16,16 @@ final class Dashboard: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApplication.shared.mainMenu = Self.mainMenu()
+        installMainMenu()
         hosts.start()
-        showWindow()
+        showWindow(nil)
         print("Dashboard started.")
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showWindow()
+        showWindow(nil)
         return true
     }
 
@@ -38,43 +39,130 @@ final class Dashboard: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 
-    private func showWindow() {
-        if window == nil { window = makeDashboardWindow(hosts: hosts) }
+    private func showWindow(_ sender: Any?) {
+        if windowController == nil {
+            windowController = makeDashboardWindowController(hosts: hosts, navigation: navigation, addMacMenu: makeAddMacMenu())
+        }
         NSApplication.shared.activate()
-        window?.makeKeyAndOrderFront(nil)
+        windowController?.showWindow(nil)
     }
 
-    /// The menus that a window with text fields needs. The menu bar host has no menu bar of its own.
-    private static func mainMenu() -> NSMenu {
+    @objc private func showHelp(_ sender: Any?) {
+        NSWorkspace.shared.open(URL(string: "https://github.com/lynnswap/XcodeRunnerKit/blob/main/Documentation/NativeHost.md")!)
+    }
+
+    /// The menus that people expect in the menu bar, in their usual order. Every command of the window's toolbar is
+    /// here too, because a toolbar can be hidden. The menu bar host has no menu bar of its own.
+    private func installMainMenu() {
+        let application = NSApplication.shared
         let main = NSMenu()
-        func add(_ title: String, _ items: [NSMenuItem]) {
-            let menu = NSMenu(title: title)
-            for item in items { menu.addItem(item) }
-            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        @discardableResult func add(_ menu: NSMenu) -> NSMenu {
+            let item = NSMenuItem(title: menu.title, action: nil, keyEquivalent: "")
             item.submenu = menu
             main.addItem(item)
+            return menu
         }
-        add("XcodeHomeRunner", [
-            NSMenuItem(title: "Hide XcodeHomeRunner", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h"),
-            .separator(),
-            NSMenuItem(title: "Quit XcodeHomeRunner", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"),
-        ])
-        add("Edit", [
-            NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"),
-            NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z"),
-            .separator(),
-            NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"),
-            NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"),
-            NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"),
-            NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"),
-        ])
-        add("Window", [
-            NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"),
-            NSMenuItem(title: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"),
-        ])
-        return main
+        func item(_ title: String, _ action: Selector?, _ key: String = "", _ modifiers: NSEvent.ModifierFlags = .command) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers
+            return item
+        }
+
+        let app = add(NSMenu(title: "XcodeHomeRunner"))
+        app.addItem(item("About XcodeHomeRunner", #selector(NSApplication.orderFrontStandardAboutPanel(_:))))
+        app.addItem(.separator())
+        let services = NSMenu(title: "Services")
+        let servicesItem = item("Services", nil)
+        servicesItem.submenu = services
+        app.addItem(servicesItem)
+        application.servicesMenu = services
+        app.addItem(.separator())
+        app.addItem(item("Hide XcodeHomeRunner", #selector(NSApplication.hide(_:)), "h"))
+        app.addItem(item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]))
+        app.addItem(item("Show All", #selector(NSApplication.unhideAllApplications(_:))))
+        app.addItem(.separator())
+        app.addItem(item("Quit XcodeHomeRunner", #selector(NSApplication.terminate(_:)), "q"))
+
+        let file = add(NSMenu(title: "File"))
+        let addMac = item("Add Mac", nil)
+        addMac.submenu = makeAddMacMenu()
+        file.addItem(addMac)
+        file.addItem(.separator())
+        file.addItem(item("Close", #selector(NSWindow.performClose(_:)), "w"))
+
+        let edit = add(NSMenu(title: "Edit"))
+        edit.addItem(item("Undo", Selector(("undo:")), "z"))
+        edit.addItem(item("Redo", Selector(("redo:")), "z", [.command, .shift]))
+        edit.addItem(.separator())
+        edit.addItem(item("Cut", #selector(NSText.cut(_:)), "x"))
+        edit.addItem(item("Copy", #selector(NSText.copy(_:)), "c"))
+        edit.addItem(item("Paste", #selector(NSText.paste(_:)), "v"))
+        edit.addItem(item("Delete", #selector(NSText.delete(_:))))
+        edit.addItem(item("Select All", #selector(NSText.selectAll(_:)), "a"))
+
+        // AppKit names these two items for the current state of the sidebar and of the window.
+        let view = add(NSMenu(title: "View"))
+        view.addItem(item("Show Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "s", [.command, .control]))
+        view.addItem(item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]))
+
+        let window = add(NSMenu(title: "Window"))
+        window.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))
+        window.addItem(item("Zoom", #selector(NSWindow.performZoom(_:))))
+        window.addItem(.separator())
+        window.addItem(item("Bring All to Front", #selector(NSApplication.arrangeInFront(_:))))
+        application.windowsMenu = window
+
+        let help = add(NSMenu(title: "Help"))
+        let guide = item("XcodeHomeRunner Help", #selector(showHelp(_:)), "?")
+        guide.target = self
+        help.addItem(guide)
+        application.helpMenu = help
+
+        application.mainMenu = main
+    }
+
+    /// The Add Mac menu of the toolbar and of the File menu. It lists the commands for the hosts shown when it opens.
+    private func makeAddMacMenu() -> NSMenu {
+        let menu = NSMenu(title: "Add Mac")
+        menu.delegate = self
+        return menu
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        menu.addItem(withTitle: "Show a Mac on This Dashboard…", action: #selector(showMacOnDashboard(_:)), keyEquivalent: "").target = self
+        for host in hosts.macs {
+            let item = menu.addItem(
+                withTitle: "Add a Mac for \(host.name) to Manage…", action: #selector(addManagedMac(_:)), keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = host.id
+        }
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        // One sheet pairs at a time.
+        case #selector(showMacOnDashboard(_:)): return navigation.addition == nil
+        case #selector(addManagedMac(_:)):
+            // A host has to answer, and one that another Mac manages cannot pair with a Mac.
+            guard navigation.addition == nil, let host = item.representedObject as? HostPairing.ID else { return false }
+            return hosts.status(of: host) == .online && hosts.macsManaged(by: host).canAddMacs
+        default: return true
+        }
+    }
+
+    @objc private func showMacOnDashboard(_ sender: Any?) {
+        showWindow(nil)
+        navigation.addition = .host
+    }
+
+    @objc private func addManagedMac(_ sender: NSMenuItem) {
+        guard let host = sender.representedObject as? HostPairing.ID else { return }
+        navigation.addition = .mac(managedBy: host)
     }
 }
+
 
 /// A pane in the dashboard window's sidebar, for one of the hosts.
 enum DashboardPane: Hashable {
@@ -106,80 +194,65 @@ final class DashboardNavigation {
     var addition: Addition?
 }
 
-/// Creates the dashboard window: a sidebar of paired hosts and their panes beside the selected pane.
+/// Creates the dashboard window: a sidebar of paired hosts and their panes beside the selected pane, with Add Mac in
+/// its toolbar.
 @MainActor
-func makeDashboardWindow(hosts: PairedMacs) -> NSWindow {
-    let window = NSWindow(contentViewController: makeDashboardSplitViewController(hosts: hosts, navigation: DashboardNavigation()))
-    window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
-    window.toolbarStyle = .unified
-    window.title = "XcodeHomeRunner"
-    window.isReleasedWhenClosed = false
-    window.setContentSize(NSSize(width: 760, height: 620))
-    window.contentMinSize = NSSize(width: 640, height: 420)
-    window.setFrameAutosaveName("XcodeHomeRunnerDashboard")
-    window.center()
-    return window
+func makeDashboardWindowController(hosts: PairedMacs, navigation: DashboardNavigation, addMacMenu: NSMenu) -> NSWindowController {
+    makePaneWindowController(
+        content: makeDashboardSplitViewController(hosts: hosts, navigation: navigation, addMacMenu: addMacMenu),
+        autosaveName: "XcodeHomeRunnerDashboard"
+    )
+}
+
+/// The name of a pane, which is its window's title, or of the window while no host is shown.
+@MainActor
+private func dashboardTitle(of pane: DashboardPane?, in hosts: PairedMacs) -> String {
+    guard let pane, let host = hosts.mac(pane.host) else { return "Dashboard" }
+    return switch pane {
+    case .overview: "Overview"
+    case .github: "GitHub"
+    case .mac: host.name
+    case .managedMac(let id, _): hosts.macsManaged(by: host.id).listedMacs.first { $0.id == id }?.name ?? "Mac"
+    }
 }
 
 @MainActor
-func makeDashboardSplitViewController(hosts: PairedMacs, navigation: DashboardNavigation) -> NSSplitViewController {
+func makeDashboardSplitViewController(
+    hosts: PairedMacs, navigation: DashboardNavigation, addMacMenu: NSMenu
+) -> PaneSplitViewController {
     if navigation.pane == nil { navigation.pane = hosts.macs.first.map { .overview($0.id) } }
-    let sidebar = NSSplitViewItem(sidebarWithViewController: NSHostingController(rootView: DashboardSidebar(hosts: hosts, navigation: navigation)))
-    sidebar.canCollapse = false
-    sidebar.minimumThickness = 180
+    let sidebar = SidebarViewController(
+        groups: {
+            hosts.macs.map { host in
+                SidebarGroup(title: host.name, rows: [
+                    SidebarRow(pane: DashboardPane.overview(host.id), title: "Overview", icon: HostPane.overview.icon),
+                    SidebarRow(pane: DashboardPane.github(host.id), title: "GitHub", icon: HostPane.github.icon),
+                    SidebarRow(pane: DashboardPane.mac(host.id), title: host.name, icon: HostPane.mac.icon),
+                ] + hosts.macsManaged(by: host.id).listedMacs.map { mac in
+                    SidebarRow(pane: DashboardPane.managedMac(mac.id, host: host.id), title: mac.name, icon: HostPane.mac.icon)
+                })
+            }
+        },
+        selection: { navigation.pane },
+        // A pane stays selected while there is a host.
+        select: { if let pane = $0.base as? DashboardPane { navigation.pane = pane } }
+    )
     let detail = NSHostingController(rootView: DashboardPaneView(hosts: hosts, navigation: navigation))
     // The selected pane's navigation title names the window, as the host window's panes do.
     detail.sceneBridgingOptions = [.title]
-    let split = NSSplitViewController()
-    split.addSplitViewItem(sidebar)
-    split.addSplitViewItem(NSSplitViewItem(viewController: detail))
+    // The split view and the window decide the pane's size, also in a preview's window.
+    detail.sizingOptions = []
+    let split = PaneSplitViewController(
+        sidebar: sidebar, detail: detail,
+        addMac: .init(
+            toolTip: "Pair with a Mac that runs XcodeHomeRunner to show it here, or pair one of the Macs shown here with a Mac for it to manage.",
+            menu: addMacMenu
+        ),
+        autosaveName: "XcodeHomeRunnerDashboard"
+    )
+    // A window takes its first title from its content. The selected pane's navigation title names it from then on.
+    split.title = dashboardTitle(of: navigation.pane, in: hosts)
     return split
-}
-
-@MainActor
-private struct DashboardSidebar: View {
-    let hosts: PairedMacs
-    let navigation: DashboardNavigation
-
-    var body: some View {
-        // A sidebar click can deselect the row; a pane stays selected while there is a host.
-        let selection = Binding<DashboardPane?>(get: { navigation.pane }, set: { if let pane = $0 { navigation.pane = pane } })
-        List(selection: selection) {
-            ForEach(hosts.macs) { host in
-                Section(host.name) {
-                    Label("Overview", systemImage: "gauge.with.dots.needle.50percent").tag(DashboardPane.overview(host.id))
-                    Label { Text("GitHub") } icon: { Image("github-mark", bundle: .module) }.tag(DashboardPane.github(host.id))
-                    Label(host.name, systemImage: "desktopcomputer").tag(DashboardPane.mac(host.id))
-                    ForEach(hosts.macsManaged(by: host.id).listedMacs) { mac in
-                        Label(mac.name, systemImage: "desktopcomputer").tag(DashboardPane.managedMac(mac.id, host: host.id))
-                    }
-                }
-            }
-        }
-        .listStyle(.sidebar)
-        .safeAreaInset(edge: .bottom) {
-            HStack {
-                Menu("Add Mac…", systemImage: "plus.circle") {
-                    Button("Show a Mac on This Dashboard…") { navigation.addition = .host }
-                    ForEach(hosts.macs) { host in
-                        Button("Add a Mac for \(host.name) to Manage…") { navigation.addition = .mac(managedBy: host.id) }
-                            .disabled(!canAddMac(to: host))
-                    }
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help("Pair with a Mac that runs XcodeHomeRunner to show it here, or pair one of the Macs shown here with a Mac for it to manage.")
-                .accessibilityIdentifier("add-mac")
-                Spacer()
-            }
-            .padding(10)
-        }
-    }
-
-    /// Whether the host answers and can pair with another Mac. A host that another Mac manages cannot.
-    private func canAddMac(to host: PairedMac) -> Bool {
-        hosts.status(of: host.id) == .online && hosts.macsManaged(by: host.id).canAddMacs
-    }
 }
 
 @MainActor
@@ -232,7 +305,7 @@ private struct DashboardPaneView: View {
                 ContentUnavailableView {
                     Label("No Macs", systemImage: "desktopcomputer")
                 } description: {
-                    Text("Choose Add Mac… to show a Mac that runs XcodeHomeRunner. This Mac shows its status and changes its settings without running jobs itself.")
+                    Text("Add a Mac that runs XcodeHomeRunner to show it here. This Mac shows its status and changes its settings without running jobs itself.")
                     // A Mac's pane shows this message while one is listed. It also reports a Mac that was removed
                     // here but could not be told, and pairings that could not be read.
                     if let message = hosts.message { ErrorText(message) }
@@ -242,8 +315,7 @@ private struct DashboardPaneView: View {
             }
         }
         .formStyle(.grouped)
-        .navigationTitle(title(of: navigation.pane, host: host))
-        .frame(minWidth: 440, minHeight: 420)
+        .navigationTitle(dashboardTitle(of: navigation.pane, in: hosts))
         .sheet(item: $navigation.addition) { addition in
             switch addition {
             case .host:
@@ -261,16 +333,6 @@ private struct DashboardPaneView: View {
                     navigation.addition = nil
                 }
             }
-        }
-    }
-
-    private func title(of pane: DashboardPane?, host: PairedMac?) -> String {
-        guard let pane, let host else { return "XcodeHomeRunner" }
-        return switch pane {
-        case .overview: "Overview"
-        case .github: "GitHub"
-        case .mac: host.name
-        case .managedMac(let id, _): hosts.macsManaged(by: host.id).listedMacs.first { $0.id == id }?.name ?? "Mac"
         }
     }
 
@@ -321,7 +383,7 @@ private let previewManagedMac = PairedMac(pairing: HostPairing(id: UUID(), name:
 @MainActor
 private func previewDashboardSplitViewController(
     hasHost: Bool, notFound: Bool = false, pane: (HostPairing.ID) -> DashboardPane = { .overview($0) }
-) -> NSSplitViewController {
+) -> PaneSplitViewController {
     let store = PreviewSecretStore()
     let host = PairedMac(pairing: HostPairing(id: UUID(), name: "m6mini", key: Data(count: 32)), hostID: UUID())
     if hasHost { try? store.write(JSONEncoder().encode([host])) }
@@ -329,23 +391,23 @@ private func previewDashboardSplitViewController(
     if hasHost, !notFound { connectPreviewMac(host, to: hosts, stopsAnswering: false, managing: previewManagedMac) }
     let navigation = DashboardNavigation()
     if hasHost { navigation.pane = pane(host.id) }
-    return makeDashboardSplitViewController(hosts: hosts, navigation: navigation)
+    return makeDashboardSplitViewController(hosts: hosts, navigation: navigation, addMacMenu: NSMenu(title: "Add Mac"))
 }
 
-#Preview("Dashboard", traits: .fixedLayout(width: 760, height: 620)) { previewDashboardSplitViewController(hasHost: true) }
-#Preview("Dashboard GitHub", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Dashboard") { previewDashboardSplitViewController(hasHost: true) }
+#Preview("Dashboard GitHub") {
     previewDashboardSplitViewController(hasHost: true, pane: { .github($0) })
 }
-#Preview("Dashboard Mac", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Dashboard Mac") {
     previewDashboardSplitViewController(hasHost: true, pane: { .mac($0) })
 }
-#Preview("Dashboard Managed Mac", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Dashboard Managed Mac") {
     previewDashboardSplitViewController(hasHost: true, pane: { .managedMac(previewManagedMac.id, host: $0) })
 }
-#Preview("Dashboard Host Not Found", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Dashboard Host Not Found") {
     previewDashboardSplitViewController(hasHost: true, notFound: true)
 }
-#Preview("Dashboard Without Macs", traits: .fixedLayout(width: 760, height: 620)) {
+#Preview("Dashboard Without Macs") {
     previewDashboardSplitViewController(hasHost: false)
 }
 #Preview("Dashboard Add Mac", traits: .sizeThatFitsLayout) {

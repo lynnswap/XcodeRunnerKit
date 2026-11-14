@@ -27,10 +27,29 @@ struct HostOptions: ParsableCommand {
     /// This Mac's folder for the operation's log and result bundle.
     @Option(help: .hidden) var outputDirectory: String?
     /// An `xcode-runner` command and its options, after `--`.
-    @Argument(parsing: .remaining, help: .hidden) var operation: [String] = []
+    @Argument(parsing: .postTerminator, help: .hidden) var operation: [String] = []
 
     var installation: HostInstallation {
         HostInstallation(homeDirectory: homeDirectory.map { URL(filePath: $0) } ?? HostInstallation.defaultHomeDirectory)
+    }
+
+    /// The arguments for the options above. AppKit reads the others itself as user defaults, each a name with one
+    /// dash and its value, such as the `-NSDocumentRevisionsDebugMode YES` that Xcode adds when it runs the app.
+    static func ownArguments(in arguments: [String]) -> [String] {
+        var own: [String] = []
+        var index = arguments.startIndex
+        while index < arguments.endIndex {
+            let argument = arguments[index]
+            // What follows the terminator is the operation, with its own options.
+            if argument == "--" { return own + arguments[index...] }
+            if argument.hasPrefix("-"), !argument.hasPrefix("--") {
+                index += 2
+            } else {
+                own.append(argument)
+                index += 1
+            }
+        }
+        return own
     }
 
     func validate() throws {
@@ -53,7 +72,7 @@ public enum RunnerHostApplication {
     /// other Macs when this Mac has none.
     @MainActor public static func main() {
         do {
-            let options = try HostOptions.parse()
+            let options = try HostOptions.parse(HostOptions.ownArguments(in: Array(CommandLine.arguments.dropFirst())))
             if let directory = options.serviceDirectory {
                 guard let parent = options.parentProcessID, let ownership = options.ownershipDescriptor,
                       getpgrp() == getpid() else {
@@ -215,7 +234,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private var settingsServer: HostSettingsServer?
     private var statusItem: NSStatusItem?
     private var poolMenuItem: NSMenuItem?
-    private var settingsWindow: NSWindow?
+    private var settingsWindow: NSWindowController?
     private var monitoring: Task<Void, Never>?
     private var poolMonitoring: Task<Void, Never>?
     private var githubMonitoring: Task<Void, Never>?
@@ -378,9 +397,9 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showSettings(_ sender: Any?) {
-        if settingsWindow == nil { settingsWindow = makeHostWindow(settings: settings) }
+        if settingsWindow == nil { settingsWindow = makeHostWindowController(settings: settings) }
         NSApplication.shared.activate()
-        settingsWindow?.makeKeyAndOrderFront(nil)
+        settingsWindow?.showWindow(nil)
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
