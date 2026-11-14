@@ -299,7 +299,9 @@ enum HostLink {
     /// Macs of different versions work together, so the messages change by addition:
     /// - A new request or reply is a new case. A Mac that does not know a request answers `unsupported`, and a Mac
     ///   that cannot read a reply reports the other Mac's version.
-    /// - A new value in a request, a reply, or a report is optional.
+    /// - A request that asks for more than an existing one is a new case too, and existing requests gain no values.
+    ///   A Mac ignores a value that it does not know, and would answer as if it had done what the value asks.
+    /// - A new value in a reply or a report is optional.
     /// - A state that a report names is a type that keeps a raw value it does not know, as `HostState` does. Enums
     ///   that reports carry gain no cases.
     static let version = 7
@@ -401,7 +403,8 @@ enum HostLink {
     /// Accepts connections that use `key` until the task is cancelled.
     ///
     /// A request that this Mac cannot read, or one from a version before `oldestVersion`, is answered with
-    /// `unsupported` and not handled. The sender tells from the reply's version which Mac to update.
+    /// `unsupported` and not handled. So is a following message that this Mac cannot read, which ends its request.
+    /// The sender tells from the reply's version which Mac to update.
     ///
     /// - Parameters:
     ///   - version: The version of this Mac's messages.
@@ -435,6 +438,7 @@ enum HostLink {
                     }
                     try await handle(request, { try await connection.send(Versioned($0, version: version)) }) {
                         guard let request = try await connection.receive().content.payload else {
+                            try await connection.send(Versioned(HostLinkReply.unsupported, version: version))
                             throw HostLinkError.unexpectedReply
                         }
                         return request

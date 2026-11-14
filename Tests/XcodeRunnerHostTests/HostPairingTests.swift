@@ -24,6 +24,24 @@ struct HostPairingTests {
         return try local(management.pairingWindow?.port)
     }
 
+    /// A Mac that answers requests with `handle`, in place of a paired Mac's settings.
+    private func listener(
+        key: SymmetricKey,
+        handle: @escaping @Sendable (
+            HostLinkRequest, _ reply: @escaping @Sendable (HostLinkReply) async throws -> Void,
+            _ next: @escaping @Sendable () async throws -> HostLinkRequest
+        ) async throws -> Void
+    ) async throws -> (task: Task<Void, any Error>, endpoint: NWEndpoint) {
+        let (ports, port) = AsyncStream<NWEndpoint.Port>.makeStream()
+        let task = Task {
+            try await HostLink.listen(
+                key: key, identity: "listener", advertising: nil, ready: { port.yield($0) }, connected: { _ in }, handle: handle
+            )
+        }
+        var found = ports.makeAsyncIterator()
+        return (task, try local(await found.next()))
+    }
+
     /// Pairs the Macs as a person does after seeing the same code on both.
     private func pair(_ macs: PairedMacs, with management: HostManagement) async throws -> PairedMac {
         let endpoint = try await waitToPair(management, as: macs.role)
@@ -852,24 +870,33 @@ struct HostPairingTests {
             return
         }
 
-        // The newer Mac names the Mac to update for the request that its version does not have.
+        // A message that only the newer version has is answered the same way after a request that takes several.
         let key = SymmetricKey(size: .bits256)
-        let (ports, port) = AsyncStream<NWEndpoint.Port>.makeStream()
-        let older = Task {
-            try await HostLink.listen(
-                key: key, identity: "older", advertising: nil, ready: { port.yield($0) }, connected: { _ in }
-            ) { _, reply, _ in
-                try await reply(.unsupported)
-            }
+        let waiting = try await listener(key: key) { _, reply, next in
+            _ = try await next()
+            try await reply(.completed)
         }
-        var found = ports.makeAsyncIterator()
-        let olderPort = try #require(await found.next())
+        let following = NetworkConnection(
+            to: waiting.endpoint, using: .parameters(initialParameters: HostLink.tlsParameters(key: key, identity: "listener")) {
+                Coder(sending: Versioned<LaterRequest>.self, receiving: Versioned<HostLinkReply>.self, using: .json) { TCP() }
+            }
+        )
+        try await following.send(Versioned(LaterRequest.settings(.read), version: HostLink.version + 1))
+        try await following.send(Versioned(LaterRequest.later, version: HostLink.version + 1))
+        guard case .unsupported? = try await following.receive().content.payload else {
+            Issue.record("The Mac did not say that it cannot read a following message")
+            return
+        }
+        waiting.task.cancel()
+
+        // The newer Mac names the Mac to update for the request that its version does not have.
+        let older = try await listener(key: key) { _, reply, _ in try await reply(.unsupported) }
         await #expect(throws: HostLinkError.incompatible(.older)) {
             try await HostLink.send(
-                .settings(.read), to: try local(olderPort), key: key, identity: "older", version: HostLink.version + 1
+                .settings(.read), to: older.endpoint, key: key, identity: "listener", version: HostLink.version + 1
             )
         }
-        older.cancel()
+        older.task.cancel()
 
         // Macs of different versions pair.
         let other = HostManagement(store: MemorySecretStore(), name: "Other", advertises: false)
