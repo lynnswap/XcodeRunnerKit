@@ -65,6 +65,12 @@ struct HostSettingsBridgeTests {
         await #expect(throws: HostSettingsError.self) { _ = try await perform(.settings(.restart)) }
         // A request that the host takes only from a paired Mac is refused as well.
         await #expect(throws: HostSettingsError.self) { _ = try await perform(.unpair) }
+
+        // The host's pairings and its reasons for refusing reach a command the same way.
+        #expect(try await HostControl.pairing(.read) { try await self.request($0, over: connection) }.dashboards.isEmpty)
+        await #expect(throws: HostSettingsError.self) {
+            _ = try await HostControl.pairing(.refuse) { try await self.request($0, over: connection) }
+        }
     }
 
     @Test func commandsConnectTheHostToGitHub() async throws {

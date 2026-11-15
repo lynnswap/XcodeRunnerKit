@@ -20,6 +20,13 @@ final class HostManagement {
         var port: NWEndpoint.Port?
     }
 
+    /// A wait for a Mac to pair that is over, and the pairing that it ended with.
+    struct EndedPairing: Equatable {
+        let window: UUID
+        /// `nil` when no Mac paired: the wait's time ran out, or it was cancelled or its request refused.
+        let paired: HostPairing.ID?
+    }
+
     /// A Mac's request to pair, which the person allows after checking that both Macs show the same code.
     struct PairingPrompt: Equatable {
         /// The request's connection.
@@ -48,6 +55,8 @@ final class HostManagement {
     /// its managing host.
     private(set) var dashboards: [HostPairing] = []
     private(set) var pairingWindow: PairingWindow?
+    /// How the last wait for a Mac to pair ended, for a command that follows the wait it started or confirmed.
+    private(set) var endedPairing: EndedPairing?
     /// Each pairing's listening port, for connections that do not use Bonjour.
     private(set) var ports: [HostPairing.ID: NWEndpoint.Port] = [:]
     /// The paired Macs whose last request came from a version of the app that this Mac does not read. This Mac does
@@ -264,6 +273,7 @@ final class HostManagement {
         guard let window = pairingWindow, let request = window.request else { return }
         // The listener stops once the asking Mac gets the refusal.
         pairingWindow = nil
+        endedPairing = EndedPairing(window: window.id, paired: nil)
         pairingMessage = window.role == .manager
             ? "You did not allow \(request.requesterName) to manage this Mac."
             : "You did not allow \(request.requesterName) to show this Mac."
@@ -323,6 +333,7 @@ final class HostManagement {
             throw PairingRefusal("\(name) could not save the pairing.")
         }
         pairingWindow = nil
+        endedPairing = EndedPairing(window: window, paired: pairing.id)
         // A Mac has one managing host, so a new one replaces the previous one. Dashboards stay as they are.
         if open.role == .manager, let previous = manager { stopListening(to: previous.id) }
         manager = record.manager
@@ -377,6 +388,7 @@ final class HostManagement {
         pairingTask = nil
         guard pairingWindow?.id == window else { return }
         pairingWindow = nil
+        endedPairing = EndedPairing(window: window, paired: nil)
         pairingMessage = message
     }
 

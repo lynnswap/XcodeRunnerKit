@@ -362,8 +362,27 @@ while an account is connected. `reload` and `disconnect` fail with the host's
 repositories, update the `githubRepositories` scope under
 [Settings from CLI and MCP](#settings-from-cli-and-mcp).
 
+A host pairs with a dashboard or a managing Mac through commands too:
+
+```sh
+xcode-runner host pairing status               # paired Macs, and the Mac that asks with its code
+xcode-runner host pairing allow dashboard --wait
+xcode-runner host pairing confirm 123456       # the code that the other Mac shows
+xcode-runner host pairing remove "Dashboard Mac"
+```
+
+`allow` waits five minutes for a Mac to pair as `dashboard` or `manager`, and
+with `--wait` returns once a Mac asked and shows its code. Both Macs show the
+same code unless someone on the network changed the keys between them. In the
+app a person compares the codes. `confirm` takes the code that the other Mac
+shows and compares it with this Mac's: a different code refuses the request
+and ends the wait. The Macs are paired once the other Mac confirmed as well,
+which is when `confirm` returns. `refuse` and `cancel` end the wait, and
+`stop-management` forgets the managing Mac.
+
 These commands send the host what a dashboard sends it, so what a command can
-do and when the host refuses are the same as in the app. They need the
+do and when the host refuses are the same as in the app, and the pairing
+commands follow the conditions of the window's buttons. They need the
 `xcode-runner` at `Contents/Helpers` in the app, which
 `~/Library/Application Support/XcodeRunnerKit/bin/xcode-runner` is on a host.
 

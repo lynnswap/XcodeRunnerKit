@@ -358,6 +358,53 @@ struct HostPairingTests {
         await macs.shutDown()
     }
 
+    @Test func commandsPairAHostWithADashboardGivenItsCode() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = managedMac(at: root)
+        let dashboard = PairedMacs(store: MemorySecretStore(), name: "Dashboard", role: .dashboard, browses: false)
+
+        // A command confirms nothing before a Mac asks, and takes one wait at a time.
+        #expect(throws: HostSettingsError.self) { try host.answer(.confirm(code: "000000")) }
+        #expect(try host.answer(.allow(.dashboard)).window?.role == .dashboard)
+        #expect(throws: HostSettingsError.self) { try host.answer(.allow(.dashboard)) }
+        try await waitUntil { host.management.pairingWindow?.port != nil }
+        let endpoint = try local(host.management.pairingWindow?.port)
+
+        // Another code than the one that this Mac shows for the request refuses it and ends the wait.
+        let refused = Task { try await dashboard.pair(at: endpoint) }
+        try await waitUntil { dashboard.codeConfirmation != nil && host.management.pairingWindow?.request?.code != nil }
+        let shown = try #require(try host.answer(.read).window?.code)
+        #expect(throws: HostSettingsError.self) { try host.answer(.confirm(code: shown == "000000" ? "111111" : "000000")) }
+        #expect(host.management.pairingWindow == nil)
+        await #expect(throws: (any Error).self) { try await refused.value }
+        let afterRefusal: HostPairingReport = try host.answer(.read)
+        #expect(afterRefusal.dashboards.isEmpty && afterRefusal.ended?.paired == nil)
+
+        // The code that the dashboard shows pairs the Macs once the dashboard confirmed too.
+        _ = try host.answer(.allow(.dashboard))
+        try await waitUntil { host.management.pairingWindow?.port != nil }
+        let pairing = Task { try await dashboard.pair(at: try self.local(host.management.pairingWindow?.port)) }
+        try await waitUntil { dashboard.codeConfirmation != nil && host.management.pairingWindow?.request?.code != nil }
+        let code = try #require(dashboard.codeConfirmation?.code)
+        let confirmed = try host.answer(.confirm(code: code)).window
+        #expect(confirmed?.isAllowed == true)
+        dashboard.confirmCode()
+        let paired = try await pairing.value
+        try await waitUntil { host.management.pairingWindow == nil }
+        let report: HostPairingReport = try host.answer(.read)
+        #expect(report.dashboards.map(\.name) == ["Dashboard"] && report.dashboards.map(\.id) == [paired.id])
+        // A command that confirmed the wait learns from its end that this Mac paired.
+        #expect(report.ended == .init(id: try #require(confirmed?.id), paired: paired.id))
+        // The report is what a command prints, and it has no key.
+        #expect(try !String(decoding: JSONEncoder().encode(report), as: UTF8.self).contains("key"))
+
+        #expect(try host.answer(.removeDashboard(paired.id)).dashboards.isEmpty)
+        #expect(throws: HostSettingsError.self) { try host.answer(.removeDashboard(paired.id)) }
+        await host.management.shutDown()
+        await dashboard.shutDown()
+    }
+
     @Test func dashboardsPairWithAHostThatKeepsManagingItsMacs() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

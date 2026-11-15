@@ -48,6 +48,9 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
                     let answer = await answer(request)
                     answered = (request, answer)
                     response = HostSettingsBridgeResponse(reply: try JSONEncoder().encode(answer))
+                case .pairing(let data):
+                    let report = try settings.answer(try JSONDecoder().decode(HostPairingRequest.self, from: data))
+                    response = HostSettingsBridgeResponse(reply: try JSONEncoder().encode(report))
                 case let request:
                     response = await handle(request)
                 }
@@ -86,7 +89,7 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
 
     func handle(_ request: HostSettingsBridgeRequest) async -> HostSettingsBridgeResponse {
         switch request {
-        case .link:
+        case .link, .pairing:
             return HostSettingsBridgeResponse(error: "A request for the host is answered with its reply.")
         case .getRepositories:
             return HostSettingsBridgeResponse(settings: github.repositorySettings)

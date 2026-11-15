@@ -11,8 +11,123 @@ struct HostControl: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "xcode-runner host",
         abstract: "Read and change the host on this Mac.",
-        subcommands: [Status.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self]
+        subcommands: [Status.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self]
     )
+
+    /// The window's Management and Dashboards sections: the Macs that this host is paired with.
+    ///
+    /// Two Macs pair once each was told the code that the other shows, which is the same code unless someone on the
+    /// network changed the keys between them. In the window a person compares the codes; `confirm` takes the other
+    /// Mac's code and compares it itself, so whoever runs commands on both Macs pairs them.
+    struct Pairing: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Pair this host with a dashboard or a managing Mac, and list or remove its pairings.",
+            subcommands: [Status.self, Allow.self, Confirm.self, Refuse.self, Cancel.self, Remove.self, StopManagement.self]
+        )
+
+        struct Status: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Print the paired Macs, and the Mac that asks to pair with its code, as JSON."
+            )
+
+            func run() async throws { try HostControl.write(try await HostControl.pairing(.read)) }
+        }
+
+        struct Allow: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Wait five minutes for a Mac to pair as a dashboard or as the managing Mac."
+            )
+
+            @Argument(help: "dashboard: shows this Mac and changes its settings. manager: registers this Mac's runners too.")
+            var role: PairingRole
+            @Flag(help: "Return once a Mac asked to pair and shows its code, or the wait ended.")
+            var wait = false
+
+            func run() async throws {
+                var report = try await HostControl.pairing(.allow(role))
+                // A wait that starts after this one ended is another one, with another Mac's request.
+                let allowed = report.window?.id
+                while wait, let window = report.window, window.id == allowed, window.code == nil {
+                    try await Task.sleep(for: .seconds(1))
+                    report = try await HostControl.pairing(.read)
+                }
+                try HostControl.write(report)
+                if wait, report.window?.id != allowed {
+                    throw HostSettingsError(report.message ?? "The wait for a Mac to pair ended.")
+                }
+            }
+        }
+
+        struct Confirm: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Allow the Mac that asks to pair, given the code that it shows.",
+                discussion: """
+                    The request is refused if this Mac shows another code for it. The command returns once the Macs \
+                    are paired, which needs the other Mac's confirmation as well, and fails if they did not pair.
+                    """
+            )
+
+            @Argument(help: "The code that the other Mac shows for this pairing.")
+            var code: String
+
+            func run() async throws {
+                var report = try await HostControl.pairing(.confirm(code: code))
+                // The wait ends when the other Mac confirmed too, refused, or left, or when its time is over. A wait
+                // that starts afterwards is another one.
+                let confirmed = report.window?.id
+                while let window = report.window, window.id == confirmed {
+                    try await Task.sleep(for: .seconds(1))
+                    report = try await HostControl.pairing(.read)
+                }
+                try HostControl.write(report)
+                guard let ended = report.ended, ended.id == confirmed, ended.paired != nil else {
+                    throw HostSettingsError(report.errorMessage ?? report.message ?? "The Macs did not pair.")
+                }
+            }
+        }
+
+        struct Refuse: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(abstract: "Refuse the Mac that asks to pair, and stop waiting.")
+
+            func run() async throws { try HostControl.write(try await HostControl.pairing(.refuse)) }
+        }
+
+        struct Cancel: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(abstract: "Stop waiting for a Mac to pair.")
+
+            func run() async throws { try HostControl.write(try await HostControl.pairing(.cancel)) }
+        }
+
+        struct Remove: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Forget a dashboard. It can no longer connect until the Macs pair again."
+            )
+
+            @Argument(help: "The dashboard's name or ID, as `status` prints them.")
+            var dashboard: String
+
+            func run() async throws {
+                let dashboards = try await HostControl.pairing(.read).dashboards
+                let named = dashboards.filter { $0.name == dashboard || $0.id.uuidString.caseInsensitiveCompare(dashboard) == .orderedSame }
+                guard let match = named.first else {
+                    throw HostSettingsError("This host is paired with no dashboard named \(dashboard).")
+                }
+                guard named.count == 1 else {
+                    throw HostSettingsError("This host is paired with \(named.count) dashboards named \(dashboard). Pass the ID of one.")
+                }
+                try HostControl.write(try await HostControl.pairing(.removeDashboard(match.id)))
+            }
+        }
+
+        struct StopManagement: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                commandName: "stop-management",
+                abstract: "Forget the managing Mac. It can no longer connect until the Macs pair again."
+            )
+
+            func run() async throws { try HostControl.write(try await HostControl.pairing(.stopManagement)) }
+        }
+    }
 
     /// The GitHub pane's controls. The repository selection is a setting of `xcode-runner host settings`.
     struct GitHub: AsyncParsableCommand {
@@ -197,9 +312,25 @@ struct HostControl: AsyncParsableCommand {
         return report
     }
 
+    /// Asks this Mac's host about its pairings, or to change them. Throws the host's reason when it refuses.
+    ///
+    /// - Parameter bridge: Sends the request to the running host. Tests pass a connection to a host of their own.
+    @MainActor static func pairing(
+        _ request: HostPairingRequest,
+        over bridge: (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = HostSettingsBridge.request
+    ) async throws -> HostPairingReport {
+        let response = try await bridge(.pairing(JSONEncoder().encode(request)))
+        if let error = response.error { throw HostSettingsError(error) }
+        guard let data = response.reply else {
+            throw HostSettingsError("The host that runs on this Mac does not take this command. Update it and try again.")
+        }
+        return try JSONDecoder().decode(HostPairingReport.self, from: data)
+    }
+
     static func write(_ answer: some Encodable) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
         try FileHandle.standardOutput.write(contentsOf: encoder.encode(answer) + Data("\n".utf8))
     }
 
@@ -220,3 +351,5 @@ struct HostControl: AsyncParsableCommand {
         return reply
     }
 }
+
+extension PairingRole: ExpressibleByArgument {}
