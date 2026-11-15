@@ -1,22 +1,26 @@
 import SwiftUI
 
-/// This Mac's pairing with a managing host, in its Overview.
+/// This Mac's roles, in its settings: a host, a runner, or both. A Mac that is no host is managed by a host on another
+/// Mac, so turning the role off pairs this Mac with that host, and turning it on again ends the pairing.
 @MainActor
-struct HostManagementSection: View {
+struct MacRolesSection: View {
     let model: OverviewModel
     let management: HostManagement
     @State private var isConfirmingStop = false
 
     var body: some View {
+        let isHost = model.isHost ?? true
+        let isRunner = model.isRunner ?? true
         Section {
+            Toggle(isOn: Binding(get: { isHost }, set: setHost)) {
+                Text("Host")
+                Text("Signs in to GitHub and registers runners, for this Mac and for the Macs that it manages.")
+            }
+            // A host that manages Macs stays one until they are removed.
+            .disabled(isHost && !model.canStopHosting)
+            .accessibilityIdentifier("host-role")
             if let manager = management.manager {
-                LabeledContent("Managed by") {
-                    HStack {
-                        Text(manager.name)
-                        Button("Stop Management…", role: .destructive) { isConfirmingStop = true }
-                            .accessibilityIdentifier("stop-management")
-                    }
-                }
+                LabeledContent("Managed by", value: manager.name)
                 if let mismatch = management.versionMismatches[manager.id] {
                     Text("\(mismatch.explanation(of: manager.name, for: .thisMac)) Until then, \(manager.name) cannot manage this Mac.")
                         .font(.callout).foregroundStyle(.secondary)
@@ -24,12 +28,9 @@ struct HostManagementSection: View {
             } else if let window = management.pairingWindow, window.role == .manager {
                 PairingWindowRows(management: management, window: window)
             } else {
-                LabeledContent {
-                    Button("Allow Management…") { management.allowManagement() }
-                        .disabled(!model.canAllowManagement || management.pairingWindow != nil)
-                        .accessibilityIdentifier("allow-management")
-                } label: {
-                    Text(managementDescription)
+                if model.managedMacCount > 0 {
+                    Text("This Mac manages \(model.managedMacCount == 1 ? "1 Mac" : "\(model.managedMacCount) Macs"). Remove them to turn this off.")
+                        .font(.callout).foregroundStyle(.secondary)
                 }
                 if management.pairingWindow == nil, let message = management.pairingMessage {
                     Text(message).font(.callout).foregroundStyle(.secondary)
@@ -37,28 +38,43 @@ struct HostManagementSection: View {
             }
             if let error = management.errorMessage { ErrorText(error) }
             if let message = model.managedMacsMessage { ErrorText(message) }
+            Toggle(isOn: Binding(get: { isRunner }, set: model.setRunner)) {
+                Text("Runner")
+                Text("Runs jobs on this Mac.")
+            }
+            .accessibilityIdentifier("runner-role")
+            if !isRunner {
+                Text("This Mac is paused. Its runner services stop after the jobs that they run, and its runners stay registered and appear offline on GitHub.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            if let error = model.runnerError { ErrorText(error) }
         } header: {
-            Text("Management")
+            Text("Roles")
         } footer: {
-            Text("Another Mac on the local network can manage this Mac's runners after you pair them here. Each Mac keeps the pairing in its Keychain.")
+            Text("A Mac can be both. One that is no host runs the jobs of a host on another Mac on the local network, which pairs with it here. Each Mac keeps the pairing in its Keychain.")
         }
         .confirmationDialog(
-            "Stop management by \(management.manager?.name ?? "the managing Mac")?", isPresented: $isConfirmingStop
+            "Stop management by \(management.manager?.name ?? "the host")?", isPresented: $isConfirmingStop
         ) {
-            Button("Stop Management", role: .destructive) { management.stopManagement() }
+            Button("Stop Management", role: .destructive) { model.becomeHost() }
         } message: {
-            Text("The managing Mac can no longer connect to this Mac. To manage it again, pair the Macs again.")
+            Text("The host can no longer connect to this Mac, which becomes a host itself. To have that host manage it again, pair the Macs again.")
         }
     }
 
-    private var managementDescription: String {
-        let count = model.managedMacCount
-        if count > 0 { return "This Mac manages \(count == 1 ? "1 Mac" : "\(count) Macs"). Remove them to let another Mac manage this one." }
-        return "Not managed by another Mac"
+    private func setHost(_ isHost: Bool) {
+        if !isHost {
+            model.stopHosting()
+        } else if management.manager != nil {
+            // Ending a host's management needs a confirmation, and ending a wait does not.
+            isConfirmingStop = true
+        } else {
+            model.becomeHost()
+        }
     }
 }
 
-/// The dashboards that show this Mac, in its Overview.
+/// The dashboards that show this Mac, in its settings.
 @MainActor
 struct HostDashboardsSection: View {
     let management: HostManagement
@@ -105,7 +121,7 @@ struct HostDashboardsSection: View {
 
 /// The Mac that asks to pair while this Mac waits, for a managing Mac or a dashboard.
 @MainActor
-private struct PairingWindowRows: View {
+struct PairingWindowRows: View {
     let management: HostManagement
     let window: HostManagement.PairingWindow
 
@@ -134,7 +150,7 @@ private struct PairingWindowRows: View {
                 Text("Connecting to \(request.requesterName)…").foregroundStyle(.secondary)
             }
         } else {
-            LabeledContent(window.role == .manager ? "Waiting for a managing Mac" : "Waiting for a dashboard") {
+            LabeledContent(window.role == .manager ? "Waiting for a host" : "Waiting for a dashboard") {
                 Text(window.expiresAt, style: .timer).monospacedDigit()
             }
             Text(instruction).font(.callout).foregroundStyle(.secondary)
@@ -154,7 +170,7 @@ private struct PairingWindowRows: View {
 
     private var instruction: String {
         switch window.role {
-        case .manager: "On the managing Mac, choose Add Mac… in Overview and select \(HostPane.macName)."
+        case .manager: "On the host, choose Add Mac… in Settings and select \(HostPane.macName)."
         case .dashboard: "On the other Mac, open XcodeHomeRunner, choose File > Add Mac > Show a Mac on This Dashboard…, and select \(HostPane.macName)."
         }
     }

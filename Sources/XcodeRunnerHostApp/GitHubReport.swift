@@ -1,6 +1,6 @@
 import Foundation
 
-/// One repository's runners on a host and the Macs it manages, as Overview shows them.
+/// One repository's runners on a host and the Macs it manages, as Settings shows them.
 struct RepositoryRunnerReport: Codable, Equatable, Identifiable, Sendable {
     let id: Int
     let fullName: String

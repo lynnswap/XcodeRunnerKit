@@ -3,8 +3,8 @@ import Observation
 
 /// A pane in the host window's sidebar.
 enum HostPane: Hashable {
+    /// The Mac's role, status, GitHub sign-in, repositories, and pairings.
     case overview
-    case github
     /// This Mac's runner services and execution settings, listed under Runners.
     case mac
     /// A Mac that this host manages, listed under Runners.
@@ -12,8 +12,7 @@ enum HostPane: Hashable {
 
     @MainActor func title(in settings: HostSettingsModel) -> String {
         switch self {
-        case .overview: "Overview"
-        case .github: "GitHub"
+        case .overview: "Settings"
         case .mac: Self.macName
         case .managedMac(let id): settings.managedMacs.mac(id)?.name ?? "Mac"
         }
@@ -21,8 +20,7 @@ enum HostPane: Hashable {
 
     var icon: SidebarRow.Icon {
         switch self {
-        case .overview: .symbol("gauge.with.dots.needle.50percent")
-        case .github: .template("github-mark")
+        case .overview: .symbol("gearshape")
         case .mac, .managedMac: .symbol("desktopcomputer")
         }
     }
@@ -45,15 +43,12 @@ final class HostWindowModel: PaneWindowModel {
 
     var sidebarGroups: [SidebarGroup] {
         let report = HostSettingsReport(settings)
-        let github = settings.github.report
         func row(_ pane: HostPane, subtitle: String?, status: SidebarRow.Status? = nil) -> SidebarRow {
             SidebarRow(pane: pane, title: pane.title(in: settings), subtitle: subtitle, icon: pane.icon, status: status)
         }
         return [
             SidebarGroup(title: nil, rows: [
                 row(.overview, subtitle: report.stateTitle, status: .init(symbol: report.stateSymbol, color: report.stateTint)),
-                // The account is not known until the saved sign-in is read.
-                row(.github, subtitle: github.accountLogin ?? (github.hasRestored ? "Not connected" : nil)),
             ]),
             SidebarGroup(title: "Runners", rows: [row(.mac, subtitle: report.runnerCountTitle)] + settings.managedMacs.macs.map {
                 let status = settings.managedMacs.status(of: $0.id)
@@ -87,10 +82,7 @@ final class HostSplitViewController: PaneSplitViewController {
     override func makePaneViewController() -> NSViewController {
         switch model.pane {
         case .overview:
-            OverviewViewController(model: OverviewModel(
-                settings: settings, showGitHub: { [model] in model.pane = .github }, addMac: { [weak self] in self?.addMac() }
-            ))
-        case .github: GitHubViewController(model: GitHubPaneModel(settings: settings))
+            OverviewViewController(model: OverviewModel(settings: settings) { [weak self] in self?.addMac() })
         case .mac: MacViewController(model: MacPaneModel(settings: settings))
         case .managedMac(let id):
             MacViewController(model: MacPaneModel(
@@ -119,11 +111,9 @@ func makeHostWindowController(settings: HostSettingsModel) -> NSWindowController
 
 #if DEBUG
 #Preview("New Mac") { HostPreview.hostWindow(pane: .overview, isSignedIn: false) }
-#Preview("Overview") {
+#Preview("Settings") {
     HostPreview.hostWindow(pane: .overview, isSignedIn: true, pairing: .managing)
 }
-#Preview("GitHub") { HostPreview.hostWindow(pane: .github, isSignedIn: true) }
-#Preview("GitHub Signed Out") { HostPreview.hostWindow(pane: .github, isSignedIn: false) }
 #Preview("Mac") { HostPreview.hostWindow(pane: .mac, isSignedIn: true) }
 #Preview("Mac With Removed Xcode") {
     HostPreview.hostWindow(pane: .mac, isSignedIn: true, savedXcodeIsRemoved: true)
@@ -131,7 +121,7 @@ func makeHostWindowController(settings: HostSettingsModel) -> NSWindowController
 #Preview("Paused Mac") {
     HostPreview.hostWindow(pane: .mac, isSignedIn: true, isPaused: true)
 }
-#Preview("Paused Overview") {
+#Preview("Paused Settings") {
     HostPreview.hostWindow(pane: .overview, isSignedIn: true, isPaused: true)
 }
 #Preview("Waiting to Pair") {

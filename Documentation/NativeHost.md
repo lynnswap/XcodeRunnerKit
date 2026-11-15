@@ -82,15 +82,15 @@ failed download stops the job.
 Hosts sign in through the shared
 [XcodeHomeRunner GitHub App](https://github.com/apps/xcodehomerunner), so you
 do not create a GitHub App. Click the hammer icon in the menu bar and open
-**Settings…**. Until this Mac is set up, **Overview** lists these steps and
-offers the next one.
+**Settings…**. The window's **Settings** pane has the Mac's roles, its GitHub
+sign-in, and its repositories.
 
-1. Choose **Connect GitHub…**. GitHub's device page opens, and the **GitHub**
-   pane shows a code. Enter the code on that page and authorize the app.
-2. Choose **Add Repositories on GitHub…**, install the app, and select the
-   repositories this Mac will run.
-3. Return to the window and choose **Reload**.
-4. In **GitHub**, select the repositories to manage and choose **Apply**.
+1. Under **GitHub**, choose **Connect GitHub…**. GitHub's device page opens,
+   and the pane shows a code. Enter the code on that page and authorize the app.
+2. Under **Repositories**, choose **Add Repositories on GitHub…**, install the
+   app, and select the repositories this Mac will run.
+3. Return to the window and choose the reload button beside **Repositories**.
+4. Switch on the repositories to manage and choose **Apply**.
 
 Enter only codes shown in this window. Entering a code that someone else
 sent you gives them access to your repositories as you.
@@ -122,8 +122,8 @@ for an Xcode slot.
 Lowering the limit lets running operations finish. Extra runner registrations
 stay in place. Deselecting a repository and choosing **Apply** unregisters this
 Mac's runners for it from GitHub and deletes them. A busy runner is removed at a
-later synchronization, after its current job finishes, and Overview lists the
-repository until then. While the app is signed out or cannot access the
+later synchronization, after its current job finishes, and **Settings** lists
+the repository until then. While the app is signed out or cannot access the
 repository, the removal waits. Other runners stay in place, such as those of a
 selected repository that the app can no longer access, those registered manually
 for a repository that was never selected, and those that GitHub no longer lists
@@ -144,7 +144,7 @@ Devices in use finish before they are removed, so lowering the limit can
 temporarily leave more devices than the new limit. Runner registrations and
 GitHub's in-progress job count can still be higher.
 
-**Overview** shows the host status, the running and waiting Xcode jobs, and each
+**Settings** shows the host status, the running and waiting Xcode jobs, and each
 repository's online and busy runner counts with any error. This Mac's pane under
 **Runners** lists its runner services. The host retries synchronization every
 five minutes while signed in. Pool and repository settings are saved separately; editing one does not
@@ -154,14 +154,15 @@ stops registration management; it leaves existing runner services running.
 ### Pause a Mac
 
 To use a Mac for something else for a while, turn off **Take new jobs** under
-**Runner Services** in its pane. The host stops each runner service once the
+**Runner Services** in its pane, or **Runner** under **Roles** in its own
+**Settings**, which is the same setting. The host stops each runner service once the
 runner has no job, and starts none, so the jobs that run finish. A job that a
 runner takes in the instant before its service stops is cancelled, as when the
 host quits. The runners stay registered and appear offline on GitHub, where
 their jobs wait or go to other runners with the same labels. A paused Mac also refuses a build or test
 that a dashboard sends with `--host`, and finishes one that it accepted before,
-also when that one still waits for a place in the job limit. Overview shows the
-Mac as **Paused**.
+also when that one still waits for a place in the job limit. **Settings** shows
+the Mac as **Paused**.
 
 Turning **Take new jobs** on starts the runner services again without
 registering anything. The setting is kept across restarts of the host, and the
@@ -173,10 +174,10 @@ Mac.
 One host can list the other XcodeHomeRunner hosts on your local network under
 **Runners**. Install the app on each Mac first, then pair them:
 
-1. On the Mac to add, open **Settings…** and choose **Allow Management…** in
-   **Overview**. The Mac waits five minutes for a managing Mac.
-2. On the managing Mac, choose **Add Mac…** in **Overview**, select the Mac, and
-   choose **Continue**. Both Macs show a six-digit code.
+1. On the Mac to add, open **Settings…** and turn off **Host** under **Roles**.
+   The Mac waits five minutes for a host.
+2. On the managing Mac, the host, choose **Add Mac…** in **Settings**, select
+   the Mac, and choose **Continue**. Both Macs show a six-digit code.
 3. If the codes match, choose **Pair** on the managing Mac and **Allow** on the
    added Mac. A different code means that another device answered, so choose
    **Don't Allow**.
@@ -184,28 +185,31 @@ One host can list the other XcodeHomeRunner hosts on your local network under
 The added Mac needs no GitHub sign-in, Remote Login, or SSH key. Each Mac keeps
 the pairing key in its Keychain, and the key never crosses the network. The
 added Mac considers one request at a time. It stops waiting when you choose
-**Don't Allow** or when a request ends before the Macs pair; choose **Allow
-Management…** again to retry. Pairing uses Bonjour, so macOS asks for local
-network access the first time you choose **Allow Management…** or **Add Mac…**.
+**Don't Allow** or when a request ends before the Macs pair; turn off **Host**
+again to retry. Pairing uses Bonjour, so macOS asks for local network access
+the first time you turn off **Host** or choose **Add Mac…**.
 If you declined, allow XcodeHomeRunner in **System Settings > Privacy &
 Security > Local Network**.
 
-A Mac either manages other Macs or is managed by one. Each paired Mac's pane
+A Mac has two roles, and can have both: a host signs in to GitHub and registers
+runners, for itself and for the Macs that it manages, and a runner runs jobs.
+A Mac that is no host is managed by one, and a host that manages Macs stays a
+host until they are removed. Each paired Mac's pane
 shows whether the managing Mac can connect to it and, while that Mac answers,
 its host status, runner services, Xcode job counts, job limit, Simulator
 retention, and storage folder. **Apply** and **Save** there change that Mac's
 settings with the same checks as its own window; type the storage folder's path,
 because the managing Mac cannot browse the other Mac's folders. When the Mac
 does not answer, its pane hides these values and shows when they were last
-read. **Remove Mac…** ends the pairing on both Macs. **Stop Management…** on a
-managed Mac ends it there; the managing Mac then shows that Mac as not found
-until you remove it.
+read. **Remove Mac…** ends the pairing on both Macs. Turning on **Host** on a
+managed Mac ends it there, after a confirmation; the managing Mac then
+shows that Mac as not found until you remove it.
 
 The managing Mac also registers runners on each paired Mac for the repositories
-selected in its **GitHub** pane, up to that Mac's job limit, and removes them
+selected in its **Settings**, up to that Mac's job limit, and removes them
 when you deselect a repository. It sends the paired Mac only short-lived
 registration tokens, never its GitHub sign-in, and removes registrations from
-GitHub itself. **Overview** on the managing Mac counts the runners on all its
+GitHub itself. **Settings** on the managing Mac counts the runners on all its
 Macs and names the Mac in each of its errors. A Mac that does not answer keeps
 its runners, and a deselected repository stays listed until that Mac answers
 and its runners are removed. A newly paired Mac gets its runners at the next
@@ -223,11 +227,11 @@ only its pairings, in that Mac's Keychain.
 
 The dashboard stays in the menu bar after its window closes. The menu of its
 hammer icon lists each host with its state and jobs; choose a host to open its
-**Overview**, or **Open Dashboard** for the window. Choose **Quit
+**Settings**, or **Open Dashboard** for the window. Choose **Quit
 XcodeHomeRunner** there to end it.
 
-1. On the host, open **Settings…** and choose **Allow Dashboard…** in
-   **Overview**. The host waits five minutes for a dashboard.
+1. On the host, open **Settings…** and choose **Allow Dashboard…** under
+   **Dashboards**. The host waits five minutes for a dashboard.
 2. On the other Mac, open XcodeHomeRunner and choose **Add Mac…**, which its
    window shows while it has no Mac, or **File > Add Mac > Show a Mac on This
    Dashboard…**. Select the host and choose **Continue**. Both Macs show a
@@ -236,9 +240,9 @@ XcodeHomeRunner** there to end it.
    host. A different code means that another device answered, so choose
    **Don't Allow**.
 
-Each host has the panes of its own window: **Overview**, **GitHub**, the host
-under its name, and the Macs that it manages. While the host answers, they show
-its status, repositories and runner counts, runner services, Xcode job counts,
+Each host has the panes of its own window: **Settings**, and under **Runners**
+the host by its name and the Macs that it manages. While the host answers, they
+show its status, GitHub sign-in, repositories and runner counts, runner services, Xcode job counts,
 job limit, Simulator retention, and storage folder. **Apply** and **Save** change them with the same
 checks as the host's own window. After a changed job limit, the host registers
 its runners itself; for a host that another Mac manages, that Mac does at its
@@ -246,21 +250,20 @@ next synchronization. When the host does not answer, the dashboard hides these
 values and shows when they were last read.
 
 To connect a host to GitHub from the dashboard, choose **Connect GitHub…** in
-its **GitHub** pane. The host starts the sign-in, the dashboard shows the code,
+its **Settings**. The host starts the sign-in, the dashboard shows the code,
 and GitHub's page opens in the dashboard's browser, as does **Add Repositories
 on GitHub…**. The host keeps the login tokens and sends the dashboard neither
 them nor anything that completes a sign-in. **Apply** saves the repository
-selection on the host, which then registers and removes runners; Overview shows
-the progress. Changes made in the host's own window or on another dashboard
+selection on the host, which then registers and removes runners; the
+repositories show the progress. Changes made in the host's own window or on another dashboard
 appear within a few seconds.
 
 The dashboard reaches the Macs that a host manages through the host and does
 not pair with them. Their panes show what the host's own panes for them show,
 with the same controls, and a Mac that the host cannot reach appears that way.
 To have a host manage another Mac, choose **Add Mac…** in the host's
-**Overview**. The **File** menu's **Add Mac** has the same command for each
-host. The host looks for Macs that wait after **Allow
-Management…**, and the dashboard shows the code: choose **Pair** on the
+**Settings**. The **File** menu's **Add Mac** has the same command for each
+host. The host looks for Macs that wait with **Host** turned off, and the dashboard shows the code: choose **Pair** on the
 dashboard and **Allow** on the Mac being added. **Remove Mac…** in a managed
 Mac's pane ends its pairing with the host.
 
@@ -361,7 +364,7 @@ Restarting stops the runner services with the jobs that they run. `restart` is
 refused unless the host last counted no Xcode job on the Mac; pass `--stop-jobs`
 to restart anyway. A job can start between that count and the restart.
 
-The GitHub pane's controls are commands as well:
+The controls under **GitHub** and **Repositories** are commands as well:
 
 ```sh
 xcode-runner host github status         # sign-in, repositories, and their runners
