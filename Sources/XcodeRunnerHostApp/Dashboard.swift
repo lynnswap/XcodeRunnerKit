@@ -195,6 +195,7 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         addMac.submenu = makeAddMacMenu()
         file.addItem(addMac)
         file.addItem(.separator())
+        file.addItem(item("Save", #selector(PaneSplitViewController.savePane(_:)), "s"))
         file.addItem(item("Close", #selector(NSWindow.performClose(_:)), "w"))
 
         let edit = add(NSMenu(title: "Edit"))

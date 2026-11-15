@@ -274,7 +274,7 @@ creating it. `status.configuration` contains `maximumConcurrentJobs` and
 waiting operations. Waiting operations start in arrival order, as registered
 under the pool lock. Running operations keep their slot through cleanup.
 
-For a native GitHub Actions host, use **Apply** in the app's execution settings.
+For a native GitHub Actions host, change the limit in the Mac's pane and choose **Save**.
 The app synchronizes runner registrations to the saved job limit.
 The CLI's `pool configure` command saves the local configuration without requiring
 the app or a GitHub connection. GitHub assigns jobs to runners before they enter

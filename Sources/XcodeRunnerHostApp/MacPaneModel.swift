@@ -39,7 +39,7 @@ extension PairedMacs {
 /// What a Mac's pane shows and does: this Mac in its own window, a Mac that this Mac paired with, or a Mac that a
 /// dashboard reaches through its host.
 @MainActor @Observable
-final class MacPaneModel {
+final class MacPaneModel: PaneSaving {
     private enum Source {
         case thisMac(HostSettingsModel)
         case listed(any MacList, HostPairing.ID)
@@ -141,9 +141,11 @@ final class MacPaneModel {
         }
     }
 
-    var isSavingRunnerLabels: Bool { thisMac?.isSavingRunnerLabels ?? paired?.isSavingRunnerLabels ?? false }
-    // A Save or Apply button is offered for an edited value, and after a failure, when saving the same value again
-    // can repair what failed.
+    var isSavingRunnerLabels: Bool {
+        valuesBeingSaved.contains(.runnerLabels) || thisMac?.isSavingRunnerLabels ?? paired?.isSavingRunnerLabels ?? false
+    }
+    // A value can be saved once it is edited, and after a failure, when saving the same value again can repair what
+    // failed.
 
     var canSaveRunnerLabels: Bool {
         guard let report, !isSavingRunnerLabels else { return false }
@@ -151,12 +153,10 @@ final class MacPaneModel {
     }
     var runnerLabelsError: String? { thisMac?.runnerLabelsError ?? paired?.runnerLabelsError }
 
-    func saveRunnerLabels() {
-        Task {
-            switch source {
-            case .thisMac(let settings): await settings.saveRunnerLabelsInput()
-            case .listed(let macs, let id): if await macs.saveRunnerLabels(of: id) { await registrationsChanged() }
-            }
+    private func saveRunnerLabels() async {
+        switch source {
+        case .thisMac(let settings): await settings.saveRunnerLabelsInput()
+        case .listed(let macs, let id): if await macs.saveRunnerLabels(of: id) { await registrationsChanged() }
         }
     }
 
@@ -171,7 +171,9 @@ final class MacPaneModel {
         }
     }
 
-    var isApplyingPoolConfiguration: Bool { thisMac?.isSaving ?? paired?.isSaving ?? false }
+    var isApplyingPoolConfiguration: Bool {
+        valuesBeingSaved.contains(.pool) || thisMac?.isSaving ?? paired?.isSaving ?? false
+    }
     /// A pool without saved settings takes the ones shown.
     var canApplyPoolConfiguration: Bool {
         guard let report, thisMac?.canApplyPoolConfiguration ?? paired?.canApplyPoolConfiguration ?? false else { return false }
@@ -181,12 +183,10 @@ final class MacPaneModel {
     }
     var poolConfigurationError: String? { thisMac?.saveError ?? paired?.saveError }
 
-    func applyPoolConfiguration() {
-        Task {
-            switch source {
-            case .thisMac(let settings): await settings.applyPoolConfiguration()
-            case .listed(let macs, let id): if await macs.applyPoolConfiguration(of: id) { await registrationsChanged() }
-            }
+    private func applyPoolConfiguration() async {
+        switch source {
+        case .thisMac(let settings): await settings.applyPoolConfiguration()
+        case .listed(let macs, let id): if await macs.applyPoolConfiguration(of: id) { await registrationsChanged() }
         }
     }
 
@@ -236,7 +236,7 @@ final class MacPaneModel {
         return developerDirectory.hasSuffix(inApplication) ? String(developerDirectory.dropLast(inApplication.count)) : nil
     }
 
-    var isSavingXcode: Bool { thisMac?.isSavingXcode ?? paired?.isSavingXcode ?? false }
+    var isSavingXcode: Bool { valuesBeingSaved.contains(.xcode) || thisMac?.isSavingXcode ?? paired?.isSavingXcode ?? false }
     var canSaveXcodeSelection: Bool {
         !isSavingXcode && (selectedXcode != savedXcode || report?.xcodeError != nil || xcodeSaveError != nil)
     }
@@ -248,12 +248,10 @@ final class MacPaneModel {
     }
     var xcodeSaveError: String? { thisMac?.xcodeSaveError ?? paired?.xcodeSaveError }
 
-    func saveXcodeSelection() {
-        Task {
-            switch source {
-            case .thisMac(let settings): await settings.saveXcodeSelection()
-            case .listed(let macs, let id): await macs.saveXcodeSelection(of: id)
-            }
+    private func saveXcodeSelection() async {
+        switch source {
+        case .thisMac(let settings): await settings.saveXcodeSelection()
+        case .listed(let macs, let id): await macs.saveXcodeSelection(of: id)
         }
     }
 
@@ -267,7 +265,9 @@ final class MacPaneModel {
         }
     }
 
-    var isSavingStorage: Bool { thisMac?.isSavingStorage ?? paired?.isSavingStorage ?? false }
+    var isSavingStorage: Bool {
+        valuesBeingSaved.contains(.storage) || thisMac?.isSavingStorage ?? paired?.isSavingStorage ?? false
+    }
     var canEditStorageDirectory: Bool { report?.canEditStorage == true && !isSavingStorage }
     var canSaveStorageDirectory: Bool {
         guard canEditStorageDirectory, let report else { return false }
@@ -281,12 +281,10 @@ final class MacPaneModel {
     /// Why the Mac refused to restart for a paired Mac, or why it did not confirm that it restarts.
     var restartError: String? { paired?.restartError }
 
-    func saveStorageDirectory() {
-        Task {
-            switch source {
-            case .thisMac(let settings): await settings.saveStorageSelection()
-            case .listed(let macs, let id): await macs.saveStorageDirectory(of: id)
-            }
+    private func saveStorageDirectory() async {
+        switch source {
+        case .thisMac(let settings): await settings.saveStorageSelection()
+        case .listed(let macs, let id): await macs.saveStorageDirectory(of: id)
         }
     }
 
@@ -300,6 +298,71 @@ final class MacPaneModel {
         switch source {
         case .thisMac(let settings): settings.restart()
         case .listed(let macs, let id): Task { await macs.restart(id) }
+        }
+    }
+
+    // MARK: Saving
+
+    /// A value that the pane saves.
+    enum SavedValue: Hashable {
+        /// The job limit and the Simulator retention, which the Mac applies together.
+        case pool
+        case runnerLabels, xcode, storage
+    }
+
+    /// The values that a save from this pane has still to save. Their inputs take no edits until then, so that the
+    /// value that was there when the person chose Save is the one saved.
+    private(set) var valuesBeingSaved: Set<SavedValue> = []
+
+    var isSaving: Bool { !valuesBeingSaved.isEmpty }
+
+    /// How many values the running save saves.
+    private var savedValueCount = 0
+
+    var saveProgress: (completed: Int, total: Int) { (savedValueCount - valuesBeingSaved.count, savedValueCount) }
+
+    /// A Mac that does not answer shows no values, so it has none to save. While the Mac cannot apply an edited job
+    /// limit or Simulator retention, as while it registers runners, Save waits, so that it saves every edit.
+    var canSave: Bool {
+        guard let report, !isSaving else { return false }
+        if report.isNewPool || poolDraft.isEdited, !canApplyPoolConfiguration { return false }
+        return canSaveRunnerLabels || canApplyPoolConfiguration || canSaveXcodeSelection || canSaveStorageDirectory
+    }
+
+    var hasEdits: Bool {
+        guard let report else { return false }
+        return RunnerLabels.parse(runnerLabelsInput) != report.runnerLabels || poolDraft.isEdited
+            || selectedXcode != savedXcode
+            || storageDirectoryInput != report.savedStorageDirectory?.path(percentEncoded: false) ?? ""
+    }
+
+    func revert() {
+        guard let report else { return }
+        runnerLabelsInput = RunnerLabels.text(report.runnerLabels)
+        poolDraft.revert()
+        selectedXcode = savedXcode
+        storageDirectoryInput = report.savedStorageDirectory?.path(percentEncoded: false) ?? ""
+    }
+
+    /// Saves the values that can be saved now, one after the other, because the Mac applies one change at a time.
+    /// Each input takes edits again once its value is saved.
+    func save() {
+        guard canSave else { return }
+        if canSaveRunnerLabels { valuesBeingSaved.insert(.runnerLabels) }
+        if canApplyPoolConfiguration { valuesBeingSaved.insert(.pool) }
+        if canSaveXcodeSelection { valuesBeingSaved.insert(.xcode) }
+        if canSaveStorageDirectory { valuesBeingSaved.insert(.storage) }
+        savedValueCount = valuesBeingSaved.count
+        Task {
+            // The limit comes first: saving labels registers runners, and the Mac applies no limit meanwhile.
+            if valuesBeingSaved.contains(.pool) { await applyPoolConfiguration() }
+            valuesBeingSaved.remove(.pool)
+            if valuesBeingSaved.contains(.runnerLabels) { await saveRunnerLabels() }
+            valuesBeingSaved.remove(.runnerLabels)
+            if valuesBeingSaved.contains(.xcode) { await saveXcodeSelection() }
+            valuesBeingSaved.remove(.xcode)
+            if valuesBeingSaved.contains(.storage) { await saveStorageDirectory() }
+            valuesBeingSaved.remove(.storage)
         }
     }
 

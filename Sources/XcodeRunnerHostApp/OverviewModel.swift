@@ -4,7 +4,7 @@ import Observation
 /// What the Settings pane shows and does for a Mac: this Mac in its own window, or a host on a dashboard. It has the
 /// Mac's roles, status, GitHub sign-in, repositories, and pairings.
 @MainActor @Observable
-final class OverviewModel {
+final class OverviewModel: PaneSaving {
     private enum Source {
         case thisMac(HostSettingsModel)
         case host(PairedMacs, PairedMac)
@@ -92,7 +92,7 @@ final class OverviewModel {
 
     /// Whether the selection can be applied now: it differs from the saved one, or registering runners for the saved
     /// one failed, which applying it again retries.
-    var canApplySelection: Bool {
+    private var canApplySelection: Bool {
         guard let github, !github.isBusy, !github.isLoadingRepositories else { return false }
         return selection != github.savedRepositoryIDs || github.errorMessage != nil
             || github.runnerStatuses.contains { $0.errorMessage != nil }
@@ -135,10 +135,39 @@ final class OverviewModel {
         }
     }
 
-    func applySelection() {
-        switch source {
-        case .thisMac(let settings): Task { await settings.github.applyRepositorySelection() }
-        case .host(let hosts, let host): Task { await hosts.applyRepositorySelection(of: host.id) }
+    /// Whether the pane has a repository selection to apply. A managed Mac and a Mac without a sign-in show none.
+    var canSave: Bool {
+        guard let github, github.accountLogin != nil, github.managerName == nil else { return false }
+        return canApplySelection && !isWaitingForGitHub && !isSaving
+    }
+
+    /// Whether the selection is being applied from this pane. A host on a dashboard says that it saves only in its
+    /// next answer.
+    private var isApplyingSelection = false
+
+    var isSaving: Bool { isApplyingSelection || github?.isSavingSelection == true }
+
+    var saveProgress: (completed: Int, total: Int) { (0, 1) }
+
+    var hasEdits: Bool {
+        guard let github, github.accountLogin != nil, github.managerName == nil else { return false }
+        return selection != github.savedRepositoryIDs
+    }
+
+    func revert() {
+        if let github { selection = github.savedRepositoryIDs }
+    }
+
+    /// Applies the repository selection, which registers and removes runners.
+    func save() {
+        guard canSave else { return }
+        isApplyingSelection = true
+        Task {
+            switch source {
+            case .thisMac(let settings): await settings.github.applyRepositorySelection()
+            case .host(let hosts, let host): await hosts.applyRepositorySelection(of: host.id)
+            }
+            isApplyingSelection = false
         }
     }
 

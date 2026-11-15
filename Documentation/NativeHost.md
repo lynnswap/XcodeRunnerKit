@@ -90,7 +90,7 @@ sign-in, and its repositories.
 2. Under **Repositories**, choose **Add Repositories on GitHub…**, install the
    app, and select the repositories this Mac will run.
 3. Return to the window and choose the reload button beside **Repositories**.
-4. Switch on the repositories to manage and choose **Apply**.
+4. Switch on the repositories to manage and choose **Save** in the toolbar.
 
 Enter only codes shown in this window. Entering a code that someone else
 sent you gives them access to your repositories as you.
@@ -98,7 +98,8 @@ sent you gives them access to your repositories as you.
 A new host starts with **Maximum concurrent jobs** set to 4, so runners
 register without editing the execution settings first. Change the limit and the
 Simulator retention policy in this Mac's pane under **Runners**, then select
-**Apply**.
+**Save** in the toolbar. The button saves every value that was edited in the
+shown pane.
 
 The app saves login tokens in Keychain and refreshes expiring tokens
 automatically; it stores no client secret. To change repository access later,
@@ -120,7 +121,7 @@ GitHub's in-progress count also includes checkout, uploads, and jobs waiting
 for an Xcode slot.
 
 Lowering the limit lets running operations finish. Extra runner registrations
-stay in place. Deselecting a repository and choosing **Apply** unregisters this
+stay in place. Deselecting a repository and choosing **Save** unregisters this
 Mac's runners for it from GitHub and deletes them. A busy runner is removed at a
 later synchronization, after its current job finishes, and **Settings** lists
 the repository until then. While the app is signed out or cannot access the
@@ -146,7 +147,7 @@ GitHub's in-progress job count can still be higher.
 
 **Settings** shows the host status, the running and waiting Xcode jobs, and each
 repository's online and busy runner counts with any error. This Mac's pane under
-**Runners** lists its runner services. The host retries synchronization every
+**Runners** counts its runner services and names the ones that need attention. The host retries synchronization every
 five minutes while signed in. Pool and repository settings are saved separately; editing one does not
 apply pending changes in the other. **Disconnect** removes local login tokens and
 stops registration management; it leaves existing runner services running.
@@ -154,7 +155,7 @@ stops registration management; it leaves existing runner services running.
 ### Pause a Mac
 
 To use a Mac for something else for a while, turn off **Take new jobs** under
-**Runner Services** in its pane, or **Runner** under **Roles** in its own
+**Overview** in its pane, or **Runner** under **Roles** in its own
 **Settings**, which is the same setting. The host stops each runner service once the
 runner has no job, and starts none, so the jobs that run finish. A job that a
 runner takes in the instant before its service stops is cancelled, as when the
@@ -197,7 +198,7 @@ A Mac that is no host is managed by one, and a host that manages Macs stays a
 host until they are removed. Each paired Mac's pane
 shows whether the managing Mac can connect to it and, while that Mac answers,
 its host status, runner services, Xcode job counts, job limit, Simulator
-retention, and storage folder. **Apply** and **Save** there change that Mac's
+retention, and storage folder. **Save** there changes that Mac's
 settings with the same checks as its own window; type the storage folder's path,
 because the managing Mac cannot browse the other Mac's folders. When the Mac
 does not answer, its pane hides these values and shows when they were last
@@ -243,7 +244,7 @@ XcodeHomeRunner** there to end it.
 Each host has the panes of its own window: **Settings**, and under **Runners**
 the host by its name and the Macs that it manages. While the host answers, they
 show its status, GitHub sign-in, repositories and runner counts, runner services, Xcode job counts,
-job limit, Simulator retention, and storage folder. **Apply** and **Save** change them with the same
+job limit, Simulator retention, and storage folder. **Save** changes them with the same
 checks as the host's own window. After a changed job limit, the host registers
 its runners itself; for a host that another Mac manages, that Mac does at its
 next synchronization. When the host does not answer, the dashboard hides these
@@ -253,7 +254,7 @@ To connect a host to GitHub from the dashboard, choose **Connect GitHub…** in
 its **Settings**. The host starts the sign-in, the dashboard shows the code,
 and GitHub's page opens in the dashboard's browser, as does **Add Repositories
 on GitHub…**. The host keeps the login tokens and sends the dashboard neither
-them nor anything that completes a sign-in. **Apply** saves the repository
+them nor anything that completes a sign-in. **Save** saves the repository
 selection on the host, which then registers and removes runners; the
 repositories show the progress. Changes made in the host's own window or on another dashboard
 appear within a few seconds.
@@ -343,7 +344,7 @@ xcode-runner host labels fast gpu # replace the runner labels; --none removes th
 xcode-runner host restart         # stop the host and start it again
 ```
 
-`configure` changes what the window saves with **Apply** and **Save**:
+`configure` changes what a Mac's pane saves with **Save**:
 
 ```sh
 xcode-runner host configure --maximum-jobs 2 --simulator-retention 20   # minutes, or forever
@@ -534,8 +535,8 @@ the labels of their Mac, and the custom labels shared by existing managed
 runners. Labels assigned to only some runners, such as `ci-interactive`, need
 separate configuration.
 
-To run a job on one Mac of a setup, give that Mac a label under **Runner
-Labels** in its pane, such as `xcode-27` for the Mac that has that Xcode, and
+To run a job on one Mac of a setup, give that Mac a label in **Runner
+labels** under **Overview** in its pane, such as `xcode-27` for the Mac that has that Xcode, and
 add the label to `runs-on`. The Mac's runners get the labels of its list besides
 `xcode-runnerkit`: new runners when they are registered, and existing ones at
 the next synchronization. A change is synchronized at once, except one made in
@@ -590,7 +591,7 @@ To select a custom build service for hosted jobs, save its executable path:
 ```
 
 To choose the Xcode for a Mac's jobs, select it under **Xcode** in the Mac's
-pane and choose **Save**. The pane lists the Xcode apps installed on that Mac,
+pane and choose **Save** in the toolbar. The pane lists the Xcode apps installed on that Mac,
 also when it is shown on the managing Mac or a dashboard. Jobs use the saved
 Xcode when they name none: `--developer-directory` and `DEVELOPER_DIR` come
 first, and with **System selection** jobs use the Xcode that `xcode-select`
@@ -651,7 +652,7 @@ Tools and service logs stay under
 `~/Library/XcodeRunnerKit/runners`.
 
 To move job data, choose a folder in this Mac's pane under **Runners** >
-**Storage** and select **Save**. The change
+**Storage** and select **Save** in the toolbar. The change
 takes effect on the next host launch. Wait for running jobs and other users of
 that data to finish, then choose **Restart to Apply…** in the same section. It
 shows the Xcode jobs that are running and, once confirmed, stops the Mac's

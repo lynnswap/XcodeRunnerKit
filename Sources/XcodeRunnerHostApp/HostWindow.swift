@@ -20,7 +20,7 @@ enum HostPane: Hashable {
 
     var icon: SidebarRow.Icon {
         switch self {
-        case .overview: .symbol("gearshape")
+        case .overview: .symbol("gear")
         case .mac, .managedMac: .symbol("desktopcomputer")
         }
     }

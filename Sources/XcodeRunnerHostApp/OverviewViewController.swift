@@ -3,8 +3,11 @@ import SwiftUI
 
 /// The Settings pane: a Mac's roles, status, GitHub sign-in, repositories, and pairings with other Macs.
 @MainActor
-final class OverviewViewController: NSHostingController<OverviewView> {
+final class OverviewViewController: NSHostingController<OverviewView>, SavingPaneViewController {
+    let saving: any PaneSaving
+
     init(model: OverviewModel) {
+        saving = model
         super.init(rootView: OverviewView(model: model))
         // The split view and the window decide the pane's size.
         sizingOptions = []
@@ -125,19 +128,18 @@ struct OverviewView: View {
                 Text("To list a repository here, choose Add Repositories on GitHub…, install the app on it, then reload the list.")
                     .foregroundStyle(.secondary)
             }
-            if github.isSynchronizing { ProgressView("Synchronizing runner registrations…") }
             if isSignedIn, let error = github.errorMessage { ErrorText(error) }
             if isSignedIn {
                 HStack {
-                    if model.selection != github.savedRepositoryIDs {
-                        Text("Unapplied changes").foregroundStyle(.secondary)
+                    if github.isSynchronizing {
+                        ProgressView().controlSize(.small)
+                        Text("Synchronizing runner registrations…").foregroundStyle(.secondary)
+                    } else if model.selection != github.savedRepositoryIDs {
+                        Text("Unsaved changes").foregroundStyle(.secondary)
                     }
                     Spacer()
                     Button("Add Repositories on GitHub…") { model.addRepositories() }
                         .disabled(github.isBusy)
-                    Button(github.isSavingSelection ? "Applying…" : "Apply") { model.applySelection() }
-                        .disabled(!model.canApplySelection)
-                        .accessibilityIdentifier("apply-repository-selection")
                 }
             }
         } header: {

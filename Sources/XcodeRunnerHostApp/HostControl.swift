@@ -17,7 +17,7 @@ struct HostControl: AsyncParsableCommand {
         ]
     )
 
-    /// The settings that the window saves with Apply and Save, for the host on this Mac or on another one.
+    /// The settings that a Mac's pane saves with Save, for the host on this Mac or on another one.
     /// `xcode-runner host settings` changes the same settings on this Mac, with a catalog of their types.
     struct Configure: AsyncParsableCommand {
         static let configuration = CommandConfiguration(

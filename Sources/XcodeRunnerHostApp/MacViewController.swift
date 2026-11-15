@@ -1,10 +1,13 @@
 import AppKit
 import SwiftUI
 
-/// A Mac's pane: its runner services and execution settings.
+/// A Mac's pane: its status, what its runners take, and its execution settings.
 @MainActor
-final class MacViewController: NSHostingController<MacPaneView> {
+final class MacViewController: NSHostingController<MacPaneView>, SavingPaneViewController {
+    let saving: any PaneSaving
+
     init(model: MacPaneModel) {
+        saving = model
         super.init(rootView: MacPaneView(model: model))
         // The split view and the window decide the pane's size.
         sizingOptions = []
@@ -27,16 +30,9 @@ struct MacPaneView: View {
             ContentUnavailableView("This Mac was removed", systemImage: "desktopcomputer")
         } else {
             Form {
-                if let connection = model.connection {
-                    Section {
-                        MacConnectionRows(connection: connection)
-                        if let report = model.report { HostStatusRows(settings: report) }
-                    }
-                }
+                OverviewSection(model: model)
                 if let report = model.report {
-                    RunnerServicesSection(model: model, report: report)
-                    RunnerLabelsSection(model: model)
-                    XcodeExecutionSection(model: model, report: report)
+                    SimulatorsSection(model: model, report: report)
                     XcodeSection(model: model, report: report)
                     StorageSection(model: model, report: report)
                 }
@@ -47,86 +43,91 @@ struct MacPaneView: View {
     }
 }
 
-/// Whether the Mac takes new jobs, and its runner services.
+/// The Mac's status, whether it takes new jobs and how many at once, the labels of its runners, and its runner
+/// services.
 @MainActor
-private struct RunnerServicesSection: View {
-    let model: MacPaneModel
-    let report: HostSettingsReport
-
-    var body: some View {
-        Section {
-            Toggle("Take new jobs", isOn: Binding(get: { !report.isPaused }, set: { model.setPaused(!$0) }))
-                .disabled(model.isChangingPause)
-                .accessibilityIdentifier("take-new-jobs")
-            if report.isPaused {
-                Text("\(model.mac.subject) is paused. Its runner services stop after the jobs that they run, and its runners stay registered and appear offline on GitHub.")
-                    .font(.callout).foregroundStyle(.secondary)
-            }
-            if let error = model.pauseError { ErrorText(error) }
-            if report.runners.isEmpty {
-                Text(report.storageError == nil ? "No runners have opted in to this host." : "Runner services have not started because storage needs attention.")
-                    .foregroundStyle(.secondary)
-            }
-            ForEach(report.runners) { runner in
-                VStack(alignment: .leading, spacing: 4) {
-                    LabeledContent(runner.name, value: runner.state.rawValue)
-                    if runner.state == .individualService {
-                        Text("This runner uses its individual service. The host does not start another service for it.")
-                            .font(.callout).foregroundStyle(.secondary)
-                    }
-                    if let error = runner.configurationError { ErrorText(error) }
-                }
-            }
-            if let error = report.runnerScanError { ErrorText(error) }
-        } header: {
-            Text("Runner Services")
-        } footer: {
-            if let name = model.mac.name {
-                Text("Processes on \(name).")
-            } else {
-                Text("Processes on this Mac. Settings shows each repository's connection and job counts from GitHub.")
-            }
-        }
-    }
-}
-
-/// The labels that a workflow chooses the Mac with.
-@MainActor
-private struct RunnerLabelsSection: View {
+private struct OverviewSection: View {
     @Bindable var model: MacPaneModel
 
     var body: some View {
         Section {
-            TextField("Labels", text: $model.runnerLabelsInput, prompt: Text("None"))
-                .disabled(model.isSavingRunnerLabels)
-                .accessibilityIdentifier("runner-labels")
-            HStack {
-                Spacer()
-                Button(model.isSavingRunnerLabels ? "Saving…" : "Save") { model.saveRunnerLabels() }
-                    .disabled(!model.canSaveRunnerLabels)
-                    .accessibilityIdentifier("save-runner-labels")
+            if let connection = model.connection { MacConnectionRows(connection: connection) }
+            if let report = model.report {
+                HostStatusRows(settings: report)
+                Toggle("Take new jobs", isOn: Binding(get: { !report.isPaused }, set: { model.setPaused(!$0) }))
+                    .disabled(model.isChangingPause)
+                    .accessibilityIdentifier("take-new-jobs")
+                if report.isPaused {
+                    Text("\(model.mac.subject) is paused. Its runner services stop after the jobs that they run, and its runners stay registered and appear offline on GitHub.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                if let error = model.pauseError { ErrorText(error) }
+                TextField("Maximum concurrent jobs", text: $model.poolDraft.capacityInput)
+                    .disabled(model.isApplyingPoolConfiguration)
+                    .accessibilityIdentifier("execution-limit")
+                if let error = model.poolConfigurationError { ErrorText(error) }
+                if let error = report.configurationCleanupError { ErrorText(error) }
+                TextField("Runner labels", text: $model.runnerLabelsInput, prompt: Text("None"))
+                    .disabled(model.isSavingRunnerLabels)
+                    .accessibilityIdentifier("runner-labels")
+                if let error = model.runnerLabelsError { ErrorText(error) }
+                runners(report)
             }
-            if let error = model.runnerLabelsError { ErrorText(error) }
         } header: {
-            Text("Runner Labels")
+            Text("Overview")
         } footer: {
-            Text("Runners on \(model.mac.object) get these labels besides xcode-runnerkit. Separate labels with commas. A workflow chooses \(model.mac.object) with one of them in runs-on.")
+            if model.report != nil {
+                Text("All repositories share the job limit, and each registers that many runners. Running jobs finish before a lower limit applies. Runners on \(model.mac.object) get the labels besides xcode-runnerkit, separated by commas, and a workflow chooses \(model.mac.object) with one of them in runs-on.")
+            }
         }
+    }
+
+    /// How many runner services the Mac has in each state, and the runners that need attention.
+    @ViewBuilder
+    private func runners(_ report: HostSettingsReport) -> some View {
+        if report.runners.isEmpty {
+            LabeledContent("Runners") {
+                Text(report.storageError == nil ? "None" : "Not started because storage needs attention")
+            }
+        } else {
+            LabeledContent("Runners", value: summary(of: report.runners))
+        }
+        ForEach(report.runners.filter(needsAttention)) { runner in
+            VStack(alignment: .leading, spacing: 4) {
+                LabeledContent(runner.name, value: runner.state.rawValue)
+                if runner.state == .individualService {
+                    Text("This runner uses its individual service. The host does not start another service for it.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                if let error = runner.configurationError { ErrorText(error) }
+            }
+        }
+        if let error = report.runnerScanError { ErrorText(error) }
+    }
+
+    /// The states of the runners with how many are in each, in the order of the first runner in each.
+    private func summary(of runners: [RunnerSettingsRow]) -> String {
+        var states: [RunnerServiceState] = []
+        for runner in runners where !states.contains(runner.state) { states.append(runner.state) }
+        return states.map { state in "\(runners.count { $0.state == state }) \(state.rawValue.lowercased())" }
+            .joined(separator: " · ")
+    }
+
+    /// Whether a runner is listed by name: its service does not do what the Mac's other settings say.
+    private func needsAttention(_ runner: RunnerSettingsRow) -> Bool {
+        runner.configurationError != nil || [.failed, .stopped, .individualService].contains(runner.state)
     }
 }
 
-/// The Mac's job limit and how long it keeps idle Simulators.
+/// How long the Mac keeps idle Simulators.
 @MainActor
-private struct XcodeExecutionSection: View {
+private struct SimulatorsSection: View {
     @Bindable var model: MacPaneModel
     let report: HostSettingsReport
 
     var body: some View {
         let isApplying = model.isApplyingPoolConfiguration
         Section {
-            TextField("Maximum concurrent jobs", text: $model.poolDraft.capacityInput)
-                .disabled(isApplying)
-                .accessibilityIdentifier("execution-limit")
             Picker("Idle Simulators", selection: $model.poolDraft.keepsSimulatorsForever) {
                 Text("Remove after an idle period").tag(false)
                 Text("Keep indefinitely").tag(true)
@@ -138,20 +139,11 @@ private struct XcodeExecutionSection: View {
                     .disabled(isApplying)
                     .accessibilityIdentifier("simulator-idle-retention")
             }
-            HStack {
-                Spacer()
-                Button(isApplying ? "Applying…" : "Apply") { model.applyPoolConfiguration() }
-                    .disabled(!model.canApplyPoolConfiguration)
-                    .accessibilityIdentifier("apply-pool-configuration")
-            }
-            if let error = report.poolError { ErrorText(error) }
-            if let error = model.poolConfigurationError { ErrorText(error) }
-            if let error = report.configurationCleanupError { ErrorText(error) }
             if let error = report.simulatorPoolError { ErrorText(error) }
         } header: {
-            Text("Xcode Execution")
+            Text("Simulators")
         } footer: {
-            Text("The limit is shared by all repositories, and each repository registers that many runners. Running jobs finish before a lower limit applies. Idle Simulators stay booted for reuse until their retention ends.")
+            Text("Idle Simulators stay booted for reuse until their retention ends.")
         }
     }
 }
@@ -170,12 +162,6 @@ private struct XcodeSection: View {
             }
             .disabled(model.isSavingXcode)
             .accessibilityIdentifier("xcode-for-jobs")
-            HStack {
-                Spacer()
-                Button(model.isSavingXcode ? "Saving…" : "Save") { model.saveXcodeSelection() }
-                    .disabled(!model.canSaveXcodeSelection)
-                    .accessibilityIdentifier("save-xcode")
-            }
             if let problem = model.savedXcodeProblem { ErrorText(problem) }
             if let error = report.xcodeError { ErrorText(error) }
             if let error = model.xcodeSaveError { ErrorText(error) }
@@ -195,24 +181,22 @@ private struct StorageSection: View {
     @State private var isConfirmingRestart = false
 
     var body: some View {
-        let isSaving = model.isSavingStorage
+        // A restart would end the host before it saved the values that a save has still to save.
+        let isSaving = model.isSaving
         let isRestarting = model.isRestarting
         let canEdit = model.canEditStorageDirectory
         Section {
             TextField("Storage folder", text: $model.storageDirectoryInput, prompt: Text("Not chosen"))
                 .accessibilityIdentifier("storage-folder")
                 .disabled(!canEdit)
-            HStack {
-                Spacer()
-                // A panel on this Mac cannot choose a folder of another Mac.
-                if model.canChooseStorageDirectory {
+            // A panel on this Mac cannot choose a folder of another Mac.
+            if model.canChooseStorageDirectory {
+                HStack {
+                    Spacer()
                     Button("Choose…") { model.chooseStorageDirectory() }
                         .disabled(!canEdit)
                         .accessibilityIdentifier("choose-storage-folder")
                 }
-                Button(isSaving ? "Saving…" : "Save") { model.saveStorageDirectory() }
-                    .disabled(!model.canSaveStorageDirectory)
-                    .accessibilityIdentifier("save-storage-folder")
             }
             Text(report.storageMessage).foregroundStyle(.secondary)
             // A host that launchd did not start is restarted by whoever started it.
@@ -230,7 +214,7 @@ private struct StorageSection: View {
         } header: {
             Text("Storage")
         } footer: {
-            Text("A changed folder is applied before runners start on the next launch. Existing data is copied and its original files are kept. Stop other tools that use these files before restarting the host.")
+            Text("A saved folder is applied before runners start on the next launch. Existing data is copied and its original files are kept. Stop other tools that use these files before restarting the host.")
         }
         .confirmationDialog("Restart XcodeHomeRunner on \(model.mac.object)?", isPresented: $isConfirmingRestart) {
             Button("Restart", role: .destructive) { model.restart() }
