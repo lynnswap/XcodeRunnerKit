@@ -192,6 +192,15 @@ the first time you turn off **Host** or choose **Add Mac…**.
 If you declined, allow XcodeHomeRunner in **System Settings > Privacy &
 Security > Local Network**.
 
+A Mac that only shows a [dashboard](#show-a-host-on-another-mac) can add itself.
+Choose **Add Mac…** for the host in the dashboard, then **Set Up as a Runner…**
+under **This Mac**. The dashboard runs the app's installer for your account,
+with the default storage folder, and has the new host wait for a managing host.
+Select this Mac in the list, choose **Continue**, and choose **Pair** when the
+code shows: the dashboard tells this Mac's host the code, and the host allows
+the pairing if it shows the same one. The installed host keeps the Mac awake
+while you are logged in, as on every Mac with a host.
+
 A Mac has two roles, and can have both: a host signs in to GitHub and registers
 runners, for itself and for the Macs that it manages, and a runner runs jobs.
 A Mac that is no host is managed by one, and a host that manages Macs stays a
@@ -230,6 +239,11 @@ The dashboard stays in the menu bar after its window closes. The menu of its
 hammer icon lists each host with its state and jobs; choose a host to open its
 **Settings**, or **Open Dashboard** for the window. Choose **Quit
 XcodeHomeRunner** there to end it.
+
+A Mac with a host shows other hosts too: **Open Dashboard** in the menu of its
+hammer icon opens the same window. On a Mac that another Mac manages, opening
+the app shows that window once the Mac shows its managing host, and
+**Settings…** in the menu shows the Mac's own settings.
 
 1. On the host, open **Settings…** and choose **Allow Dashboard…** under
    **Dashboards**. The host waits five minutes for a dashboard.

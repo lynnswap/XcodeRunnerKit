@@ -29,6 +29,7 @@ struct AddMacView: View {
                     }
                 } else {
                     macList
+                    if let setup = model.thisMac { ThisMacSection(setup: setup) }
                 }
                 if let error = model.errorMessage {
                     Section { ErrorText(error) }
@@ -103,6 +104,42 @@ struct AddMacView: View {
             Text("Pair with \(confirmation.macName)")
         } footer: {
             Text("Choose Pair only if \(confirmation.macName) shows the same code, then choose Allow on \(confirmation.macName). A different code means that another device answered.")
+        }
+    }
+}
+
+/// Offers to make this Mac, which has no host, a runner of the host that the sheet pairs for.
+@MainActor
+private struct ThisMacSection: View {
+    let setup: ThisMacSetup
+    @State private var isConfirming = false
+
+    var body: some View {
+        Section {
+            switch setup.phase {
+            case .offered, .failed:
+                LabeledContent(HostPane.macName) {
+                    Button("Set Up as a Runner…") { isConfirming = true }
+                        .accessibilityIdentifier("set-up-this-mac")
+                }
+                if case .failed(let message) = setup.phase { ErrorText(message) }
+            case .installing:
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text("Installing the host on this Mac…").foregroundStyle(.secondary)
+                }
+            case .waiting:
+                Text("This Mac waits to pair. Select it above and choose Continue.").foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("This Mac")
+        } footer: {
+            Text("This Mac only shows other Macs now. Setting it up installs the host for your account, which runs jobs here, keeps this Mac awake while you are logged in, and stores job data in your Library folder.")
+        }
+        .confirmationDialog("Set up \(HostPane.macName) as a runner?", isPresented: $isConfirming) {
+            Button("Set Up") { setup.start() }
+        } message: {
+            Text("XcodeHomeRunner is copied to the Applications folder in your home folder and starts when you log in. The host that you pair it with registers runners on this Mac.")
         }
     }
 }

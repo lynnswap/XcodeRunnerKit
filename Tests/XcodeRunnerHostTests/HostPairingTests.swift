@@ -358,6 +358,35 @@ struct HostPairingTests {
         await macs.shutDown()
     }
 
+    @Test func theAddMacSheetSetsUpThisMacAndAllowsThePairingThatShowsTheHostsCode() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        // The host that the installer starts on this Mac, which answers once it is installed.
+        let thisMac = managedMac(at: root)
+        var isInstalled = false
+        let setup = ThisMacSetup(install: { isInstalled = true }) { request in
+            guard isInstalled else { throw HostSettingsError("This Mac has no host.") }
+            return try thisMac.answer(request)
+        }
+        let host = PairedMacs(store: MemorySecretStore(), name: "Host", role: .manager, browses: false)
+
+        setup.start()
+        try await waitUntil { setup.phase == .waiting }
+        #expect(thisMac.management.pairingWindow?.role == .manager)
+        try await waitUntil { thisMac.management.pairingWindow?.port != nil }
+
+        let pairing = Task { try await host.pair(at: try local(thisMac.management.pairingWindow?.port)) }
+        try await waitUntil { host.codeConfirmation != nil }
+        let code = try #require(host.codeConfirmation?.code)
+        host.confirmCode()
+        try await setup.allowPairing(showing: code)
+        _ = try await pairing.value
+        #expect(thisMac.management.manager?.name == "Host")
+
+        await thisMac.management.shutDown()
+        await host.shutDown()
+    }
+
     @Test func commandsPairAHostWithADashboardGivenItsCode() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
