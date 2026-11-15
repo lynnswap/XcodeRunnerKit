@@ -404,6 +404,21 @@ from the Mac that the agent runs commands on. `pairing request` ends with a
 failure when the host refuses or stops waiting, also while it reads the code. A
 dashboard that is open lists the host once the command paired it.
 
+A host pairs with a Mac to manage, and lists and removes the Macs that it
+manages:
+
+```sh
+xcode-runner host macs status                # the Macs that the host manages, with their states
+xcode-runner host macs pair "Second Mac"     # prints the host's code, then reads the Mac's from standard input
+xcode-runner host macs remove "Second Mac"
+```
+
+On the Mac to manage, run `pairing allow manager` first, and give it the
+host's code with `pairing confirm`, as for a dashboard. `macs pair` reads the
+Mac's code from standard input and has the host pair if it is the host's own.
+These commands take `--host` as well, for a host that this Mac's dashboard
+shows.
+
 The status, runner, and GitHub commands also act on other Macs:
 
 ```sh

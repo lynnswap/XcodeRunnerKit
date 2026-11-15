@@ -93,12 +93,24 @@ public enum RunnerHostApplication {
                 withExtendedLifetime(service) { dispatchMain() }
             }
             if options.control {
-                Task {
+                let command = Task {
                     // A command that fails prints why and ends the process itself.
                     await HostControl.main(options.operation)
                     Darwin.exit(EXIT_SUCCESS)
                 }
-                dispatchMain()
+                // An interrupted command ends what it started on the host, such as a pairing, before it exits.
+                let signals = [SIGINT, SIGTERM].map { number in
+                    signal(number, SIG_IGN)
+                    let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+                    source.setEventHandler {
+                        command.cancel()
+                        // A request that the host has not answered does not end with its task.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { Darwin.exit(128 + number) }
+                    }
+                    source.resume()
+                    return source
+                }
+                withExtendedLifetime(signals) { dispatchMain() }
             }
             let installation = options.installation
             if let hostName = options.runOnHost, let outputDirectory = options.outputDirectory {

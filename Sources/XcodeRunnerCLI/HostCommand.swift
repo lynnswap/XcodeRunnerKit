@@ -7,8 +7,8 @@ struct Host: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Manage the installed runner host.",
         subcommands: [
-            Status.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self, Storage.self,
-            BuildService.self, Settings.self,
+            Status.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self, Macs.self,
+            Storage.self, BuildService.self, Settings.self,
         ]
     )
 
@@ -51,6 +51,14 @@ struct Host: AsyncParsableCommand {
         )
         @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
         func run() throws { try HostApp.run(["pairing"] + arguments) }
+    }
+
+    struct Macs: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "List the Macs that the host manages, pair it with another one, or remove one."
+        )
+        @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
+        func run() throws { try HostApp.run(["macs"] + arguments) }
     }
 
     struct Labels: ParsableCommand {

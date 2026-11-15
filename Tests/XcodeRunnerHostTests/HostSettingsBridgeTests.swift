@@ -169,6 +169,64 @@ struct HostSettingsBridgeTests {
         await host.managedMacs.shutDown()
     }
 
+    @Test func aCommandPairsTheHostWithAMacToManageGivenItsCode() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = self.host(HostInstallation(homeDirectory: root.appending(path: "Host")))
+        let managed = self.host(HostInstallation(homeDirectory: root.appending(path: "Managed")), named: "Managed")
+        let (server, connection) = serve(host)
+        defer {
+            connection.invalidate()
+            server.stop()
+        }
+        let bridge: (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = {
+            try await self.request($0, over: connection)
+        }
+        /// Lists the Mac as found on the network once the host looks for Macs, while it waits for a managing host.
+        func find() async throws {
+            _ = try managed.answer(.allow(.manager))
+            try await waitUntil { managed.management.pairingWindow?.port != nil && host.managedMacs.isDiscovering }
+            host.managedMacs.pairableMacsChanged([.init(
+                id: UUID().uuidString, name: "Managed",
+                endpoint: .hostPort(host: "127.0.0.1", port: try #require(managed.management.pairingWindow?.port))
+            )])
+        }
+
+        // Another code than the host's ends the pairing on the host.
+        var shown: [String] = []
+        let refused = Task {
+            try await HostControl.pairManagedMac(named: "Managed", on: nil, timeout: .seconds(30), over: bridge) {
+                shown.append($0.code)
+            } otherCode: { shown.last == "000000" ? "111111" : "000000" }
+        }
+        try await find()
+        await #expect(throws: HostSettingsError.self) { _ = try await refused.value }
+        #expect(host.managedMacs.macs.isEmpty)
+        try await waitUntil { !host.managedMacs.isPairing }
+        _ = try managed.answer(.cancel)
+        // The Mac no longer advertises the wait that ended.
+        host.managedMacs.pairableMacsChanged([])
+
+        // Each Mac's command gets the other's code, as an agent that runs both passes them on.
+        let pairing = Task {
+            try await HostControl.pairManagedMac(named: "Managed", on: nil, timeout: .seconds(30), over: bridge) {
+                shown.append($0.code)
+            } otherCode: {
+                try await waitUntil { managed.management.pairingWindow?.request?.code != nil }
+                let macCode = try #require(managed.management.pairingWindow?.request?.code)
+                _ = try managed.answer(.confirm(code: try #require(shown.last)))
+                return macCode
+            }
+        }
+        try await find()
+        let report = try await pairing.value
+        #expect(report.pairedMac?.name == "Managed" && report.macs.map(\.name) == ["Managed"])
+        #expect(managed.management.manager?.name == "Host")
+
+        await managed.management.shutDown()
+        await host.managedMacs.shutDown()
+    }
+
     private func host(_ installation: HostInstallation, github: GitHubHostSettings? = nil, named name: String = "Host") -> HostSettingsModel {
         HostSettingsModel(
             installation: installation, github: github,
