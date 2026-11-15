@@ -60,7 +60,8 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
             // The command has the answer before this Mac registers runners or restarts, as a dashboard has: a host
             // that stops right away would otherwise end the connection with the reply still unsent.
             if let connection {
-                await withCheckedContinuation { sent in connection.scheduleSendBarrierBlock { sent.resume() } }
+                // The connection calls the block on its own queue.
+                await withCheckedContinuation { sent in connection.scheduleSendBarrierBlock { @Sendable in sent.resume() } }
             }
             await settings.finish(answered.request, answeredWith: answered.reply, registersRunners: true)
         }
