@@ -535,7 +535,7 @@ struct HostControl: AsyncParsableCommand {
     /// - Returns: The host's Macs after the pairing, with the Mac that it added.
     @MainActor static func pairManagedMac(
         named mac: String, on host: String?, timeout: Duration,
-        over bridge: (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = HostSettingsBridge.request,
+        over bridge: @escaping (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = HostSettingsBridge.request,
         showCode: (PairedMacs.CodeConfirmation) throws -> Void, otherCode: @escaping @MainActor () async throws -> String
     ) async throws -> ManagedMacsReport {
         // The host lists the Macs that wait to pair while it is asked for them.
@@ -603,8 +603,9 @@ struct HostControl: AsyncParsableCommand {
             }
             return report
         } catch {
-            // The host pairs with one Mac at a time, so a pairing that this command leaves is ended.
-            _ = try? await macs(.cancelPairing(attempt: attempt), on: host, over: bridge)
+            // The host pairs with one Mac at a time, so a pairing that this command leaves is ended. An interrupt
+            // cancelled this task, and the request is sent from one that is not.
+            await Task { _ = try? await macs(.cancelPairing(attempt: attempt), on: host, over: bridge) }.value
             throw error
         }
     }
