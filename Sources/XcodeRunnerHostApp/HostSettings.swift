@@ -89,7 +89,7 @@ enum RunnerLabels {
 
 /// A job limit and Simulator retention being edited, for this Mac or for a Mac paired with it.
 struct PoolSettingsDraft: Equatable {
-    /// The edited settings. A setting that matches the saved one is `nil`, so Apply leaves its saved value as it is.
+    /// The edited settings. A setting that matches the saved one is `nil`, so Save leaves its saved value as it is.
     struct Changes: Codable, Equatable, Sendable {
         var maximumConcurrentJobs: Int?
         var simulatorRetention: HostExecutionPool.SimulatorRetention?
@@ -114,7 +114,7 @@ struct PoolSettingsDraft: Equatable {
     /// Whether an input differs from the saved settings.
     var isEdited: Bool { capacityInput != String(base.maximumConcurrentJobs) || !shows(base.simulatorRetention) }
 
-    /// Shows the settings that Apply saved in every input.
+    /// Shows the settings that Save saved in every input.
     mutating func reset(to saved: HostExecutionPool.Configuration) {
         capacityInput = String(saved.maximumConcurrentJobs)
         show(saved.simulatorRetention)
@@ -191,7 +191,7 @@ protocol HostSettingsDisplay {
 }
 
 extension HostSettingsDisplay {
-    /// Whether Apply saves every pool setting, because the pool has none saved.
+    /// Whether Save saves every pool setting, because the pool has none saved.
     var isNewPool: Bool { poolStatus == nil && poolError == nil }
 
     var jobSummary: String {

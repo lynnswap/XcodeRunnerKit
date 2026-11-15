@@ -3,8 +3,11 @@ import SwiftUI
 
 /// The Settings pane: a Mac's roles, status, GitHub sign-in, repositories, and pairings with other Macs.
 @MainActor
-final class OverviewViewController: NSHostingController<OverviewView> {
+final class OverviewViewController: NSHostingController<OverviewView>, SavingPaneViewController {
+    let saving: any PaneSaving
+
     init(model: OverviewModel) {
+        saving = model
         super.init(rootView: OverviewView(model: model))
         // The split view and the window decide the pane's size.
         sizingOptions = []
@@ -129,15 +132,13 @@ struct OverviewView: View {
             if isSignedIn, let error = github.errorMessage { ErrorText(error) }
             if isSignedIn {
                 HStack {
-                    if model.selection != github.savedRepositoryIDs {
-                        Text("Unapplied changes").foregroundStyle(.secondary)
+                    if model.selection != github.savedRepositoryIDs, !github.isSavingSelection {
+                        Text("Unsaved changes").foregroundStyle(.secondary)
                     }
+                    if github.isSavingSelection { ProgressView("Applying…").controlSize(.small) }
                     Spacer()
                     Button("Add Repositories on GitHub…") { model.addRepositories() }
                         .disabled(github.isBusy)
-                    Button(github.isSavingSelection ? "Applying…" : "Apply") { model.applySelection() }
-                        .disabled(!model.canApplySelection)
-                        .accessibilityIdentifier("apply-repository-selection")
                 }
             }
         } header: {

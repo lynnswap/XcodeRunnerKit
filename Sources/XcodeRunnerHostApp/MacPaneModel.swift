@@ -39,7 +39,7 @@ extension PairedMacs {
 /// What a Mac's pane shows and does: this Mac in its own window, a Mac that this Mac paired with, or a Mac that a
 /// dashboard reaches through its host.
 @MainActor @Observable
-final class MacPaneModel {
+final class MacPaneModel: PaneSaving {
     private enum Source {
         case thisMac(HostSettingsModel)
         case listed(any MacList, HostPairing.ID)
@@ -142,8 +142,8 @@ final class MacPaneModel {
     }
 
     var isSavingRunnerLabels: Bool { thisMac?.isSavingRunnerLabels ?? paired?.isSavingRunnerLabels ?? false }
-    // A Save or Apply button is offered for an edited value, and after a failure, when saving the same value again
-    // can repair what failed.
+    // A value can be saved once it is edited, and after a failure, when saving the same value again can repair what
+    // failed.
 
     var canSaveRunnerLabels: Bool {
         guard let report, !isSavingRunnerLabels else { return false }
@@ -151,12 +151,10 @@ final class MacPaneModel {
     }
     var runnerLabelsError: String? { thisMac?.runnerLabelsError ?? paired?.runnerLabelsError }
 
-    func saveRunnerLabels() {
-        Task {
-            switch source {
-            case .thisMac(let settings): await settings.saveRunnerLabelsInput()
-            case .listed(let macs, let id): if await macs.saveRunnerLabels(of: id) { await registrationsChanged() }
-            }
+    private func saveRunnerLabels() async {
+        switch source {
+        case .thisMac(let settings): await settings.saveRunnerLabelsInput()
+        case .listed(let macs, let id): if await macs.saveRunnerLabels(of: id) { await registrationsChanged() }
         }
     }
 
@@ -181,12 +179,10 @@ final class MacPaneModel {
     }
     var poolConfigurationError: String? { thisMac?.saveError ?? paired?.saveError }
 
-    func applyPoolConfiguration() {
-        Task {
-            switch source {
-            case .thisMac(let settings): await settings.applyPoolConfiguration()
-            case .listed(let macs, let id): if await macs.applyPoolConfiguration(of: id) { await registrationsChanged() }
-            }
+    private func applyPoolConfiguration() async {
+        switch source {
+        case .thisMac(let settings): await settings.applyPoolConfiguration()
+        case .listed(let macs, let id): if await macs.applyPoolConfiguration(of: id) { await registrationsChanged() }
         }
     }
 
@@ -248,12 +244,10 @@ final class MacPaneModel {
     }
     var xcodeSaveError: String? { thisMac?.xcodeSaveError ?? paired?.xcodeSaveError }
 
-    func saveXcodeSelection() {
-        Task {
-            switch source {
-            case .thisMac(let settings): await settings.saveXcodeSelection()
-            case .listed(let macs, let id): await macs.saveXcodeSelection(of: id)
-            }
+    private func saveXcodeSelection() async {
+        switch source {
+        case .thisMac(let settings): await settings.saveXcodeSelection()
+        case .listed(let macs, let id): await macs.saveXcodeSelection(of: id)
         }
     }
 
@@ -281,12 +275,10 @@ final class MacPaneModel {
     /// Why the Mac refused to restart for a paired Mac, or why it did not confirm that it restarts.
     var restartError: String? { paired?.restartError }
 
-    func saveStorageDirectory() {
-        Task {
-            switch source {
-            case .thisMac(let settings): await settings.saveStorageSelection()
-            case .listed(let macs, let id): await macs.saveStorageDirectory(of: id)
-            }
+    private func saveStorageDirectory() async {
+        switch source {
+        case .thisMac(let settings): await settings.saveStorageSelection()
+        case .listed(let macs, let id): await macs.saveStorageDirectory(of: id)
         }
     }
 
@@ -300,6 +292,30 @@ final class MacPaneModel {
         switch source {
         case .thisMac(let settings): settings.restart()
         case .listed(let macs, let id): Task { await macs.restart(id) }
+        }
+    }
+
+    // MARK: Saving
+
+    /// Whether a save from this pane runs now.
+    private(set) var isSaving = false
+
+    var canSave: Bool {
+        !isSaving && (canSaveRunnerLabels || canApplyPoolConfiguration || canSaveXcodeSelection || canSaveStorageDirectory)
+    }
+
+    /// Saves the values that can be saved now, one after the other, because the Mac applies one change at a time.
+    func save() {
+        guard canSave else { return }
+        let labels = canSaveRunnerLabels, pool = canApplyPoolConfiguration, xcode = canSaveXcodeSelection
+        let storage = canSaveStorageDirectory
+        isSaving = true
+        Task {
+            if labels { await saveRunnerLabels() }
+            if pool { await applyPoolConfiguration() }
+            if xcode { await saveXcodeSelection() }
+            if storage { await saveStorageDirectory() }
+            isSaving = false
         }
     }
 

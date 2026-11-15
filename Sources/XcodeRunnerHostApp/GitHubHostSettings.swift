@@ -377,7 +377,7 @@ final class GitHubHostSettings {
                 do {
                     macs.append((nil, try await reconcile(
                         provisioner, capacity: capacity,
-                        missingLimit: "Set Maximum concurrent jobs for this Mac under Runners and choose Apply to register runners.",
+                        missingLimit: "Set Maximum concurrent jobs for this Mac under Runners and choose Save to register runners.",
                         repositories: accessible, unlinked: accessibleUnlinked, token: token
                     )))
                     if let pairedMacs {
@@ -439,7 +439,7 @@ final class GitHubHostSettings {
         pairedProvisioners[mac.id] = provisioner
         return try await reconcile(
             provisioner, capacity: report.poolStatus?.configuration.maximumConcurrentJobs,
-            missingLimit: "Set Maximum concurrent jobs in its pane under Runners and choose Apply to register runners.",
+            missingLimit: "Set Maximum concurrent jobs in its pane under Runners and choose Save to register runners.",
             repositories: repositories, unlinked: unlinked, token: token
         )
     }
