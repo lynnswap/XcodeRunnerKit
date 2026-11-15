@@ -341,7 +341,8 @@ xcode-runner host restart         # stop the host and start it again
 ```
 
 Restarting stops the runner services with the jobs that they run. `restart` is
-refused while Xcode jobs run on the Mac; pass `--stop-jobs` to restart anyway.
+refused unless the host last counted no Xcode job on the Mac; pass `--stop-jobs`
+to restart anyway. A job can start between that count and the restart.
 
 These commands send the host what a dashboard sends it, so what a command can
 do and when the host refuses are the same as in the app. They need the

@@ -45,13 +45,20 @@ struct HostControl: AsyncParsableCommand {
         var stopJobs = false
 
         func run() async throws {
-            // The window names the running jobs before a person confirms. A command is refused in their place.
-            if !stopJobs, case .settings(let report) = try await HostControl.reply(to: .settings(.read)),
-               let running = report.poolStatus?.activeJobCount, running > 0 {
-                throw HostSettingsError(
-                    "\(running == 1 ? "An Xcode job runs" : "\(running) Xcode jobs run") on this Mac. "
-                        + "Restarting ends the jobs of its runners: wait for them, or pass --stop-jobs."
-                )
+            // The window names the running jobs before a person confirms, and a command is refused in their place.
+            // The count is the host's last, as it is in the window: a job can start after it.
+            if !stopJobs, case .settings(let report) = try await HostControl.reply(to: .settings(.read)) {
+                let running = report.poolStatus?.activeJobCount
+                guard running == 0 else {
+                    let jobs = switch running {
+                    case nil: "The host has not counted the Xcode jobs"
+                    case 1: "An Xcode job runs"
+                    case let count?: "\(count) Xcode jobs run"
+                    }
+                    throw HostSettingsError(
+                        "\(jobs) on this Mac. Restarting ends the jobs of its runners: wait for them, or pass --stop-jobs."
+                    )
+                }
             }
             try await HostControl.perform(.settings(.restart))
         }
