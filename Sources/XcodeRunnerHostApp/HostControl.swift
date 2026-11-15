@@ -71,8 +71,10 @@ struct HostControl: AsyncParsableCommand {
             func run() async throws {
                 let before = try await HostControl.pairing(.read)
                 var report = try await HostControl.pairing(.confirm(code: code))
-                // The window closes when the other Mac confirmed too, refused, or left, or when the wait is over.
-                while report.window != nil {
+                // The wait ends when the other Mac confirmed too, refused, or left, or when its time is over. A wait
+                // that starts afterwards is another one.
+                let confirmed = report.window?.id
+                while let window = report.window, window.id == confirmed {
                     try await Task.sleep(for: .seconds(1))
                     report = try await HostControl.pairing(.read)
                 }

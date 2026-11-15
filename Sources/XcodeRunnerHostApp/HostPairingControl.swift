@@ -29,6 +29,8 @@ struct HostPairingReport: Codable, Equatable, Sendable {
 
     /// The wait for a Mac to pair, and the Mac that asks.
     struct Window: Codable, Equatable, Sendable {
+        /// Tells this wait from a later one.
+        let id: UUID
         let role: PairingRole
         let expiresAt: Date
         let requesterName: String?
@@ -50,7 +52,7 @@ struct HostPairingReport: Codable, Equatable, Sendable {
         dashboards = management.dashboards.map(Mac.init)
         window = management.pairingWindow.map {
             Window(
-                role: $0.role, expiresAt: $0.expiresAt, requesterName: $0.request?.requesterName, code: $0.request?.code,
+                id: $0.id, role: $0.role, expiresAt: $0.expiresAt, requesterName: $0.request?.requesterName, code: $0.request?.code,
                 isAllowed: $0.request?.isAllowed ?? false
             )
         }
@@ -105,11 +107,18 @@ extension HostSettingsModel {
                 throw HostSettingsError("\(HostPane.macName) is not paired with that dashboard.")
             }
             management.removeDashboard(id)
+            // The pairing stays, and the dashboard still connects, when the Keychain did not take the change.
+            guard !management.dashboards.contains(where: { $0.id == id }) else {
+                throw HostSettingsError(management.errorMessage ?? "Could not remove the pairing.")
+            }
         case .stopManagement:
             guard management.manager != nil else {
                 throw HostSettingsError("\(HostPane.macName) is not managed by another Mac.")
             }
             management.stopManagement()
+            guard management.manager == nil else {
+                throw HostSettingsError(management.errorMessage ?? "Could not remove the pairing.")
+            }
         }
         return HostPairingReport(management)
     }
