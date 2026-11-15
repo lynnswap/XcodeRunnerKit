@@ -7,8 +7,8 @@ struct Host: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Manage the installed runner host.",
         subcommands: [
-            Status.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self, Macs.self,
-            Storage.self, BuildService.self, Settings.self,
+            Status.self, Configure.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self,
+            Macs.self, Storage.self, BuildService.self, Settings.self,
         ]
     )
 
@@ -17,6 +17,14 @@ struct Host: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Print the host's state, jobs, runners, and settings as JSON.")
         @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
         func run() throws { try HostApp.run(["status"] + arguments) }
+    }
+
+    struct Configure: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Change the job limit, Simulator retention, Xcode, storage folder, or repository selection."
+        )
+        @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
+        func run() throws { try HostApp.run(["configure"] + arguments) }
     }
 
     struct Pause: ParsableCommand {
