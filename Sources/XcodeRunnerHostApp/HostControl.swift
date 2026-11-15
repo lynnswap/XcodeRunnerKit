@@ -11,8 +11,82 @@ struct HostControl: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "xcode-runner host",
         abstract: "Read and change the host on this Mac.",
-        subcommands: [Status.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self]
+        subcommands: [Status.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self, Macs.self]
     )
+
+    /// The Macs that a host manages: the Runners section of its window. The host pairs with a Mac that allowed a
+    /// managing host, with `pairing allow manager` there, and then registers that Mac's runners as its own.
+    struct Macs: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "List the Macs that the host manages, pair it with another one, or remove one.",
+            subcommands: [Status.self, Pair.self, Remove.self]
+        )
+
+        struct Status: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Print the Macs that the host manages, with their states and settings, as JSON."
+            )
+
+            @OptionGroup var host: HostOption
+
+            func run() async throws { try HostControl.write(try await HostControl.macs(.read(refreshing: nil), on: host.host)) }
+        }
+
+        struct Pair: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Pair the host with a Mac that waits for a managing host, given the code that the Mac shows.",
+                discussion: """
+                    Run `xcode-runner host pairing allow manager` on the Mac first. This command has the host find \
+                    the Mac and prints the code that the host shows for the pairing. It then reads the code that \
+                    the Mac shows from standard input, and has the host pair if the two are the same. The Mac needs \
+                    the host's code as well, with `xcode-runner host pairing confirm`.
+                    """
+            )
+
+            @Argument(help: "The Mac's name, as it is named on the network.")
+            var mac: String
+            @Option(help: "How many seconds the host looks for the Mac.")
+            var timeout = 60
+            @OptionGroup var host: HostOption
+
+            func run() async throws {
+                let mac = mac
+                let report = try await HostControl.pairManagedMac(named: mac, on: host.host, timeout: .seconds(timeout)) { shown in
+                    try HostControl.write(shown)
+                } otherCode: {
+                    // Reading blocks its thread. The Mac's refusal is noticed when the confirmation is sent.
+                    let line = await Task.detached { readLine() }.value
+                    guard let code = line?.trimmingCharacters(in: .whitespacesAndNewlines), !code.isEmpty else {
+                        throw HostSettingsError("Standard input ended without the code that \(mac) shows.")
+                    }
+                    return code
+                }
+                try HostControl.write(report)
+            }
+        }
+
+        struct Remove: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "End the host's pairing with a Mac that it manages. The Mac's runners stay registered."
+            )
+
+            @Argument(help: "The Mac's name, as `status` prints it.")
+            var mac: String
+            @OptionGroup var host: HostOption
+
+            func run() async throws {
+                let host = host.host
+                let listed = try await HostControl.macs(.read(refreshing: nil), on: host).macs.filter { $0.name == mac }
+                guard let match = listed.first else { throw HostSettingsError("The host manages no Mac named \(mac).") }
+                guard listed.count == 1 else { throw HostSettingsError("The host manages \(listed.count) Macs named \(mac).") }
+                let report = try await HostControl.macs(.remove(mac: match.id), on: host)
+                try HostControl.write(report)
+                if report.macs.contains(where: { $0.id == match.id }) {
+                    throw HostSettingsError(report.message ?? "The host could not remove \(mac).")
+                }
+            }
+        }
+    }
 
     /// The window's Management and Dashboards sections: the Macs that this host is paired with.
     ///
@@ -434,6 +508,86 @@ struct HostControl: AsyncParsableCommand {
     @MainActor static func settings(host: String?, mac: String?) async throws -> HostSettingsReport? {
         if let mac { return try await managed(mac, on: host) { .read(refreshing: $0) }.settings }
         guard case .settings(let report) = try await reply(to: .settings(.read), on: host) else { throw unexpectedAnswer }
+        return report
+    }
+
+    /// Asks a host about the Macs that it manages, or to change them, as a dashboard does.
+    @MainActor static func macs(
+        _ request: ManagedMacsRequest, on host: String?,
+        over bridge: (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = HostSettingsBridge.request
+    ) async throws -> ManagedMacsReport {
+        guard case .macs(let report) = try await reply(to: .macs(request), on: host, over: bridge) else { throw unexpectedAnswer }
+        return report
+    }
+
+    /// Has a host pair with a Mac that waits for a managing host, as a dashboard does through the host, with the
+    /// Mac's code compared in place of a person comparing the two.
+    ///
+    /// - Parameters:
+    ///   - bridge: Sends the requests to the host on this Mac. Tests pass a connection to a host of their own.
+    ///   - showCode: Called with the host's code once the Macs exchanged keys.
+    ///   - otherCode: Returns the code that the Mac shows. The host ends the pairing if it differs.
+    /// - Returns: The host's Macs after the pairing, with the Mac that it added.
+    @MainActor static func pairManagedMac(
+        named mac: String, on host: String?, timeout: Duration,
+        over bridge: (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = HostSettingsBridge.request,
+        showCode: (PairedMacs.CodeConfirmation) throws -> Void, otherCode: () async throws -> String
+    ) async throws -> ManagedMacsReport {
+        // The host lists the Macs that wait to pair while it is asked for them.
+        let deadline = ContinuousClock.now + timeout
+        var found: WaitingMac?
+        while found == nil {
+            let report = try await macs(.discover, on: host, over: bridge)
+            guard report.canAddMacs else {
+                throw HostSettingsError("The host is managed by another Mac, so it cannot manage one itself.")
+            }
+            let named = report.waitingMacs.filter { $0.name == mac }
+            guard named.count <= 1 else {
+                throw HostSettingsError("\(named.count) Macs named \(mac) wait to pair. Rename one, or pair in the window.")
+            }
+            found = named.first
+            if found == nil {
+                guard ContinuousClock.now < deadline else {
+                    throw HostSettingsError(
+                        report.discoveryMessage ?? "No Mac named \(mac) waits for a managing host on the local network."
+                    )
+                }
+                try await Task.sleep(for: .milliseconds(500))
+            }
+        }
+        guard let found else { throw unexpectedAnswer }
+        // The host tells the pairings that it runs for dashboards and commands apart by this name.
+        let attempt = UUID()
+        var report = try await macs(.pair(waitingMac: found.id, attempt: attempt), on: host, over: bridge)
+        func paired() throws -> Bool {
+            guard report.pairingAttempt == attempt else {
+                throw HostSettingsError("The host started another pairing in place of this one.")
+            }
+            if let error = report.pairingError { throw HostSettingsError(error) }
+            return report.pairedMac != nil
+        }
+        while try !paired(), report.codeConfirmation == nil {
+            try await Task.sleep(for: .milliseconds(200))
+            report = try await macs(.read(refreshing: nil), on: host, over: bridge)
+        }
+        guard let shown = report.codeConfirmation else { return report }
+        do {
+            try showCode(shown)
+            let code = try await otherCode()
+            guard code == shown.code else {
+                throw HostSettingsError(
+                    "\(shown.macName) shows the code \(code), and the host shows \(shown.code) for it. The Macs did not pair."
+                )
+            }
+        } catch {
+            _ = try? await macs(.cancelPairing(attempt: attempt), on: host, over: bridge)
+            throw error
+        }
+        report = try await macs(.confirmCode(attempt: attempt), on: host, over: bridge)
+        while try !paired() {
+            try await Task.sleep(for: .milliseconds(200))
+            report = try await macs(.read(refreshing: nil), on: host, over: bridge)
+        }
         return report
     }
 
