@@ -66,6 +66,15 @@ struct HostSettingsBridgeTests {
         // A request that the host takes only from a paired Mac is refused as well.
         await #expect(throws: HostSettingsError.self) { _ = try await perform(.unpair) }
 
+        // `host configure` asks for the window's other changes, here the job limit and the Simulator retention.
+        await settings.configureDefaultPool()
+        await settings.refreshPoolStatus()
+        let configure = try HostControl.Configure.parse(["--maximum-jobs", "2", "--simulator-retention", "forever"])
+        for request in configure.settingsRequests { _ = try await perform(.settings(request)) }
+        #expect(try settings.pool.configuration() == .init(maximumConcurrentJobs: 2, simulatorRetention: .forever))
+        #expect(throws: (any Error).self) { try HostControl.Configure.parse(["--repositories", "1", "--mac", "Second Mac"]) }
+        #expect(throws: (any Error).self) { try HostControl.Configure.parse(["--repositories", "1", "--maximum-jobs", "2"]) }
+
         // `xcode-runner host settings` changes the labels and the pause through the host as well, and gets its refusal.
         #expect(try await request(.setPaused(false), over: connection).error == nil)
         #expect(!installation.isPaused())

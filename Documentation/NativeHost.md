@@ -340,6 +340,23 @@ xcode-runner host labels fast gpu # replace the runner labels; --none removes th
 xcode-runner host restart         # stop the host and start it again
 ```
 
+`configure` changes what the window saves with **Apply** and **Save**:
+
+```sh
+xcode-runner host configure --maximum-jobs 2 --simulator-retention 20   # minutes, or forever
+xcode-runner host configure --xcode /Applications/Xcode.app/Contents/Developer   # or system
+xcode-runner host configure --storage /path/to/JobData
+xcode-runner host configure --repositories 101 102   # IDs from github status; --no-repositories selects none
+```
+
+The repository selection is a command of its own: the host registers runners
+after a changed limit, and takes no selection while it does.
+
+On this Mac, `xcode-runner host settings` changes the same settings and lists
+their types and choices; see
+[Settings from CLI and MCP](#settings-from-cli-and-mcp). `configure` also
+reaches other Macs with `--host` and `--mac`, described below.
+
 Restarting stops the runner services with the jobs that they run. `restart` is
 refused unless the host last counted no Xcode job on the Mac; pass `--stop-jobs`
 to restart anyway. A job can start between that count and the restart.
@@ -419,7 +436,7 @@ Mac's code from standard input and has the host pair if it is the host's own.
 These commands take `--host` as well, for a host that this Mac's dashboard
 shows.
 
-The status, runner, and GitHub commands also act on other Macs:
+The status, `configure`, runner, and GitHub commands also act on other Macs:
 
 ```sh
 xcode-runner host status --host "Build Mac"            # a host that this Mac's dashboard shows

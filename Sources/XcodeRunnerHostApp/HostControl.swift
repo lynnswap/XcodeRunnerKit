@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import XcodeRunnerHostSupport
+import XcodeRunnerKit
 
 /// The commands of `xcode-runner host` that read and change a host as its window does.
 ///
@@ -11,8 +12,80 @@ struct HostControl: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "xcode-runner host",
         abstract: "Read and change the host on this Mac.",
-        subcommands: [Status.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self, Macs.self]
+        subcommands: [
+            Status.self, Configure.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self, Macs.self,
+        ]
     )
+
+    /// The settings that the window saves with Apply and Save, for the host on this Mac or on another one.
+    /// `xcode-runner host settings` changes the same settings on this Mac, with a catalog of their types.
+    struct Configure: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Change the job limit, Simulator retention, Xcode, storage folder, or repository selection.",
+            discussion: """
+                Each option is one change, applied in the order above, and prints the host's answer as JSON. The \
+                repository selection is a command of its own.
+                """
+        )
+
+        @Option(help: "How many Xcode jobs run at once.")
+        var maximumJobs: Int?
+        @Option(help: "How long idle Simulators are kept: `forever`, or a number of minutes.")
+        var simulatorRetention: String?
+        @Option(help: "The Xcode for jobs that name none: an Xcode's Contents/Developer path, or `system` for the system's selection.")
+        var xcode: String?
+        @Option(help: "The folder for checkouts, build output, and the compiler cache. It applies when the host restarts.")
+        var storage: String?
+        @Option(parsing: .upToNextOption, help: "The IDs of the repositories whose runners the host registers, as `github status` lists them. They replace the selection.")
+        var repositories: [Int] = []
+        @Flag(help: "Select no repository, which removes the host's runners.")
+        var noRepositories = false
+        @OptionGroup var host: HostOption
+        @OptionGroup var mac: MacOption
+
+        func validate() throws {
+            guard !settingsRequests.isEmpty || selection != nil else {
+                throw ValidationError("Name a setting to change.")
+            }
+            if let simulatorRetention, simulatorRetention != "forever", Int(simulatorRetention) == nil {
+                throw ValidationError("--simulator-retention takes `forever` or a number of minutes.")
+            }
+            guard repositories.isEmpty || !noRepositories else {
+                throw ValidationError("Pass repository IDs or --no-repositories, not both.")
+            }
+            guard selection == nil || mac.mac == nil else {
+                throw ValidationError("A managed Mac's runners are registered by its host. Select repositories without --mac.")
+            }
+            // The host registers runners after a changed limit, and takes no selection while it does.
+            guard selection == nil || settingsRequests.isEmpty else {
+                throw ValidationError("Select repositories in a command of their own, after the host applied the other settings.")
+            }
+        }
+
+        /// The changes to the host's settings that the options ask for, in the order of the window's sections.
+        var settingsRequests: [HostSettingsRequest] {
+            var requests: [HostSettingsRequest] = []
+            let retention: HostExecutionPool.SimulatorRetention? = simulatorRetention.map {
+                $0 == "forever" ? .forever : .idleTimeout(minutes: Int($0) ?? 0)
+            }
+            if maximumJobs != nil || retention != nil {
+                requests.append(.configurePool(.init(maximumConcurrentJobs: maximumJobs, simulatorRetention: retention)))
+            }
+            if let xcode { requests.append(.saveXcode(developerDirectory: xcode == "system" ? nil : xcode)) }
+            if let storage { requests.append(.saveStorage(directory: storage)) }
+            return requests
+        }
+
+        /// The repository selection that the options ask for.
+        var selection: Swift.Set<Int>? {
+            noRepositories ? [] : repositories.isEmpty ? nil : Swift.Set(repositories)
+        }
+
+        func run() async throws {
+            for request in settingsRequests { try await HostControl.perform(request, host: host.host, mac: mac.mac) }
+            if let selection { try await HostControl.perform(.github(.applySelection(selection)), on: host.host) }
+        }
+    }
 
     /// The Macs that a host manages: the Runners section of its window. The host pairs with a Mac that allowed a
     /// managing host, with `pairing allow manager` there, and then registers that Mac's runners as its own.
