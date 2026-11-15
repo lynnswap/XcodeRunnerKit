@@ -36,7 +36,7 @@ struct SidebarGroup: Equatable {
 final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate {
     private final class Node: NSObject {
         let heading: String?
-        let row: SidebarRow?
+        var row: SidebarRow?
         let children: [Node]
 
         init(heading: String? = nil, row: SidebarRow? = nil, children: [Node] = []) {
@@ -113,9 +113,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             outline.expandItem(nil, expandChildren: true)
             return
         }
-        for row in rows {
-            let index = outline.row(forItem: (nodes + nodes.flatMap(\.children)).first { $0.row?.pane == row.pane })
-            (outline.view(atColumn: 0, row: index, makeIfNecessary: false) as? SidebarCellView)?.show(row)
+        // The rows are in the nodes' order, because their panes are.
+        for (node, row) in zip(nodes.flatMap { $0.row == nil ? $0.children : [$0] }, rows) {
+            node.row = row
+            // A row that is scrolled out of view has no cell, and gets its words when it is made.
+            (outline.view(atColumn: 0, row: outline.row(forItem: node), makeIfNecessary: false) as? SidebarCellView)?.show(row)
         }
     }
 
