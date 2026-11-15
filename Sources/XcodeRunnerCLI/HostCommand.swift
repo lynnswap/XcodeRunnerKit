@@ -31,7 +31,7 @@ struct Host: AsyncParsableCommand {
     }
 
     struct Restart: ParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Stop the host and start it again.")
+        static let configuration = CommandConfiguration(abstract: "Stop the host and start it again, with the jobs of its runners.")
         @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
         func run() throws { try HostApp.run(["restart"] + arguments) }
     }

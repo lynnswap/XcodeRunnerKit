@@ -340,6 +340,9 @@ xcode-runner host labels fast gpu # replace the runner labels; --none removes th
 xcode-runner host restart         # stop the host and start it again
 ```
 
+Restarting stops the runner services with the jobs that they run. `restart` is
+refused while Xcode jobs run on the Mac; pass `--stop-jobs` to restart anyway.
+
 These commands send the host what a dashboard sends it, so what a command can
 do and when the host refuses are the same as in the app. They need the
 `xcode-runner` at `Contents/Helpers` in the app, which

@@ -38,10 +38,23 @@ struct HostControl: AsyncParsableCommand {
 
     struct Restart: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Stop the host and start it again. It waits for the jobs that run."
+            abstract: "Stop the host and start it again. Its runner services stop with the jobs that they run."
         )
 
-        func run() async throws { try await HostControl.perform(.settings(.restart)) }
+        @Flag(help: "Restart although Xcode jobs run on this Mac. The jobs of its runners end.")
+        var stopJobs = false
+
+        func run() async throws {
+            // The window names the running jobs before a person confirms. A command is refused in their place.
+            if !stopJobs, case .settings(let report) = try await HostControl.reply(to: .settings(.read)),
+               let running = report.poolStatus?.activeJobCount, running > 0 {
+                throw HostSettingsError(
+                    "\(running == 1 ? "An Xcode job runs" : "\(running) Xcode jobs run") on this Mac. "
+                        + "Restarting ends the jobs of its runners: wait for them, or pass --stop-jobs."
+                )
+            }
+            try await HostControl.perform(.settings(.restart))
+        }
     }
 
     struct Labels: AsyncParsableCommand {
