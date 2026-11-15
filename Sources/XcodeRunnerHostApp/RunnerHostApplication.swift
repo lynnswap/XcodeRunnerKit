@@ -452,9 +452,11 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     }
 
     /// The host that manages this Mac, among the hosts that this Mac shows. The pairings share no ID, so the host is
-    /// known by its name.
+    /// known by its name, and is not known among several hosts of that name.
     private var managingHostOnDashboard: PairedMac? {
-        settings.management.manager.flatMap { manager in dashboardHosts.macs.first { $0.name == manager.name } }
+        guard let manager = settings.management.manager else { return nil }
+        let named = dashboardHosts.macs.filter { $0.name == manager.name }
+        return named.count == 1 ? named.first : nil
     }
 
     /// Shows the hosts on other Macs that this Mac paired with as a dashboard, or how to pair with one. The window

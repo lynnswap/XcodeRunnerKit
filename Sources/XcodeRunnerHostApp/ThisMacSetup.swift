@@ -18,9 +18,11 @@ final class ThisMacSetup {
         case failed(String)
     }
 
-    /// Whether a sheet set up this Mac's host since the app started. The Mac has a host from then on, and a sheet
-    /// that opens later still has it wait again.
-    private static var didSetUpThisMac = false
+    /// The setup that a sheet offered since the app opened. A sheet that opens later shows the same one, so that it
+    /// neither installs the host again nor asks a host that waits to wait.
+    private static var started: ThisMacSetup?
+    /// Whether the host is installed, by this setup.
+    private var isInstalled = false
 
     private(set) var phase: Phase
     @ObservationIgnored private var watching: Task<Void, Never>?
@@ -32,20 +34,22 @@ final class ThisMacSetup {
     ///   - pairing: Asks this Mac's host about its pairings, or to change them.
     init(
         install: @escaping @MainActor () async throws -> Void = ThisMacSetup.runInstaller,
-        pairing: @escaping @MainActor (HostPairingRequest) async throws -> HostPairingReport = { try await HostControl.pairing($0) },
-        isInstalled: Bool = false
+        pairing: @escaping @MainActor (HostPairingRequest) async throws -> HostPairingReport = { try await HostControl.pairing($0) }
     ) {
         self.install = install
         self.pairing = pairing
-        phase = isInstalled ? .ended : .offered
+        phase = .offered
     }
 
     /// The setup for a sheet that pairs a Mac for a host to manage, on a Mac that has no host yet. `nil` on a Mac
     /// with a host, which pairs from its own settings.
     static func forSheet(role: PairingRole) -> ThisMacSetup? {
         guard role == .manager else { return nil }
-        if didSetUpThisMac { return ThisMacSetup(isInstalled: true) }
-        return !HostControl.runsHost && installer != nil ? ThisMacSetup() : nil
+        if let started { return started }
+        guard !HostControl.runsHost, installer != nil else { return nil }
+        let setup = ThisMacSetup()
+        started = setup
+        return setup
     }
 
     /// The installer in this app.
@@ -56,18 +60,16 @@ final class ThisMacSetup {
 
     /// Installs the host and has it wait for a managing host.
     func start() {
-        let isInstalled: Bool
         switch phase {
         case .installing, .waiting: return
-        case .offered, .failed: isInstalled = Self.didSetUpThisMac
-        case .ended: isInstalled = true
+        case .offered, .failed, .ended: break
         }
         phase = .installing
         Task {
             do {
                 if !isInstalled {
                     try await install()
-                    Self.didSetUpThisMac = true
+                    isInstalled = true
                 }
                 try await waitForManager()
                 phase = .waiting
