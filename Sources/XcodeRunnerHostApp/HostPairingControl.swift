@@ -40,9 +40,18 @@ struct HostPairingReport: Codable, Equatable, Sendable {
         let isAllowed: Bool
     }
 
+    /// The last wait that is over.
+    struct Ended: Codable, Equatable, Sendable {
+        /// The `id` that the wait had in `window`.
+        let id: UUID
+        /// The ID of the Mac that paired, or `nil` when none did.
+        let paired: UUID?
+    }
+
     let manager: Mac?
     let dashboards: [Mac]
     let window: Window?
+    let ended: Ended?
     /// Why the last wait ended without a pairing.
     let message: String?
     let errorMessage: String?
@@ -56,6 +65,7 @@ struct HostPairingReport: Codable, Equatable, Sendable {
                 isAllowed: $0.request?.isAllowed ?? false
             )
         }
+        ended = management.endedPairing.map { Ended(id: $0.window, paired: $0.paired) }
         message = management.pairingMessage
         errorMessage = management.errorMessage
     }

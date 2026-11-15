@@ -45,12 +45,14 @@ struct HostControl: AsyncParsableCommand {
 
             func run() async throws {
                 var report = try await HostControl.pairing(.allow(role))
-                while wait, let window = report.window, window.code == nil {
+                // A wait that starts after this one ended is another one, with another Mac's request.
+                let allowed = report.window?.id
+                while wait, let window = report.window, window.id == allowed, window.code == nil {
                     try await Task.sleep(for: .seconds(1))
                     report = try await HostControl.pairing(.read)
                 }
                 try HostControl.write(report)
-                if wait, report.window == nil {
+                if wait, report.window?.id != allowed {
                     throw HostSettingsError(report.message ?? "The wait for a Mac to pair ended.")
                 }
             }
@@ -69,7 +71,6 @@ struct HostControl: AsyncParsableCommand {
             var code: String
 
             func run() async throws {
-                let before = try await HostControl.pairing(.read)
                 var report = try await HostControl.pairing(.confirm(code: code))
                 // The wait ends when the other Mac confirmed too, refused, or left, or when its time is over. A wait
                 // that starts afterwards is another one.
@@ -79,9 +80,7 @@ struct HostControl: AsyncParsableCommand {
                     report = try await HostControl.pairing(.read)
                 }
                 try HostControl.write(report)
-                let paired = Set(([report.manager].compactMap { $0 } + report.dashboards).map(\.id))
-                    .subtracting(([before.manager].compactMap { $0 } + before.dashboards).map(\.id))
-                guard !paired.isEmpty else {
+                guard let ended = report.ended, ended.id == confirmed, ended.paired != nil else {
                     throw HostSettingsError(report.errorMessage ?? report.message ?? "The Macs did not pair.")
                 }
             }
