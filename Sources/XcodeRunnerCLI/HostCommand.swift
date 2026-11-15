@@ -5,8 +5,42 @@ import XcodeRunnerKit
 
 struct Host: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Manage the installed runner host.", subcommands: [Storage.self, BuildService.self, Settings.self]
+        abstract: "Manage the installed runner host.",
+        subcommands: [
+            Status.self, Pause.self, Resume.self, Restart.self, Labels.self, Storage.self, BuildService.self, Settings.self,
+        ]
     )
+
+    // The app has these commands, with the requests that its window sends a host. Their options and help are its own.
+    struct Status: ParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Print the host's state, jobs, runners, and settings as JSON.")
+        @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
+        func run() throws { try HostApp.run(["status"] + arguments) }
+    }
+
+    struct Pause: ParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Take no new jobs.")
+        @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
+        func run() throws { try HostApp.run(["pause"] + arguments) }
+    }
+
+    struct Resume: ParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Take jobs again after a pause.")
+        @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
+        func run() throws { try HostApp.run(["resume"] + arguments) }
+    }
+
+    struct Restart: ParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Stop the host and start it again.")
+        @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
+        func run() throws { try HostApp.run(["restart"] + arguments) }
+    }
+
+    struct Labels: ParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Replace the labels of this Mac's runners.")
+        @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
+        func run() throws { try HostApp.run(["labels"] + arguments) }
+    }
 
     struct BuildService: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
@@ -161,5 +195,29 @@ private func report(_ installation: HostInstallation, storage: HostInstallation.
         print("Job data: \(storage.directory.path(percentEncoded: false))")
     } else {
         print("Host storage is not configured.")
+    }
+}
+
+/// The app that contains this `xcode-runner`. It runs what needs the app's Keychain items or its requests to a host.
+enum HostApp {
+    /// The app's executable, when this `xcode-runner` is the one inside the app.
+    static func executable() -> URL? {
+        guard let tool = Bundle.main.executableURL?.resolvingSymlinksInPath() else { return nil }
+        let app = tool.deletingLastPathComponent().deletingLastPathComponent().appending(path: "MacOS/XcodeHomeRunner")
+        return FileManager.default.isExecutableFile(atPath: app.path(percentEncoded: false)) ? app : nil
+    }
+
+    /// Replaces this process with the app, which reads or changes a host as `command` says.
+    static func run(_ command: [String]) throws -> Never {
+        guard let app = executable() else {
+            throw ValidationError("This command needs the xcode-runner inside XcodeHomeRunner.app, at Contents/Helpers/xcode-runner.")
+        }
+        try replaceProcess(with: [app.path(percentEncoded: false), "--control", "--"] + command)
+    }
+
+    static func replaceProcess(with arguments: [String]) throws -> Never {
+        let values = arguments.map { strdup($0) } + [nil]
+        execv(values[0], values)
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSFilePathErrorKey: arguments[0]])
     }
 }

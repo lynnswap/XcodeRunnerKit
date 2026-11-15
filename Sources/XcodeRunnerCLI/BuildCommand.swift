@@ -197,21 +197,14 @@ struct BuildOptions: ParsableArguments {
             throw ValidationError("With --host, name the workspace, project, or package relative to the current directory.")
         }
         _ = try requestedDestination()
-        guard let tool = Bundle.main.executableURL?.resolvingSymlinksInPath() else {
-            throw ValidationError("Cannot locate the xcode-runner executable.")
-        }
-        let app = tool.deletingLastPathComponent().deletingLastPathComponent().appending(path: "MacOS/XcodeHomeRunner")
-        guard FileManager.default.isExecutableFile(atPath: app.path(percentEncoded: false)) else {
+        guard let app = HostApp.executable() else {
             throw ValidationError("--host needs the xcode-runner inside XcodeHomeRunner.app, at Contents/Helpers/xcode-runner.")
         }
-        let arguments = [
+        try HostApp.replaceProcess(with: [
             app.path(percentEncoded: false), "--run-on-host", host,
             "--output-directory", Self.url(outputDirectory ?? "XcodeRunnerOutput").path(percentEncoded: false),
             "--", action.rawValue,
-        ] + hostArguments
-        let values = arguments.map { strdup($0) } + [nil]
-        execv(values[0], values)
-        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSURLErrorKey: app])
+        ] + hostArguments)
     }
 
     /// The options that a host takes: every option except `--host` and those that name this Mac's folders.

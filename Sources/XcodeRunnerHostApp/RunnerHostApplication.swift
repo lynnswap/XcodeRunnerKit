@@ -26,6 +26,9 @@ struct HostOptions: ParsableCommand {
     @Option(help: .hidden) var runOnHost: String?
     /// This Mac's folder for the operation's log and result bundle.
     @Option(help: .hidden) var outputDirectory: String?
+    /// Reads or changes a host as `operation` says. `xcode-runner host` starts the app with this for the commands that
+    /// send a host what its window sends it.
+    @Flag(help: .hidden) var control = false
     /// An `xcode-runner` command and its options, after `--`.
     @Argument(parsing: .postTerminator, help: .hidden) var operation: [String] = []
 
@@ -58,7 +61,11 @@ struct HostOptions: ParsableCommand {
         if settingsService && !host {
             throw ValidationError("--settings-service requires --host. Run the installer in this app to update the LaunchAgent.")
         }
-        if (runOnHost == nil) != operation.isEmpty || (runOnHost == nil) != (outputDirectory == nil) {
+        if control {
+            guard runOnHost == nil, outputDirectory == nil, !operation.isEmpty else {
+                throw ValidationError("--control takes a command after -- and neither --run-on-host nor --output-directory.")
+            }
+        } else if (runOnHost == nil) != operation.isEmpty || (runOnHost == nil) != (outputDirectory == nil) {
             throw ValidationError("--run-on-host requires --output-directory and a command after --.")
         }
     }
@@ -67,9 +74,9 @@ struct HostOptions: ParsableCommand {
 /// The host app's entry point. The app target calls `main()` from its `main.swift`.
 public enum RunnerHostApplication {
     /// Runs the menu bar host when launched with `--host`, a runner service helper when launched with
-    /// `--service-directory`, and a build or test on another Mac's host when launched with `--run-on-host`. Opened
-    /// without them, the app starts the host that the installer set up on this Mac, or shows a dashboard of hosts on
-    /// other Macs when this Mac has none.
+    /// `--service-directory`, a build or test on another Mac's host when launched with `--run-on-host`, and a command
+    /// that reads or changes a host when launched with `--control`. Opened without them, the app starts the host that
+    /// the installer set up on this Mac, or shows a dashboard of hosts on other Macs when this Mac has none.
     @MainActor public static func main() {
         do {
             let options = try HostOptions.parse(HostOptions.ownArguments(in: Array(CommandLine.arguments.dropFirst())))
@@ -84,6 +91,11 @@ public enum RunnerHostApplication {
                 let service = RunnerService(directory: URL(filePath: directory), parent: parent, ownership: ownership)
                 service.start()
                 withExtendedLifetime(service) { dispatchMain() }
+            }
+            if options.control {
+                // The command prints its result or its failure and ends the process.
+                Task { await HostControl.main(options.operation) }
+                dispatchMain()
             }
             let installation = options.installation
             if let hostName = options.runOnHost, let outputDirectory = options.outputDirectory {
@@ -271,7 +283,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         }
         super.init()
         if settingsService {
-            settingsServer = HostSettingsServer(github: settings.github)
+            settingsServer = HostSettingsServer(settings: settings)
             // Only the installed LaunchAgent starts the host with its settings service, and launchd starts that host
             // again after it exits unsuccessfully.
             settings.restartHost = { [unowned self] in

@@ -326,6 +326,25 @@ The command starts the app that contains it to reach the host, because macOS
 gives the pairings in the app's Keychain item to the app alone. It finds the
 host with Bonjour on the local network, as the dashboard does.
 
+## Commands for the host
+
+The `xcode-runner` inside the installed app reads and changes this Mac's host
+as its window does. Each command prints the host's answer as JSON, and exits
+with a failure and the host's reason when the host refuses or does not run.
+
+```sh
+xcode-runner host status          # state, jobs, runners, labels, and settings
+xcode-runner host pause           # take no new jobs
+xcode-runner host resume
+xcode-runner host labels fast gpu # replace the runner labels; --none removes them
+xcode-runner host restart         # stop the host and start it again
+```
+
+These commands send the host what a dashboard sends it, so what a command can
+do and when the host refuses are the same as in the app. They need the
+`xcode-runner` at `Contents/Helpers` in the app, which
+`~/Library/Application Support/XcodeRunnerKit/bin/xcode-runner` is on a host.
+
 ## Settings from CLI and MCP
 
 The GUI, CLI, and MCP server use the same settings operations. Read the catalog
