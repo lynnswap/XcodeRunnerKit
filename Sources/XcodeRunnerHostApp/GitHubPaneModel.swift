@@ -60,6 +60,12 @@ final class GitHubPaneModel {
         }
     }
 
+    /// Whether the edited selection differs from the saved one and can be saved now.
+    var canApplySelection: Bool {
+        guard let github, !github.isBusy, !github.isLoadingRepositories else { return false }
+        return selection != github.savedRepositoryIDs
+    }
+
     /// Why a host refused the last request from the dashboard, or why it did not confirm it.
     var requestError: String? {
         guard case .host(let hosts, let host) = source else { return nil }
