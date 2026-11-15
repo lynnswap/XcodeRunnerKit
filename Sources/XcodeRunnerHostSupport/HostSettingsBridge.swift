@@ -72,13 +72,15 @@ package enum HostSettingsBridgeRequest: Codable, Sendable {
     /// A request that a dashboard sends a host, encoded as the app encodes it for a paired Mac. The host answers it
     /// as it answers a dashboard, and the answer is in `reply`.
     case link(Data)
+    /// What a command asks of the host's pairings, encoded as the app encodes it. The host's pairings are in `reply`.
+    case pairing(Data)
 }
 
 package struct HostSettingsBridgeResponse: Codable, Sendable {
     package let settings: HostGitHubRepositorySettings?
     package let error: String?
     package let synchronizationError: String?
-    /// The host's answer to a `link` request, encoded as the app encodes it for a paired Mac.
+    /// The host's answer to a `link` or `pairing` request, encoded as the app encodes it.
     package let reply: Data?
     package init(
         settings: HostGitHubRepositorySettings? = nil, error: String? = nil, synchronizationError: String? = nil,
