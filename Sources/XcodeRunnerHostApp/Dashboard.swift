@@ -43,7 +43,7 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
     private func showWindow(_ sender: Any?) {
         if windowController == nil {
             windowController = makePaneWindowController(
-                content: DashboardSplitViewController(model: DashboardWindowModel(hosts: hosts), addMacMenu: makeAddMacMenu()),
+                content: DashboardSplitViewController(model: DashboardWindowModel(hosts: hosts)),
                 autosaveName: "XcodeHomeRunnerDashboard"
             )
         }
@@ -55,8 +55,8 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         NSWorkspace.shared.open(URL(string: "https://github.com/lynnswap/XcodeRunnerKit/blob/main/Documentation/NativeHost.md")!)
     }
 
-    /// The menus that people expect in the menu bar, in their usual order. Every command of the window's toolbar is
-    /// here too, because a toolbar can be hidden. The menu bar host has no menu bar of its own.
+    /// The menus that people expect in the menu bar, in their usual order, with the commands that pair with Macs. The
+    /// menu bar host has no menu bar of its own.
     private func installMainMenu() {
         let application = NSApplication.shared
         let main = NSMenu()
@@ -125,7 +125,7 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         application.mainMenu = main
     }
 
-    /// The Add Mac menu of the toolbar and of the File menu. It lists the commands for the hosts shown when it opens.
+    /// The File menu's Add Mac menu. It lists the commands for the hosts shown when it opens.
     private func makeAddMacMenu() -> NSMenu {
         let menu = NSMenu(title: "Add Mac")
         menu.delegate = self
@@ -202,12 +202,31 @@ final class DashboardWindowModel: PaneWindowModel {
 
     var sidebarGroups: [SidebarGroup] {
         hosts.macs.map { host in
-            SidebarGroup(title: host.name, rows: [
-                SidebarRow(pane: DashboardPane.overview(host.id), title: "Overview", icon: HostPane.overview.icon),
-                SidebarRow(pane: DashboardPane.github(host.id), title: "GitHub", icon: HostPane.github.icon),
-                SidebarRow(pane: DashboardPane.mac(host.id), title: host.name, icon: HostPane.mac.icon),
-            ] + hosts.macsManaged(by: host.id).listedMacs.map { mac in
-                SidebarRow(pane: DashboardPane.managedMac(mac.id, host: host.id), title: mac.name, icon: HostPane.mac.icon)
+            // What the host last answered names its state, and its connection does while it does not answer.
+            let answer = hosts.answer(of: host.id)
+            let connection = hosts.status(of: host.id)
+            let managed = hosts.macsManaged(by: host.id)
+            return SidebarGroup(title: host.name, rows: [
+                SidebarRow(
+                    pane: DashboardPane.overview(host.id), title: "Overview", subtitle: answer?.report.stateTitle ?? connection.title,
+                    icon: HostPane.overview.icon,
+                    status: answer.map { .init(symbol: $0.report.stateSymbol, color: $0.report.stateTint) }
+                        ?? .init(symbol: connection.systemImage, color: connection.tint)
+                ),
+                SidebarRow(
+                    pane: DashboardPane.github(host.id), title: "GitHub",
+                    subtitle: answer.map { $0.github.accountLogin ?? "Not connected" }, icon: HostPane.github.icon
+                ),
+                SidebarRow(
+                    pane: DashboardPane.mac(host.id), title: host.name, subtitle: answer?.report.runnerCountTitle, icon: HostPane.mac.icon
+                ),
+            ] + managed.listedMacs.map { mac in
+                // The host's list of Macs is as old as its last answer, so their states are not shown without one.
+                let status = answer == nil ? nil : managed.status(of: mac.id)
+                return SidebarRow(
+                    pane: DashboardPane.managedMac(mac.id, host: host.id), title: mac.name, subtitle: status?.title,
+                    icon: HostPane.mac.icon, status: status.map { .init(symbol: $0.systemImage, color: $0.tint) }
+                )
             })
         }
     }
@@ -230,18 +249,14 @@ final class DashboardWindowModel: PaneWindowModel {
     }
 }
 
-/// The dashboard window's content: the paired hosts and their panes in a sidebar beside the selected pane, with Add Mac
-/// in the toolbar.
+/// The dashboard window's content: the paired hosts and their panes in a sidebar beside the selected pane.
 @MainActor
 final class DashboardSplitViewController: PaneSplitViewController {
     private let model: DashboardWindowModel
     private var hosts: PairedMacs { model.hosts }
-    private let toolbarMenu: NSMenu
 
-    /// - Parameter addMacMenu: The Add Mac toolbar item's choices, which the menu's delegate fills when it opens.
-    init(model: DashboardWindowModel, addMacMenu: NSMenu) {
+    init(model: DashboardWindowModel) {
         self.model = model
-        toolbarMenu = addMacMenu
         super.init(model: model, autosaveName: "XcodeHomeRunnerDashboard")
     }
 
@@ -253,7 +268,10 @@ final class DashboardSplitViewController: PaneSplitViewController {
         }
         switch pane {
         case .overview:
-            return OverviewViewController(model: OverviewModel(hosts: hosts, host: host) { [model] in model.pane = .github(host.id) })
+            return OverviewViewController(model: OverviewModel(
+                hosts: hosts, host: host, showGitHub: { [model] in model.pane = .github(host.id) },
+                addMac: { [weak self] in self?.addMac(managedBy: host.id) }
+            ))
         case .github: return GitHubViewController(model: GitHubPaneModel(hosts: hosts, host: host))
         case .mac:
             // The host registers runners for a changed limit itself.
@@ -268,12 +286,6 @@ final class DashboardSplitViewController: PaneSplitViewController {
             ))
         }
     }
-
-    override var addMacToolTip: String {
-        "Pair with a Mac that runs XcodeHomeRunner to show it here, or pair one of the Macs shown here with a Mac for it to manage."
-    }
-
-    override var addMacMenu: NSMenu? { toolbarMenu }
 
     /// Pairs this dashboard with a Mac that runs a host, and shows that host.
     @objc func showMacOnDashboard(_ sender: Any?) {

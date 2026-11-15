@@ -44,7 +44,7 @@ struct GitHubPaneView: View {
                 LabeledContent("Connected account") {
                     HStack {
                         Text(login)
-                        Button("Disconnect") { model.signOut() }
+                        Button("Disconnect", role: .destructive) { model.signOut() }
                             .disabled(!github.canDisconnect)
                     }
                 }
@@ -87,10 +87,8 @@ struct GitHubPaneView: View {
                 ))
                 .disabled(github.isBusy)
             }
-            if github.isLoadingRepositories {
-                ProgressView("Loading repositories…")
-            } else if !github.hasListedRepositories {
-                Text("To list a repository here, choose Add Repositories on GitHub…, install the app on it, then choose Reload.")
+            if !github.isLoadingRepositories, !github.hasListedRepositories {
+                Text("To list a repository here, choose Add Repositories on GitHub…, install the app on it, then reload the list.")
                     .foregroundStyle(.secondary)
             }
             HStack {
@@ -100,14 +98,31 @@ struct GitHubPaneView: View {
                 Spacer()
                 Button("Add Repositories on GitHub…") { model.addRepositories() }
                     .disabled(github.isBusy)
-                Button("Reload") { model.reloadRepositories() }
-                    .disabled(!github.canReloadRepositories)
                 Button(github.isSavingSelection ? "Applying…" : "Apply") { model.applySelection() }
-                    .disabled(github.isBusy || github.isLoadingRepositories)
+                    .disabled(!model.canApplySelection)
                     .accessibilityIdentifier("apply-repository-selection")
             }
         } header: {
-            Text("Repositories")
+            HStack {
+                Text("Repositories")
+                Spacer()
+                // The list reloads in place, so its progress takes the button's place.
+                if github.isLoadingRepositories {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .accessibilityLabel("Loading repositories")
+                        .transition(.opacity)
+                } else {
+                    Button("Reload", systemImage: "arrow.clockwise") { model.reloadRepositories() }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.borderless)
+                        .disabled(!github.canReloadRepositories)
+                        .help("Reload the repositories that the app is installed on")
+                        .accessibilityIdentifier("reload-repositories")
+                        .transition(.opacity)
+                }
+            }
+            .animation(.default, value: github.isLoadingRepositories)
         } footer: {
             if let manager = github.managerName {
                 Text("\(manager) registers \(model.mac.possessive) runners while it manages \(model.mac.object), so this selection applies after management stops.")

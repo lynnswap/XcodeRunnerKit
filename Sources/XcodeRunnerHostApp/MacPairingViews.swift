@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// This Mac's pairing with a managing host, in the Mac's settings.
+/// This Mac's pairing with a managing host, in its Overview.
 @MainActor
 struct HostManagementSection: View {
-    let model: MacPaneModel
+    let model: OverviewModel
     let management: HostManagement
     @State private var isConfirmingStop = false
 
@@ -13,7 +13,7 @@ struct HostManagementSection: View {
                 LabeledContent("Managed by") {
                     HStack {
                         Text(manager.name)
-                        Button("Stop Management…") { isConfirmingStop = true }
+                        Button("Stop Management…", role: .destructive) { isConfirmingStop = true }
                             .accessibilityIdentifier("stop-management")
                     }
                 }
@@ -58,7 +58,7 @@ struct HostManagementSection: View {
     }
 }
 
-/// The dashboards that show this Mac, in the Mac's settings.
+/// The dashboards that show this Mac, in its Overview.
 @MainActor
 struct HostDashboardsSection: View {
     let management: HostManagement
@@ -68,7 +68,7 @@ struct HostDashboardsSection: View {
         Section {
             ForEach(management.dashboards) { dashboard in
                 LabeledContent(dashboard.name) {
-                    Button("Remove…") { removing = dashboard }
+                    Button("Remove…", role: .destructive) { removing = dashboard }
                         .accessibilityIdentifier("remove-dashboard")
                 }
                 if let mismatch = management.versionMismatches[dashboard.id] {
@@ -90,7 +90,7 @@ struct HostDashboardsSection: View {
         } header: {
             Text("Dashboards")
         } footer: {
-            Text("A Mac that opens XcodeHomeRunner without installing a host can show this Mac and change the settings below. It does not register runners or sign in to GitHub.")
+            Text("A Mac that opens XcodeHomeRunner without installing a host can show this Mac and change its settings. It does not register runners or sign in to GitHub.")
         }
         .confirmationDialog(
             "Remove \(removing?.name ?? "the dashboard")?",
@@ -154,8 +154,8 @@ private struct PairingWindowRows: View {
 
     private var instruction: String {
         switch window.role {
-        case .manager: "On the managing Mac, choose Add Mac… and select \(HostPane.macName)."
-        case .dashboard: "On the other Mac, open XcodeHomeRunner, choose Add Mac… > Show a Mac on This Dashboard…, and select \(HostPane.macName)."
+        case .manager: "On the managing Mac, choose Add Mac… in Overview and select \(HostPane.macName)."
+        case .dashboard: "On the other Mac, open XcodeHomeRunner, choose File > Add Mac > Show a Mac on This Dashboard…, and select \(HostPane.macName)."
         }
     }
 }

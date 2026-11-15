@@ -18,18 +18,35 @@ struct HostStatusRows: View {
 
     var body: some View {
         LabeledContent("Status") {
-            // A paused Mac runs as its person chose, so it does not look like a host that needs attention.
             Label {
-                Text(settings.showsPaused ? "Paused" : settings.hostState.rawValue)
+                Text(settings.stateTitle)
             } icon: {
-                Image(systemName: settings.showsPaused ? "pause.circle.fill" : settings.hostState.systemImage)
-                    .foregroundStyle(settings.showsPaused ? .secondary : settings.hostState.tint)
+                Image(systemName: settings.stateSymbol).foregroundStyle(Color(nsColor: settings.stateTint))
             }
         }
         LabeledContent("Xcode jobs") { Text(settings.jobSummary).monospacedDigit() }
         Text(settings.admissionMessage).font(.callout).foregroundStyle(.secondary)
         if let error = settings.storageError { ErrorText(error) }
         if let error = settings.poolError { ErrorText(error) }
+    }
+}
+
+@MainActor
+extension HostSettingsReport {
+    // A paused Mac runs as its person chose, so it does not look like a host that needs attention.
+
+    /// The host's state, as the panes and the sidebar name it.
+    var stateTitle: String { showsPaused ? "Paused" : hostState.rawValue }
+    var stateSymbol: String { showsPaused ? "pause.circle.fill" : hostState.systemImage }
+    var stateTint: NSColor { showsPaused ? .secondaryLabelColor : hostState.tint }
+
+    /// How many runner services the Mac has, in the sidebar's words.
+    var runnerCountTitle: String {
+        switch runners.count {
+        case 0: "No runners"
+        case 1: "1 runner"
+        case let count: "\(count) runners"
+        }
     }
 }
 
@@ -46,12 +63,12 @@ private extension HostState {
         }
     }
 
-    var tint: Color {
+    var tint: NSColor {
         switch self {
-        case .running: .green
-        case .waitingForStorage: .orange
-        case .needsAttention: .red
-        default: .secondary
+        case .running: .systemGreen
+        case .waitingForStorage: .systemOrange
+        case .needsAttention: .systemRed
+        default: .secondaryLabelColor
         }
     }
 }
@@ -66,7 +83,7 @@ struct MacConnectionRows: View {
             Label {
                 Text(connection.status.title)
             } icon: {
-                Image(systemName: connection.status.systemImage).foregroundStyle(connection.status.tint)
+                Image(systemName: connection.status.systemImage).foregroundStyle(Color(nsColor: connection.status.tint))
             }
         }
         switch connection.status {
@@ -102,7 +119,7 @@ struct MacConnectionRows: View {
     }
 }
 
-private extension PairedMacs.Status {
+extension PairedMacs.Status {
     var title: String {
         switch self {
         case .notFound: "Not found on the local network"
@@ -123,12 +140,12 @@ private extension PairedMacs.Status {
         }
     }
 
-    var tint: Color {
+    var tint: NSColor {
         switch self {
-        case .online: .green
-        case .incompatible, .unreachable: .orange
-        case .rejected: .red
-        case .notFound, .checking: .secondary
+        case .online: .systemGreen
+        case .incompatible, .unreachable: .systemOrange
+        case .rejected: .systemRed
+        case .notFound, .checking: .secondaryLabelColor
         }
     }
 }

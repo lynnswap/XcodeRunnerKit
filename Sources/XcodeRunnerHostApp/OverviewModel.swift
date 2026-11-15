@@ -11,19 +11,27 @@ final class OverviewModel {
 
     private let source: Source
     private let showGitHub: @MainActor () -> Void
+    private let pairManagedMac: @MainActor () -> Void
 
-    /// - Parameter showGitHub: Shows the GitHub pane, where the sign-in code and the repository selection are.
-    init(settings: HostSettingsModel, showGitHub: @escaping @MainActor () -> Void) {
+    /// - Parameters:
+    ///   - showGitHub: Shows the GitHub pane, where the sign-in code and the repository selection are.
+    ///   - addMac: Pairs this Mac with a Mac for it to manage.
+    init(settings: HostSettingsModel, showGitHub: @escaping @MainActor () -> Void, addMac: @escaping @MainActor () -> Void) {
         source = .thisMac(settings)
         self.showGitHub = showGitHub
+        pairManagedMac = addMac
     }
 
     /// - Parameters:
     ///   - host: A host that the dashboard shows.
     ///   - showGitHub: Shows the host's GitHub pane.
-    init(hosts: PairedMacs, host: PairedMac, showGitHub: @escaping @MainActor () -> Void) {
+    ///   - addMac: Pairs the host with a Mac for it to manage.
+    init(
+        hosts: PairedMacs, host: PairedMac, showGitHub: @escaping @MainActor () -> Void, addMac: @escaping @MainActor () -> Void
+    ) {
         source = .host(hosts, host)
         self.showGitHub = showGitHub
+        pairManagedMac = addMac
     }
 
     var mac: MacReference {
@@ -87,6 +95,42 @@ final class OverviewModel {
     }
 
     func chooseRepositories() { showGitHub() }
+
+    // MARK: Other Macs
+
+    /// How many Macs the Mac manages. Their panes are in the sidebar.
+    var managedMacCount: Int {
+        switch source {
+        case .thisMac(let settings): settings.managedMacs.macs.count
+        case .host(let hosts, let host): hosts.macsManaged(by: host.id).listedMacs.count
+        }
+    }
+
+    /// Whether the Mac can pair with a Mac for it to manage. A Mac that another Mac manages cannot.
+    var canAddManagedMac: Bool {
+        switch source {
+        case .thisMac(let settings): settings.canAddMacs
+        case .host(let hosts, let host): hosts.macsManaged(by: host.id).canAddMacs
+        }
+    }
+
+    /// Pairs the Mac with a Mac for it to manage.
+    func addManagedMac() { pairManagedMac() }
+
+    /// This Mac's pairings with the Macs that manage and show it. Another Mac's pairings are changed on that Mac.
+    var management: HostManagement? {
+        if case .thisMac(let settings) = source { settings.management } else { nil }
+    }
+
+    /// Whether another Mac can manage this Mac, which then manages no Macs itself.
+    var canAllowManagement: Bool {
+        if case .thisMac(let settings) = source { settings.canAllowManagement } else { false }
+    }
+
+    /// What this Mac's last changes to the Macs that it manages left to tell.
+    var managedMacsMessage: String? {
+        if case .thisMac(let settings) = source { settings.managedMacs.message } else { nil }
+    }
 
     /// Reads a host's settings every few seconds until the task is cancelled. This Mac's settings need no reading.
     func watch() async {

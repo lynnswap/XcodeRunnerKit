@@ -116,16 +116,6 @@ final class MacPaneModel {
         }
     }
 
-    // MARK: Pairing
-
-    /// This Mac's pairings with the Macs that manage and show it. Another Mac's pairings are changed on that Mac.
-    var management: HostManagement? { thisMac?.management }
-    /// Whether another Mac can manage this Mac, which then manages no Macs itself.
-    var canAllowManagement: Bool { thisMac?.canAllowManagement ?? false }
-    var managedMacCount: Int { thisMac?.managedMacs.macs.count ?? 0 }
-    /// What this Mac's last changes to the Macs that it manages left to tell.
-    var managedMacsMessage: String? { thisMac?.managedMacs.message }
-
     // MARK: Runner services
 
     var isChangingPause: Bool { paired?.isChangingPause ?? false }
@@ -152,6 +142,13 @@ final class MacPaneModel {
     }
 
     var isSavingRunnerLabels: Bool { thisMac?.isSavingRunnerLabels ?? paired?.isSavingRunnerLabels ?? false }
+    // A Save or Apply button is offered for an edited value, and after a failure, when saving the same value again
+    // can repair what failed.
+
+    var canSaveRunnerLabels: Bool {
+        guard let report, !isSavingRunnerLabels else { return false }
+        return RunnerLabels.parse(runnerLabelsInput) != report.runnerLabels || runnerLabelsError != nil
+    }
     var runnerLabelsError: String? { thisMac?.runnerLabelsError ?? paired?.runnerLabelsError }
 
     func saveRunnerLabels() {
@@ -175,7 +172,13 @@ final class MacPaneModel {
     }
 
     var isApplyingPoolConfiguration: Bool { thisMac?.isSaving ?? paired?.isSaving ?? false }
-    var canApplyPoolConfiguration: Bool { thisMac?.canApplyPoolConfiguration ?? paired?.canApplyPoolConfiguration ?? false }
+    /// A pool without saved settings takes the ones shown.
+    var canApplyPoolConfiguration: Bool {
+        guard let report, thisMac?.canApplyPoolConfiguration ?? paired?.canApplyPoolConfiguration ?? false else { return false }
+        let failed = report.poolError != nil || poolConfigurationError != nil || report.configurationCleanupError != nil
+            || report.simulatorPoolError != nil
+        return report.isNewPool || poolDraft.isEdited || failed
+    }
     var poolConfigurationError: String? { thisMac?.saveError ?? paired?.saveError }
 
     func applyPoolConfiguration() {
@@ -234,7 +237,9 @@ final class MacPaneModel {
     }
 
     var isSavingXcode: Bool { thisMac?.isSavingXcode ?? paired?.isSavingXcode ?? false }
-    var canSaveXcodeSelection: Bool { !isSavingXcode && selectedXcode != savedXcode }
+    var canSaveXcodeSelection: Bool {
+        !isSavingXcode && (selectedXcode != savedXcode || report?.xcodeError != nil || xcodeSaveError != nil)
+    }
     /// Why jobs that name no Xcode fail: the saved Xcode is no longer on the Mac.
     var savedXcodeProblem: String? {
         guard report?.savedXcodeIsMissing == true, let savedXcode else { return nil }
@@ -263,6 +268,12 @@ final class MacPaneModel {
     }
 
     var isSavingStorage: Bool { thisMac?.isSavingStorage ?? paired?.isSavingStorage ?? false }
+    var canEditStorageDirectory: Bool { report?.canEditStorage == true && !isSavingStorage }
+    var canSaveStorageDirectory: Bool {
+        guard canEditStorageDirectory, let report else { return false }
+        return storageDirectoryInput != report.savedStorageDirectory?.path(percentEncoded: false) ?? ""
+            || report.storageError != nil || storageSaveError != nil
+    }
     var storageSaveError: String? { thisMac?.storageSaveError ?? paired?.storageSaveError }
     /// Whether a folder panel can choose the folder. Another Mac's folders are not shown in a panel on this Mac.
     var canChooseStorageDirectory: Bool { thisMac != nil }

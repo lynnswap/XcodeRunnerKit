@@ -44,10 +44,21 @@ final class HostWindowModel: PaneWindowModel {
     }
 
     var sidebarGroups: [SidebarGroup] {
-        func row(_ pane: HostPane) -> SidebarRow { SidebarRow(pane: pane, title: pane.title(in: settings), icon: pane.icon) }
+        let report = HostSettingsReport(settings)
+        let github = settings.github.report
+        func row(_ pane: HostPane, subtitle: String?, status: SidebarRow.Status? = nil) -> SidebarRow {
+            SidebarRow(pane: pane, title: pane.title(in: settings), subtitle: subtitle, icon: pane.icon, status: status)
+        }
         return [
-            SidebarGroup(title: nil, rows: [row(.overview), row(.github)]),
-            SidebarGroup(title: "Runners", rows: [row(.mac)] + settings.managedMacs.macs.map { row(.managedMac($0.id)) }),
+            SidebarGroup(title: nil, rows: [
+                row(.overview, subtitle: report.stateTitle, status: .init(symbol: report.stateSymbol, color: report.stateTint)),
+                // The account is not known until the saved sign-in is read.
+                row(.github, subtitle: github.accountLogin ?? (github.hasRestored ? "Not connected" : nil)),
+            ]),
+            SidebarGroup(title: "Runners", rows: [row(.mac, subtitle: report.runnerCountTitle)] + settings.managedMacs.macs.map {
+                let status = settings.managedMacs.status(of: $0.id)
+                return row(.managedMac($0.id), subtitle: status.title, status: .init(symbol: status.systemImage, color: status.tint))
+            }),
         ]
     }
 
@@ -60,8 +71,7 @@ final class HostWindowModel: PaneWindowModel {
     var title: String { pane.title(in: settings) }
 }
 
-/// The host window's content: this Mac's panes and the Macs that it manages in a sidebar beside the selected pane, with
-/// Add Mac in the toolbar.
+/// The host window's content: this Mac's panes and the Macs that it manages in a sidebar beside the selected pane.
 @MainActor
 final class HostSplitViewController: PaneSplitViewController {
     private let model: HostWindowModel
@@ -77,7 +87,9 @@ final class HostSplitViewController: PaneSplitViewController {
     override func makePaneViewController() -> NSViewController {
         switch model.pane {
         case .overview:
-            OverviewViewController(model: OverviewModel(settings: settings) { [model] in model.pane = .github })
+            OverviewViewController(model: OverviewModel(
+                settings: settings, showGitHub: { [model] in model.pane = .github }, addMac: { [weak self] in self?.addMac() }
+            ))
         case .github: GitHubViewController(model: GitHubPaneModel(settings: settings))
         case .mac: MacViewController(model: MacPaneModel(settings: settings))
         case .managedMac(let id):
@@ -90,14 +102,9 @@ final class HostSplitViewController: PaneSplitViewController {
         }
     }
 
-    override var addMacToolTip: String {
-        "Pair a Mac on the local network so that this Mac manages its runners. A Mac that another Mac manages cannot add Macs."
-    }
-
-    override var canAddMac: Bool { super.canAddMac && settings.canAddMacs }
-
-    override func addMac(_ sender: Any?) {
-        guard canAddMac else { return }
+    /// Pairs this Mac with a Mac on the local network for it to manage, and shows that Mac.
+    private func addMac() {
+        guard !isAddingMac, settings.canAddMacs else { return }
         presentAddMacSheet(for: settings.managedMacs) { [model] mac in model.pane = .managedMac(mac.id) }
     }
 }
@@ -128,22 +135,19 @@ func makeHostWindowController(settings: HostSettingsModel) -> NSWindowController
     HostPreview.hostWindow(pane: .overview, isSignedIn: true, isPaused: true)
 }
 #Preview("Waiting to Pair") {
-    HostPreview.hostWindow(pane: .mac, isSignedIn: true, pairing: .waitingToPair)
+    HostPreview.hostWindow(pane: .overview, isSignedIn: true, pairing: .waitingToPair)
 }
 #Preview("Pairing Request") {
-    HostPreview.hostWindow(pane: .mac, isSignedIn: true, pairing: .asked(by: "Mac mini"))
+    HostPreview.hostWindow(pane: .overview, isSignedIn: true, pairing: .asked(by: "Mac mini"))
 }
 #Preview("Managed by Another Mac") {
-    HostPreview.hostWindow(pane: .mac, isSignedIn: true, pairing: .managed(by: "Mac mini"))
+    HostPreview.hostWindow(pane: .overview, isSignedIn: true, pairing: .managed(by: "Mac mini"))
 }
 #Preview("Shown on Dashboards") {
-    HostPreview.hostWindow(pane: .mac, isSignedIn: true, pairing: .shown(on: ["MacBook Pro", "Mac Studio"]))
+    HostPreview.hostWindow(pane: .overview, isSignedIn: true, pairing: .shown(on: ["MacBook Pro", "Mac Studio"]))
 }
 #Preview("Dashboard Pairing Request") {
-    HostPreview.hostWindow(pane: .mac, isSignedIn: true, pairing: .askedToShow(by: "MacBook Pro"))
-}
-#Preview("Overview Managed by Another Mac") {
-    HostPreview.hostWindow(pane: .overview, isSignedIn: true, pairing: .managed(by: "Mac mini"))
+    HostPreview.hostWindow(pane: .overview, isSignedIn: true, pairing: .askedToShow(by: "MacBook Pro"))
 }
 #Preview("Managed Mac") {
     HostPreview.hostWindow(

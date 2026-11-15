@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// The Overview pane: a Mac's status, setup steps, and repositories.
+/// The Overview pane: a Mac's status, setup steps, repositories, and pairings with other Macs.
 @MainActor
 final class OverviewViewController: NSHostingController<OverviewView> {
     init(model: OverviewModel) {
@@ -40,6 +40,11 @@ struct OverviewView: View {
                 } footer: {
                     if github.managesMacs { Text("Counts include the Macs that \(model.mac.object) manages.") }
                 }
+                managedMacs
+                if let management = model.management {
+                    HostManagementSection(model: model, management: management)
+                    HostDashboardsSection(management: management)
+                }
             }
             if !model.notices.isEmpty {
                 Section { ForEach(model.notices, id: \.self) { ErrorText($0) } }
@@ -47,6 +52,28 @@ struct OverviewView: View {
         }
         .formStyle(.grouped)
         .task { await model.watch() }
+    }
+
+    /// The Macs that the Mac manages, which the sidebar lists, and the button that pairs it with another one.
+    private var managedMacs: some View {
+        let count = model.managedMacCount
+        return Section {
+            LabeledContent {
+                Button("Add Mac…") { model.addManagedMac() }
+                    .disabled(!model.canAddManagedMac)
+                    .accessibilityIdentifier("add-mac")
+            } label: {
+                Text(count == 0 ? "No Macs" : count == 1 ? "1 Mac" : "\(count) Macs")
+            }
+        } header: {
+            Text("Managed Macs")
+        } footer: {
+            if model.canAddManagedMac {
+                Text("\(model.mac.subject) registers runners on the Macs that it manages, for the repositories selected in GitHub. Choose Allow Management… on a Mac to list it here.")
+            } else {
+                Text("A Mac that another Mac manages, or that waits for one, cannot manage Macs.")
+            }
+        }
     }
 
     @ViewBuilder

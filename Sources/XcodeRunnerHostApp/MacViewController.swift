@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// A Mac's pane: its pairings, runner services, and execution settings.
+/// A Mac's pane: its runner services and execution settings.
 @MainActor
 final class MacViewController: NSHostingController<MacPaneView> {
     init(model: MacPaneModel) {
@@ -27,11 +27,6 @@ struct MacPaneView: View {
             ContentUnavailableView("This Mac was removed", systemImage: "desktopcomputer")
         } else {
             Form {
-                // Other Macs' changes to this Mac's settings appear below, so who can make them comes first.
-                if let management = model.management {
-                    HostManagementSection(model: model, management: management)
-                    HostDashboardsSection(management: management)
-                }
                 if let connection = model.connection {
                     Section {
                         MacConnectionRows(connection: connection)
@@ -108,7 +103,7 @@ private struct RunnerLabelsSection: View {
             HStack {
                 Spacer()
                 Button(model.isSavingRunnerLabels ? "Saving…" : "Save") { model.saveRunnerLabels() }
-                    .disabled(model.isSavingRunnerLabels)
+                    .disabled(!model.canSaveRunnerLabels)
                     .accessibilityIdentifier("save-runner-labels")
             }
             if let error = model.runnerLabelsError { ErrorText(error) }
@@ -202,7 +197,7 @@ private struct StorageSection: View {
     var body: some View {
         let isSaving = model.isSavingStorage
         let isRestarting = model.isRestarting
-        let canEdit = report.canEditStorage && !isSaving
+        let canEdit = model.canEditStorageDirectory
         Section {
             TextField("Storage folder", text: $model.storageDirectoryInput, prompt: Text("Not chosen"))
                 .accessibilityIdentifier("storage-folder")
@@ -212,12 +207,13 @@ private struct StorageSection: View {
                 // A panel on this Mac cannot choose a folder of another Mac.
                 if model.canChooseStorageDirectory {
                     Button("Choose…") { model.chooseStorageDirectory() }
+                        .disabled(!canEdit)
                         .accessibilityIdentifier("choose-storage-folder")
                 }
                 Button(isSaving ? "Saving…" : "Save") { model.saveStorageDirectory() }
+                    .disabled(!model.canSaveStorageDirectory)
                     .accessibilityIdentifier("save-storage-folder")
             }
-            .disabled(!canEdit)
             Text(report.storageMessage).foregroundStyle(.secondary)
             // A host that launchd did not start is restarted by whoever started it.
             if report.storageChangeIsPending, report.canRestart || isRestarting || isSaving {
