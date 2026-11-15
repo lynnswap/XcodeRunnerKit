@@ -491,7 +491,7 @@ struct HostPairingTests {
             .init(path: "/login/device/code", body: #"{"device_code":"device-secret","user_code":"USER-CODE","verification_uri":"https://github.com/login/device","expires_in":900,"interval":5}"#),
             .init(path: "/login/oauth/access_token", body: #"{"access_token":"token-secret"}"#),
             .init(path: "/user", body: #"{"id":1,"login":"owner"}"#),
-            .init(path: "/user/installations", body: #"{"installations":[{"id":10}]}"#),
+            .init(path: "/user/installations", body: #"{"installations":[{"id":10,"account":{"id":1},"html_url":"https://github.com/settings/installations/10"}]}"#),
             .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Project"}]}"#),
         ])
         let client = await transport.client
@@ -536,8 +536,9 @@ struct HostPairingTests {
         #expect(settings.github?.accountLogin == "owner")
         #expect(settings.github?.selectableRepositories == [repository])
         #expect(try !sent().contains("token-secret"))
+        // The app's only installation is for the account that signed in, so the page that opens is that installation's.
         dashboard.addRepositories(to: shown.id)
-        #expect(opened.last == URL(string: "https://github.com/apps/host-app/installations/new")!)
+        #expect(opened.last == URL(string: "https://github.com/settings/installations/10")!)
 
         settings.selectedRepositoryIDs = [repository.id]
         await dashboard.applyRepositorySelection(of: shown.id)

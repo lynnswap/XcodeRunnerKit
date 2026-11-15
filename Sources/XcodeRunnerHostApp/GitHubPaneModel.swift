@@ -101,7 +101,7 @@ final class GitHubPaneModel {
         }
     }
 
-    /// Opens the page that installs the GitHub App on repositories. A host's page opens in this Mac's browser.
+    /// Opens the page that chooses the GitHub App's repositories. A host's page opens in this Mac's browser.
     func addRepositories() {
         switch source {
         case .thisMac(let settings): settings.github.installApp()

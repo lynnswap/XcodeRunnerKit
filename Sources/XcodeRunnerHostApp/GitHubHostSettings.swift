@@ -49,6 +49,8 @@ final class GitHubHostSettings {
     var selectedRepositoryIDs: Set<Int> = []
     private(set) var account: GitHubAccount?
     private(set) var repositories: [GitHubRepository] = []
+    /// The installations of the app that GitHub listed with the repositories.
+    private var installations: [GitHubInstallation] = []
     private(set) var runnerStatuses: [RepositoryRunnerStatus] = []
     private(set) var deviceAuthorization: GitHubDeviceAuthorization?
     private(set) var errorMessage: String?
@@ -107,8 +109,20 @@ final class GitHubHostSettings {
         }
     }
 
+    /// The page where the person chooses the app's repositories.
+    ///
+    /// When the app's only installation is for the person's own account, this is that installation's settings. The
+    /// page that installs the app serves every other case: it asks for the account, installs the app where it is
+    /// missing, and asks an organization's owner where the person may not change the installation.
+    private var installationURL: URL {
+        guard let account, installations.count == 1, let installation = installations.first,
+              installation.account?.id == account.id, let page = installation.settingsPage
+        else { return app.installationURL }
+        return page
+    }
+
     func installApp() {
-        do { try openBrowser(app.installationURL) }
+        do { try openBrowser(installationURL) }
         catch { errorMessage = error.localizedDescription }
     }
 
@@ -151,7 +165,7 @@ final class GitHubHostSettings {
             isLoadingRepositories: isLoadingRepositories, isSavingSelection: isSavingSelection, isSynchronizing: isSynchronizing,
             selectableRepositories: selectableRepositories, hasListedRepositories: !repositories.isEmpty,
             savedRepositoryIDs: savedRepositoryIDs, runnerStatuses: runnerStatuses.map(RepositoryRunnerReport.init),
-            errorMessage: errorMessage, installationURL: app.installationURL, managerName: management?.manager?.name,
+            errorMessage: errorMessage, installationURL: installationURL, managerName: management?.manager?.name,
             managesMacs: pairedMacs?.macs.isEmpty == false
         )
     }
@@ -162,6 +176,7 @@ final class GitHubHostSettings {
             try await authentication.signOut()
             account = nil
             repositories = []
+            installations = []
             runnerStatuses = []
             errorMessage = nil
         } catch { errorMessage = "Could not disconnect GitHub: \(error.localizedDescription)" }
@@ -177,12 +192,18 @@ final class GitHubHostSettings {
         isLoadingRepositories = true
         defer { isLoadingRepositories = false }
         do {
-            repositories = try await authenticated { token in
-                try await client.listRepositories(accessToken: token)
-            }
+            show(try await authenticated { token in
+                try await client.listInstallations(accessToken: token)
+            })
             errorMessage = nil
         } catch is CancellationError {
         } catch { handleGitHubFailure(error, operation: "load repositories") }
+    }
+
+    /// Shows what GitHub listed for the app's installations.
+    private func show(_ access: GitHubAppAccess) {
+        installations = access.installations
+        repositories = access.repositories
     }
 
     var savedRepositoryIDs: Set<Int> { Set(configuration.repositories.map(\.id)) }
@@ -333,8 +354,9 @@ final class GitHubHostSettings {
             let paired = pairedMacs?.macs ?? []
             pairedProvisioners = pairedProvisioners.filter { id, _ in paired.contains { $0.id == id } }
             let statuses = try await authenticated { token in
-                let available = try await client.listRepositories(accessToken: token)
-                repositories = available
+                let access = try await client.listInstallations(accessToken: token)
+                show(access)
+                let available = access.repositories
                 let current = Dictionary(uniqueKeysWithValues: available.map { ($0.id, $0) })
                 let inaccessible = selected.filter { current[$0.id] == nil }.map { repository in
                     RepositoryRunnerStatus(

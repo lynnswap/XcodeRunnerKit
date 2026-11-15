@@ -10,6 +10,35 @@ struct GitHubRepository: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// An installation of the GitHub App that the signed-in person can reach.
+///
+/// GitHub sends the account and the page with every installation. They are read where present, so that a listing
+/// without them still lists the repositories.
+struct GitHubInstallation: Decodable, Equatable, Sendable {
+    struct Account: Decodable, Equatable, Sendable {
+        let id: Int
+    }
+
+    let id: Int
+    /// The person or organization that the app is installed for.
+    let account: Account?
+    /// The installation's page in its account's settings, where the repositories of the installation are chosen.
+    let settingsPage: URL?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case account
+        case settingsPage = "html_url"
+    }
+}
+
+/// What the GitHub App's installations let the signed-in person reach.
+struct GitHubAppAccess: Equatable, Sendable {
+    var installations: [GitHubInstallation] = []
+    /// The repositories of every installation, in the order of their names.
+    var repositories: [GitHubRepository] = []
+}
+
 struct GitHubAccount: Codable, Equatable, Sendable {
     let id: Int
     let login: String
@@ -74,11 +103,10 @@ struct GitHubClient: Sendable {
         self.transport = transport
     }
 
-    func listRepositories(accessToken: String) async throws -> [GitHubRepository] {
-        struct Installation: Decodable { let id: Int }
-        struct Installations: Decodable { let installations: [Installation] }
+    func listInstallations(accessToken: String) async throws -> GitHubAppAccess {
+        struct Installations: Decodable { let installations: [GitHubInstallation] }
         struct Repositories: Decodable { let repositories: [GitHubRepository] }
-        let installations: [Installation] = try await pages(path: "user/installations", accessToken: accessToken) {
+        let installations: [GitHubInstallation] = try await pages(path: "user/installations", accessToken: accessToken) {
             try JSONDecoder().decode(Installations.self, from: $0).installations
         }
         var repositories: [Int: GitHubRepository] = [:]
@@ -88,7 +116,12 @@ struct GitHubClient: Sendable {
             ) { try JSONDecoder().decode(Repositories.self, from: $0).repositories }
             for repository in installed { repositories[repository.id] = repository }
         }
-        return repositories.values.sorted { $0.fullName.localizedStandardCompare($1.fullName) == .orderedAscending }
+        return GitHubAppAccess(
+            installations: installations,
+            repositories: repositories.values.sorted {
+                $0.fullName.localizedStandardCompare($1.fullName) == .orderedAscending
+            }
+        )
     }
 
     func listRunners(repository: GitHubRepository, accessToken: String) async throws -> [GitHubRunner] {

@@ -100,7 +100,10 @@ Simulator retention policy in this Mac's pane under **Runners**, then select
 
 The app saves login tokens in Keychain and refreshes expiring tokens
 automatically; it stores no client secret. To change repository access later,
-choose **Add Repositories on GitHub…**, then **Reload**.
+choose **Add Repositories on GitHub…**, then **Reload**. While the app is
+installed for your own account only, the button opens that installation's
+settings. To install the app for an organization as well, use the
+[app's page](https://github.com/apps/xcodehomerunner).
 
 Installing the app for organization repositories may need approval from an
 organization owner. The signed-in user also needs repository administration

@@ -52,7 +52,8 @@ struct GitHubReport: Codable, Equatable, Sendable {
     let savedRepositoryIDs: Set<Int>
     let runnerStatuses: [RepositoryRunnerReport]
     let errorMessage: String?
-    /// The page where the person installs the GitHub App on repositories.
+    /// The page where the person chooses the GitHub App's repositories: the settings of the app's installation for
+    /// the person's account, or the page that installs the app.
     let installationURL: URL
     /// The Mac that manages the host and registers its runners in its place.
     let managerName: String?
