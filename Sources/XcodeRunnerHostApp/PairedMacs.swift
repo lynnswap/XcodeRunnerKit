@@ -502,6 +502,8 @@ final class PairedMacs: MacList {
         }
         let macName = pairing.name
         let mac = PairedMac(pairing: pairing, hostID: hostID)
+        // The pairing took as long as the person or a command needed, and another process may have changed the list.
+        reload()
         let replaced = macs.filter { $0.hostID == hostID }
         let next = macs.filter { $0.hostID != hostID } + [mac]
         do {
@@ -660,6 +662,8 @@ final class PairedMacs: MacList {
                 notice = "\(mac.name) was not found on the local network. \(remainingAccess(on: mac.name))"
             }
         }
+        // Telling the Mac took a moment, in which another process may have changed the list.
+        reload()
         let next = macs.filter { $0.id != id }
         do {
             try save(next)
