@@ -316,9 +316,11 @@ final class MacPaneModel: PaneSaving {
 
     var isSaving: Bool { !valuesBeingSaved.isEmpty }
 
-    /// A Mac that does not answer shows no values, so it has none to save.
+    /// A Mac that does not answer shows no values, so it has none to save. While the Mac cannot apply an edited job
+    /// limit or Simulator retention, as while it registers runners, Save waits, so that it saves every edit.
     var canSave: Bool {
-        guard report != nil, !isSaving else { return false }
+        guard let report, !isSaving else { return false }
+        if report.isNewPool || poolDraft.isEdited, !canApplyPoolConfiguration { return false }
         return canSaveRunnerLabels || canApplyPoolConfiguration || canSaveXcodeSelection || canSaveStorageDirectory
     }
 
@@ -331,10 +333,11 @@ final class MacPaneModel: PaneSaving {
         if canSaveXcodeSelection { valuesBeingSaved.insert(.xcode) }
         if canSaveStorageDirectory { valuesBeingSaved.insert(.storage) }
         Task {
-            if valuesBeingSaved.contains(.runnerLabels) { await saveRunnerLabels() }
-            valuesBeingSaved.remove(.runnerLabels)
+            // The limit comes first: saving labels registers runners, and the Mac applies no limit meanwhile.
             if valuesBeingSaved.contains(.pool) { await applyPoolConfiguration() }
             valuesBeingSaved.remove(.pool)
+            if valuesBeingSaved.contains(.runnerLabels) { await saveRunnerLabels() }
+            valuesBeingSaved.remove(.runnerLabels)
             if valuesBeingSaved.contains(.xcode) { await saveXcodeSelection() }
             valuesBeingSaved.remove(.xcode)
             if valuesBeingSaved.contains(.storage) { await saveStorageDirectory() }

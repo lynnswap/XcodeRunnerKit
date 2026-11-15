@@ -181,7 +181,8 @@ private struct StorageSection: View {
     @State private var isConfirmingRestart = false
 
     var body: some View {
-        let isSaving = model.isSavingStorage
+        // A restart would end the host before it saved the values that a save has still to save.
+        let isSaving = model.isSaving
         let isRestarting = model.isRestarting
         let canEdit = model.canEditStorageDirectory
         Section {
