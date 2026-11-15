@@ -378,9 +378,18 @@ struct HostPairingTests {
         let pairing = Task { try await host.pair(at: try local(thisMac.management.pairingWindow?.port)) }
         try await waitUntil { host.codeConfirmation != nil }
         let code = try #require(host.codeConfirmation?.code)
+        // Another code than the host's is one that another Mac showed, and this Mac's host refuses it.
+        await #expect(throws: HostSettingsError.self) { try await setup.allowPairing(showing: code == "000000" ? "111111" : "000000") }
+        await #expect(throws: (any Error).self) { _ = try await pairing.value }
+        #expect(thisMac.management.manager == nil)
+
+        setup.start()
+        try await waitUntil { setup.phase == .waiting && thisMac.management.pairingWindow?.port != nil }
+        let secondPairing = Task { try await host.pair(at: try local(thisMac.management.pairingWindow?.port)) }
+        try await waitUntil { host.codeConfirmation != nil }
+        try await setup.allowPairing(showing: try #require(host.codeConfirmation?.code))
         host.confirmCode()
-        try await setup.allowPairing(showing: code)
-        _ = try await pairing.value
+        _ = try await secondPairing.value
         #expect(thisMac.management.manager?.name == "Host")
 
         await thisMac.management.shutDown()

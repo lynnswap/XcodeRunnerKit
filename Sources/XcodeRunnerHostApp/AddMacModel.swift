@@ -72,17 +72,21 @@ final class AddMacModel {
         }
     }
 
-    /// Confirms that the other Mac shows the same code. For this Mac, which the sheet set up, its host is told the
-    /// code and allows the pairing if it shows the same one.
+    /// Confirms that the other Mac shows the same code.
+    ///
+    /// Nobody compares the codes of this Mac, which the sheet set up, by eye. Its host is told the code first and
+    /// allows the pairing only if it shows the same one, and the pairing is confirmed here only then. A Mac that
+    /// merely has this Mac's name shows another code to its own host, so this Mac's host refuses and the pairing ends.
     func confirmCode() {
-        let confirmation = macs.codeConfirmation
-        macs.confirmCode()
-        guard let thisMac, let confirmation, confirmation.macName == HostPane.macName else { return }
+        guard let thisMac, thisMac.phase == .waiting, let confirmation = macs.codeConfirmation,
+              confirmation.macName == HostPane.macName else { return macs.confirmCode() }
         Task {
             do {
                 try await thisMac.allowPairing(showing: confirmation.code)
+                macs.confirmCode()
             } catch {
-                errorMessage = "Could not allow the pairing on this Mac: \(error.localizedDescription)"
+                pairing?.cancel()
+                errorMessage = "This Mac's host did not allow the pairing: \(error.localizedDescription)"
             }
         }
     }

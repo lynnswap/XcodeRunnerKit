@@ -145,7 +145,13 @@ final class ThisMacSetup {
         while try await pairing(.read).window?.code == nil, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(300))
         }
-        _ = try await pairing(.confirm(code: code))
+        do {
+            _ = try await pairing(.confirm(code: code))
+        } catch {
+            // The host stops waiting when it refuses, and the sheet offers to have it wait again.
+            await refresh()
+            throw error
+        }
     }
 
     /// Runs the installer in this app, which copies the app to the person's Applications folder, writes the host's
