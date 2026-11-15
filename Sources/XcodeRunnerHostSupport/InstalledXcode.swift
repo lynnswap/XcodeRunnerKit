@@ -18,6 +18,16 @@ package struct InstalledXcode: Codable, Equatable, Identifiable, Sendable {
         self.build = build
     }
 
+    /// - Parameter application: The Xcode app.
+    package init(application: URL, version: String, build: String?) {
+        // The same spelling as a saved directory, which has no trailing slash.
+        let developerDirectory = URL(
+            filePath: application.standardizedFileURL.appending(path: "Contents/Developer").path(percentEncoded: false),
+            directoryHint: .notDirectory
+        )
+        self.init(developerDirectory: developerDirectory, version: version, build: build)
+    }
+
     /// The Xcode apps on this Mac, newest first: the ones in the Applications folders, and the ones that Launch
     /// Services knows elsewhere.
     package static func installed() -> [InstalledXcode] {
@@ -43,14 +53,8 @@ package struct InstalledXcode: Codable, Equatable, Identifiable, Sendable {
             // An app that cannot be read, such as one on a volume being ejected, is not offered.
             guard let data = try? Data(contentsOf: app.appending(path: "Contents/version.plist")),
                   let version = try? PropertyListDecoder().decode(Version.self, from: data) else { continue }
-            // The same spelling as a saved directory, which has no trailing slash.
-            let developerDirectory = URL(
-                filePath: app.standardizedFileURL.appending(path: "Contents/Developer").path(percentEncoded: false),
-                directoryHint: .notDirectory
-            )
-            found[developerDirectory] = InstalledXcode(
-                developerDirectory: developerDirectory, version: version.version, build: version.build
-            )
+            let xcode = InstalledXcode(application: app, version: version.version, build: version.build)
+            found[xcode.developerDirectory] = xcode
         }
         return found.values.sorted {
             let order = $0.version.compare($1.version, options: .numeric)

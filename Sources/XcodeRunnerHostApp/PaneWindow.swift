@@ -21,6 +21,19 @@ struct SidebarGroup: Equatable {
     let rows: [SidebarRow]
 }
 
+/// What a window of panes shows: the panes that its sidebar lists, the one that is selected, and the window's title.
+@MainActor
+protocol PaneWindowModel: AnyObject, Observable {
+    /// The panes that the sidebar lists, under their headings.
+    var sidebarGroups: [SidebarGroup] { get }
+    /// The pane that the window shows.
+    var selectedPane: AnyHashable? { get }
+    /// Shows the pane of the row that the person selected.
+    func select(_ pane: AnyHashable)
+    /// The name of the shown pane, which names the window.
+    var title: String { get }
+}
+
 /// The sidebar of a window: an outline of the panes that the window can show, grouped under headings.
 @MainActor
 final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate {
@@ -36,26 +49,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
     }
 
-    private let groups: @MainActor () -> [SidebarGroup]
-    private let selection: @MainActor () -> AnyHashable?
-    private let select: @MainActor (AnyHashable) -> Void
+    private let model: any PaneWindowModel
     private let outline = NSOutlineView()
     private var shownGroups: [SidebarGroup]?
     private var nodes: [Node] = []
     /// Whether this controller changes the selection, which is then not the person's choice.
     private var isUpdating = false
 
-    /// - Parameters:
-    ///   - groups: The rows to list. The sidebar lists them again when the observable values that this reads change.
-    ///   - selection: The pane that the window shows.
-    ///   - select: Shows the pane of the row that the person selected.
-    init(
-        groups: @escaping @MainActor () -> [SidebarGroup], selection: @escaping @MainActor () -> AnyHashable?,
-        select: @escaping @MainActor (AnyHashable) -> Void
-    ) {
-        self.groups = groups
-        self.selection = selection
-        self.select = select
+    init(model: any PaneWindowModel) {
+        self.model = model
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -83,8 +85,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// Lists the current rows and selects the shown pane's row, then waits for either to change.
     private func update() {
         withObservationTracking {
-            let groups = groups()
-            let selection = selection()
+            let groups = model.sidebarGroups
+            let selection = model.selectedPane
             isUpdating = true
             defer { isUpdating = false }
             if groups != shownGroups {
@@ -148,7 +150,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
         guard !isUpdating, let pane = (outline.item(atRow: outline.selectedRow) as? Node)?.row?.pane else { return }
-        select(pane)
+        model.select(pane)
     }
 
     private static func makeCell(_ identifier: NSUserInterfaceItemIdentifier, hasImage: Bool) -> NSTableCellView {
@@ -209,18 +211,22 @@ final class PaneContainerViewController: NSViewController {
 /// A window's content: a sidebar of panes beside the selected pane. It gives its window the toolbar that hides the
 /// sidebar and adds Macs, so that every window that shows it has one, a preview's window included.
 ///
-/// A subclass lists the panes of its window in the sidebar, shows the selected one in `detail`, and pairs with Macs.
+/// A subclass makes the view controllers of its window's panes and pairs with Macs.
 @MainActor
 class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSToolbarItemValidation {
     private static let addMacIdentifier = NSToolbarItem.Identifier("AddMac")
-    let detail = PaneContainerViewController()
+    private let windowModel: any PaneWindowModel
+    private let detail = PaneContainerViewController()
     private let autosaveName: String
+    /// The pane that `detail` shows. Nothing is shown before the view loads.
+    private var shownPane: AnyHashable??
 
     /// - Parameter autosaveName: Names the saved sidebar width and the toolbar.
-    init(sidebar: SidebarViewController, autosaveName: String) {
+    init(model: any PaneWindowModel, autosaveName: String) {
+        windowModel = model
         self.autosaveName = autosaveName
         super.init(nibName: nil, bundle: nil)
-        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
+        let sidebarItem = NSSplitViewItem(sidebarWithViewController: SidebarViewController(model: model))
         sidebarItem.minimumThickness = 180
         sidebarItem.maximumThickness = 320
         let detailItem = NSSplitViewItem(viewController: detail)
@@ -232,6 +238,22 @@ class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSToolb
     }
 
     required init?(coder: NSCoder) { nil }
+
+    /// Makes the view controller of the pane that the window's model has selected.
+    func makePaneViewController() -> NSViewController { NSViewController() }
+
+    /// Shows the selected pane and names the window after it, then waits for either to change.
+    private func update() {
+        let (pane, title) = withObservationTracking {
+            (windowModel.selectedPane, windowModel.title)
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.update() }
+        }
+        self.title = title
+        guard pane != shownPane else { return }
+        shownPane = pane
+        detail.show(makePaneViewController())
+    }
 
     /// What the Add Mac toolbar item's help tag says about the Macs that the window adds.
     var addMacToolTip: String { "" }
@@ -262,6 +284,7 @@ class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSToolb
     override func viewDidLoad() {
         super.viewDidLoad()
         splitView.autosaveName = autosaveName
+        update()
     }
 
     override func viewWillAppear() {

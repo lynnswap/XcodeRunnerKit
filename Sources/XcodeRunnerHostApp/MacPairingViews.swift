@@ -1,20 +1,5 @@
 import SwiftUI
 
-/// A pairing code, grouped for reading aloud and comparing.
-struct PairingCode: View {
-    let code: String
-
-    init(_ code: String) { self.code = code }
-
-    var body: some View {
-        Text("\(code.prefix(3)) \(code.suffix(3))")
-            .font(.title2.monospacedDigit())
-            .foregroundStyle(.primary)
-            .textSelection(.enabled)
-            .accessibilityIdentifier("pairing-code")
-    }
-}
-
 /// This Mac's pairing with a managing host, in the Mac's settings.
 @MainActor
 struct HostManagementSection: View {
@@ -188,23 +173,3 @@ extension VersionMismatch {
         }
     }
 }
-
-#if DEBUG
-/// Asks `management` to pair over the loopback interface, so that previews show both Macs' codes.
-@MainActor
-func requestPreviewPairing(from macs: PairedMacs, with management: HostManagement) {
-    switch macs.role {
-    case .manager: management.allowManagement()
-    case .dashboard: management.allowDashboard()
-    }
-    Task {
-        // The preview shows the request while both Macs wait, and shows nothing if it fails.
-        do {
-            while management.pairingWindow?.port == nil { try await Task.sleep(for: .milliseconds(10)) }
-            guard let port = management.pairingWindow?.port else { return }
-            try await macs.pair(at: .hostPort(host: "127.0.0.1", port: port))
-        } catch {}
-    }
-}
-
-#endif
