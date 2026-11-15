@@ -138,10 +138,14 @@ final class OverviewModel: PaneSaving {
     /// Whether the pane has a repository selection to apply. A managed Mac and a Mac without a sign-in show none.
     var canSave: Bool {
         guard let github, github.accountLogin != nil, github.managerName == nil else { return false }
-        return canApplySelection && !isWaitingForGitHub
+        return canApplySelection && !isWaitingForGitHub && !isSaving
     }
 
-    var isSaving: Bool { github?.isSavingSelection == true }
+    /// Whether the selection is being applied from this pane. A host on a dashboard says that it saves only in its
+    /// next answer.
+    private var isApplyingSelection = false
+
+    var isSaving: Bool { isApplyingSelection || github?.isSavingSelection == true }
 
     var saveProgress: (completed: Int, total: Int) { (0, 1) }
 
@@ -157,9 +161,13 @@ final class OverviewModel: PaneSaving {
     /// Applies the repository selection, which registers and removes runners.
     func save() {
         guard canSave else { return }
-        switch source {
-        case .thisMac(let settings): Task { await settings.github.applyRepositorySelection() }
-        case .host(let hosts, let host): Task { await hosts.applyRepositorySelection(of: host.id) }
+        isApplyingSelection = true
+        Task {
+            switch source {
+            case .thisMac(let settings): await settings.github.applyRepositorySelection()
+            case .host(let hosts, let host): await hosts.applyRepositorySelection(of: host.id)
+            }
+            isApplyingSelection = false
         }
     }
 
