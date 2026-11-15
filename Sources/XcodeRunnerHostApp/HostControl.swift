@@ -54,7 +54,7 @@ struct HostControl: AsyncParsableCommand {
                 let report = try await HostControl.pairManagedMac(named: mac, on: host.host, timeout: .seconds(timeout)) { shown in
                     try HostControl.write(shown)
                 } otherCode: {
-                    // Reading blocks its thread. The Mac's refusal is noticed when the confirmation is sent.
+                    // Reading blocks its thread, and the host is read meanwhile.
                     let line = await Task.detached { readLine() }.value
                     guard let code = line?.trimmingCharacters(in: .whitespacesAndNewlines), !code.isEmpty else {
                         throw HostSettingsError("Standard input ended without the code that \(mac) shows.")
@@ -526,12 +526,13 @@ struct HostControl: AsyncParsableCommand {
     /// - Parameters:
     ///   - bridge: Sends the requests to the host on this Mac. Tests pass a connection to a host of their own.
     ///   - showCode: Called with the host's code once the Macs exchanged keys.
-    ///   - otherCode: Returns the code that the Mac shows. The host ends the pairing if it differs.
+    ///   - otherCode: Returns the code that the Mac shows. The host ends the pairing if it differs. It is not waited
+    ///     for once the Mac refused or left.
     /// - Returns: The host's Macs after the pairing, with the Mac that it added.
     @MainActor static func pairManagedMac(
         named mac: String, on host: String?, timeout: Duration,
         over bridge: (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = HostSettingsBridge.request,
-        showCode: (PairedMacs.CodeConfirmation) throws -> Void, otherCode: () async throws -> String
+        showCode: (PairedMacs.CodeConfirmation) throws -> Void, otherCode: @escaping @MainActor () async throws -> String
     ) async throws -> ManagedMacsReport {
         // The host lists the Macs that wait to pair while it is asked for them.
         let deadline = ContinuousClock.now + timeout
@@ -558,37 +559,50 @@ struct HostControl: AsyncParsableCommand {
         guard let found else { throw unexpectedAnswer }
         // The host tells the pairings that it runs for dashboards and commands apart by this name.
         let attempt = UUID()
-        var report = try await macs(.pair(waitingMac: found.id, attempt: attempt), on: host, over: bridge)
-        func paired() throws -> Bool {
-            guard report.pairingAttempt == attempt else {
-                throw HostSettingsError("The host started another pairing in place of this one.")
-            }
-            if let error = report.pairingError { throw HostSettingsError(error) }
-            return report.pairedMac != nil
-        }
-        while try !paired(), report.codeConfirmation == nil {
-            try await Task.sleep(for: .milliseconds(200))
-            report = try await macs(.read(refreshing: nil), on: host, over: bridge)
-        }
-        guard let shown = report.codeConfirmation else { return report }
         do {
+            var report = try await macs(.pair(waitingMac: found.id, attempt: attempt), on: host, over: bridge)
+            func paired() throws -> Bool {
+                guard report.pairingAttempt == attempt else {
+                    throw HostSettingsError("The host started another pairing in place of this one.")
+                }
+                if let error = report.pairingError { throw HostSettingsError(error) }
+                return report.pairedMac != nil
+            }
+            while try !paired(), report.codeConfirmation == nil {
+                try await Task.sleep(for: .milliseconds(200))
+                report = try await macs(.read(refreshing: nil), on: host, over: bridge)
+            }
+            guard let shown = report.codeConfirmation else { return report }
             try showCode(shown)
-            let code = try await otherCode()
-            guard code == shown.code else {
+            // The Mac can refuse or leave while its code is awaited, which the host's reads then show.
+            final class Outcome { var result: Result<String, any Error>? }
+            let other = Outcome()
+            let reading = Task {
+                do { other.result = .success(try await otherCode()) } catch { other.result = .failure(error) }
+            }
+            defer { reading.cancel() }
+            while other.result == nil {
+                try await Task.sleep(for: .milliseconds(200))
+                report = try await macs(.read(refreshing: nil), on: host, over: bridge)
+                _ = try paired()
+            }
+            guard let code = try other.result?.get(), code == shown.code else {
+                let code = (try? other.result?.get()) ?? ""
                 throw HostSettingsError(
                     "\(shown.macName) shows the code \(code), and the host shows \(shown.code) for it. The Macs did not pair."
                 )
             }
+            report = try await macs(.confirmCode(attempt: attempt), on: host, over: bridge)
+            while try !paired() {
+                try await Task.sleep(for: .milliseconds(200))
+                report = try await macs(.read(refreshing: nil), on: host, over: bridge)
+            }
+            return report
         } catch {
+            // The host pairs with one Mac at a time, so a pairing that this command leaves is ended.
             _ = try? await macs(.cancelPairing(attempt: attempt), on: host, over: bridge)
             throw error
         }
-        report = try await macs(.confirmCode(attempt: attempt), on: host, over: bridge)
-        while try !paired() {
-            try await Task.sleep(for: .milliseconds(200))
-            report = try await macs(.read(refreshing: nil), on: host, over: bridge)
-        }
-        return report
     }
 
     /// Sends a host a request about a Mac that it manages, as a dashboard does through the host, and returns what
