@@ -832,6 +832,8 @@ with tempfile.TemporaryDirectory(prefix="RunnerHost installer ") as temporary:
     assert plist["AssociatedBundleIdentifiers"] == ["lynnpd.xcodehomerunner"]
     assert plist["ProgramArguments"] == [str(applications.resolve() / "XcodeHomeRunner.app/Contents/MacOS/XcodeHomeRunner"), "--host", "--settings-service"]
     assert plist["MachServices"] == {"lynnpd.xcodehomerunner.settings": True}
+    # Without a type, launchd runs the host, its runners, and their builds at a lowered priority.
+    assert plist["ProcessType"] == "Interactive"
     assert (applications / "XcodeHomeRunner.app/Contents/Resources/HostSetup/install-github-runner.sh").read_text() == "first setup script"
     installed_cli = applications.resolve() / "XcodeHomeRunner.app/Contents/Helpers/xcode-runner"
     assert (host / "bin/xcode-runner").resolve() == installed_cli
