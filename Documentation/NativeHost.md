@@ -221,6 +221,11 @@ installer. Opened this way, the app is a dashboard: it creates no runner folders
 or execution pool, registers no runners, and keeps no GitHub sign-in. It keeps
 only its pairings, in that Mac's Keychain.
 
+The dashboard stays in the menu bar after its window closes. The menu of its
+hammer icon lists each host with its state and jobs; choose a host to open its
+**Overview**, or **Open Dashboard** for the window. Choose **Quit
+XcodeHomeRunner** there to end it.
+
 1. On the host, open **Settings…** and choose **Allow Dashboard…** in
    **Overview**. The host waits five minutes for a dashboard.
 2. On the other Mac, open XcodeHomeRunner and choose **Add Mac…**, which its

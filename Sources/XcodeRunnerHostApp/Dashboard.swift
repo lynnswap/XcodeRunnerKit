@@ -2,14 +2,25 @@ import AppKit
 import Observation
 import SwiftUI
 
-/// The app opened without a host: a window that shows the hosts paired with this Mac.
+/// The app opened without a host: a menu bar item and a window that show the hosts paired with this Mac.
 ///
 /// It creates no runner folders or execution pool, registers no runners, and keeps only the pairings in the Keychain.
+/// It stays in the menu bar after its window closes, and is in the Dock only while the window is open.
 @MainActor
 final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
     private let hosts: PairedMacs
     private var windowController: NSWindowController?
     private var content: DashboardSplitViewController? { windowController?.contentViewController as? DashboardSplitViewController }
+    private var statusItem: NSStatusItem?
+    /// The menu bar item's menu. It lists the hosts as they were last read when it opens.
+    let statusMenu = NSMenu()
+    /// Reads the hosts every few seconds while the dashboard runs, so that the menu shows their current jobs. The
+    /// main actor does not run while a menu is open, so the hosts cannot be read then, and they are otherwise read
+    /// once a minute.
+    private var hostReading: Task<Void, Never>?
+    /// The hosts whose read has not ended. A host that does not answer is not read again before its request times
+    /// out, and does not keep the others waiting.
+    private var hostsBeingRead: Set<HostPairing.ID> = []
     private var stopped = false
 
     init(hosts: PairedMacs) {
@@ -18,12 +29,24 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
+        installStatusItem()
         hosts.start()
+        hostReading = Task {
+            while true {
+                for host in hosts.macs where hostsBeingRead.insert(host.id).inserted {
+                    Task {
+                        await hosts.refresh(host.id)
+                        hostsBeingRead.remove(host.id)
+                    }
+                }
+                do { try await Task.sleep(for: PairedMacs.settingsInterval) } catch { return }
+            }
+        }
         showWindow(nil)
         print("Dashboard started.")
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showWindow(nil)
@@ -32,6 +55,7 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if stopped { return .terminateNow }
+        hostReading?.cancel()
         Task {
             await hosts.shutDown()
             stopped = true
@@ -46,9 +70,79 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
                 content: DashboardSplitViewController(model: DashboardWindowModel(hosts: hosts)),
                 autosaveName: "XcodeHomeRunnerDashboard"
             )
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(windowWillClose(_:)), name: NSWindow.willCloseNotification,
+                object: windowController?.window
+            )
         }
+        // The window's menus are in the menu bar only for an app that is in the Dock.
+        NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate()
         windowController?.showWindow(nil)
+    }
+
+    @objc private func windowWillClose(_ notification: Notification) {
+        NSApplication.shared.setActivationPolicy(.accessory)
+    }
+
+    private func installStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let image = NSImage(systemSymbolName: "hammer.circle", accessibilityDescription: "XcodeHomeRunner")
+        image?.isTemplate = true
+        item.button?.image = image
+        item.button?.toolTip = "XcodeHomeRunner"
+        statusMenu.delegate = self
+        item.menu = statusMenu
+        statusItem = item
+    }
+
+    /// Lists each host above the commands.
+    private func updateStatusMenu() {
+        statusMenu.removeAllItems()
+        for host in hosts.macs {
+            let item = statusMenu.addItem(withTitle: host.name, action: #selector(showHost(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = host.id
+        }
+        if hosts.macs.isEmpty {
+            statusMenu.addItem(withTitle: "No Macs", action: nil, keyEquivalent: "")
+        }
+        statusMenu.addItem(.separator())
+        statusMenu.addItem(withTitle: "Open Dashboard", action: #selector(showDashboard(_:)), keyEquivalent: "").target = self
+        statusMenu.addItem(.separator())
+        statusMenu.addItem(
+            withTitle: "Quit XcodeHomeRunner", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"
+        ).target = NSApplication.shared
+        showHostStates()
+    }
+
+    /// Shows each listed host's state and jobs on its item, as its Overview shows them.
+    private func showHostStates() {
+        for item in statusMenu.items {
+            guard let host = item.representedObject as? HostPairing.ID else { continue }
+            // What the host last answered names its state, and its connection does while it does not answer.
+            if let report = hosts.answer(of: host)?.report {
+                item.subtitle = "\(report.stateTitle) · \(report.jobSummary)"
+                item.image = NSImage(systemSymbolName: report.stateSymbol, accessibilityDescription: report.stateTitle)?
+                    .withSymbolConfiguration(.init(paletteColors: [report.stateTint]))
+            } else {
+                let connection = hosts.status(of: host)
+                item.subtitle = connection.title
+                item.image = NSImage(systemSymbolName: connection.systemImage, accessibilityDescription: connection.title)?
+                    .withSymbolConfiguration(.init(paletteColors: [connection.tint]))
+            }
+        }
+    }
+
+    @objc private func showDashboard(_ sender: Any?) {
+        showWindow(nil)
+    }
+
+    /// Opens the window on the Overview of the host that the person chose in the menu bar item's menu.
+    @objc private func showHost(_ sender: NSMenuItem) {
+        guard let host = sender.representedObject as? HostPairing.ID else { return }
+        showWindow(nil)
+        content?.show(.overview(host))
     }
 
     @objc private func showHelp(_ sender: Any?) {
@@ -133,6 +227,7 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu !== statusMenu else { return updateStatusMenu() }
         menu.removeAllItems()
         menu.addItem(withTitle: "Show a Mac on This Dashboard…", action: #selector(showMacOnDashboard(_:)), keyEquivalent: "").target = self
         for host in hosts.macs {
@@ -285,6 +380,11 @@ final class DashboardSplitViewController: PaneSplitViewController {
                 removed: { [model] in model.pane = .overview(host.id) }
             ))
         }
+    }
+
+    /// Shows a pane of a host that the dashboard lists.
+    func show(_ pane: DashboardPane) {
+        model.pane = pane
     }
 
     /// Pairs this dashboard with a Mac that runs a host, and shows that host.
