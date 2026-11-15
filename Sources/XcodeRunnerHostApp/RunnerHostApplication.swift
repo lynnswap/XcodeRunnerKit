@@ -400,10 +400,10 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
-    /// Opening the app shows the host that manages this Mac, where this Mac is one of the runners, when this Mac
-    /// shows that host. Otherwise it shows this Mac's own settings.
+    /// Opening the app shows the dashboard on a Mac that another Mac manages and that shows hosts, because its
+    /// repositories and the other runners are a host's. Otherwise it shows this Mac's own settings.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if managingHostOnDashboard != nil { showDashboard(nil) } else { showSettings(nil) }
+        if settings.management.manager != nil, !dashboardHosts.macs.isEmpty { showDashboard(nil) } else { showSettings(nil) }
         return true
     }
 
@@ -451,21 +451,12 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         settingsWindow?.showWindow(nil)
     }
 
-    /// The host that manages this Mac, among the hosts that this Mac shows. The pairings share no ID, so the host is
-    /// known by its name, and is not known among several hosts of that name.
-    private var managingHostOnDashboard: PairedMac? {
-        guard let manager = settings.management.manager else { return nil }
-        let named = dashboardHosts.macs.filter { $0.name == manager.name }
-        return named.count == 1 ? named.first : nil
-    }
-
-    /// Shows the hosts on other Macs that this Mac paired with as a dashboard, or how to pair with one. The window
-    /// opens on the host that manages this Mac, when it shows that host.
+    /// Shows the hosts on other Macs that this Mac paired with as a dashboard, or how to pair with one.
     @objc private func showDashboard(_ sender: Any?) {
         if dashboardWindow == nil {
-            let model = DashboardWindowModel(hosts: dashboardHosts, pane: managingHostOnDashboard.map { .overview($0.id) })
             dashboardWindow = makePaneWindowController(
-                content: DashboardSplitViewController(model: model), autosaveName: "XcodeHomeRunnerDashboard"
+                content: DashboardSplitViewController(model: DashboardWindowModel(hosts: dashboardHosts)),
+                autosaveName: "XcodeHomeRunnerDashboard"
             )
         }
         NSApplication.shared.activate()

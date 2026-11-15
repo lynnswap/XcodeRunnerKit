@@ -131,15 +131,18 @@ private struct ThisMacSection: View {
             case .waiting:
                 Text("This Mac waits to pair. Select it above and choose Continue.").foregroundStyle(.secondary)
             case .ended:
-                LabeledContent("This Mac stopped waiting") {
+                LabeledContent("This Mac does not wait to pair") {
                     Button("Wait Again") { setup.start() }
                 }
+            case .managed:
+                Text("A host manages this Mac.").foregroundStyle(.secondary)
             }
         } header: {
             Text("This Mac")
         } footer: {
             Text("This Mac only shows other Macs now. Setting it up installs the host for your account, which runs jobs here, keeps this Mac awake while you are logged in, and stores job data in your Library folder.")
         }
+        .task { await setup.refresh() }
         .confirmationDialog("Set up \(HostPane.macName) as a runner?", isPresented: $isConfirming) {
             Button("Set Up") { setup.start() }
         } message: {

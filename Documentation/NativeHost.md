@@ -241,9 +241,10 @@ hammer icon lists each host with its state and jobs; choose a host to open its
 XcodeHomeRunner** there to end it.
 
 A Mac with a host shows other hosts too: **Open Dashboard** in the menu of its
-hammer icon opens the same window. On a Mac that another Mac manages, opening
-the app shows that window once the Mac shows its managing host, and
-**Settings…** in the menu shows the Mac's own settings.
+hammer icon opens the same window, and **Show a Mac on the Dashboard…** pairs it
+with another host. On a Mac that another Mac manages, opening the app shows
+that window once the Mac shows a host, and **Settings…** in the menu shows the
+Mac's own settings.
 
 1. On the host, open **Settings…** and choose **Allow Dashboard…** under
    **Dashboards**. The host waits five minutes for a dashboard.

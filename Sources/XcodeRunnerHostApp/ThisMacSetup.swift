@@ -15,6 +15,8 @@ final class ThisMacSetup {
         case waiting
         /// The host on this Mac stopped waiting before a host paired with it.
         case ended
+        /// A host manages this Mac.
+        case managed
         case failed(String)
     }
 
@@ -61,7 +63,7 @@ final class ThisMacSetup {
     /// Installs the host and has it wait for a managing host.
     func start() {
         switch phase {
-        case .installing, .waiting: return
+        case .installing, .waiting, .managed: return
         case .offered, .failed, .ended: break
         }
         phase = .installing
@@ -89,12 +91,31 @@ final class ThisMacSetup {
                 do { try await Task.sleep(for: .seconds(2)) } catch { return }
                 guard let self, self.phase == .waiting else { return }
                 guard let report = try? await self.pairing(.read) else { continue }
-                if report.manager != nil { return }
+                if report.manager != nil {
+                    self.phase = .managed
+                    return
+                }
                 if report.window == nil {
                     self.phase = .ended
                     return
                 }
             }
+        }
+    }
+
+    /// Shows what the host that this setup installed does now, for a sheet that opens after the pairing or after
+    /// the management ended.
+    func refresh() async {
+        guard isInstalled, phase != .installing, let report = try? await pairing(.read) else { return }
+        if report.manager != nil {
+            phase = .managed
+        } else if report.window?.role == .manager {
+            if phase != .waiting {
+                phase = .waiting
+                watchWait()
+            }
+        } else {
+            phase = .ended
         }
     }
 
