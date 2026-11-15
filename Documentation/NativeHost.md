@@ -356,7 +356,9 @@ xcode-runner host github disconnect
 
 `connect` prints `signInCode` with the code and the page to enter it on, and
 opens no browser. With `--wait` it prints the sign-in's result once the code
-was entered, and fails if the sign-in ended without an account. To select the
+was entered, and fails if the sign-in ended without an account. It is refused
+while an account is connected. `reload` and `disconnect` fail with the host's
+`errorMessage` when GitHub or the Keychain refused. To select the
 repositories, update the `githubRepositories` scope under
 [Settings from CLI and MCP](#settings-from-cli-and-mcp).
 

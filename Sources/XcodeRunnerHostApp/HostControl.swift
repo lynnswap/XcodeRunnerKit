@@ -44,6 +44,11 @@ struct HostControl: AsyncParsableCommand {
             var wait = false
 
             func run() async throws {
+                // The window offers no sign-in while an account is connected, and a sign-in that failed then would
+                // leave that account in place of a result.
+                if let login = try await HostControl.github().accountLogin {
+                    throw HostSettingsError("The host is connected to GitHub as \(login). Disconnect it before connecting again.")
+                }
                 guard case .github(var report) = try await HostControl.reply(to: .github(.signIn)) else {
                     throw HostControl.unexpectedAnswer
                 }
@@ -53,6 +58,9 @@ struct HostControl: AsyncParsableCommand {
                     report = try await HostControl.github()
                 }
                 try HostControl.write(report)
+                guard report.signInCode != nil else {
+                    throw HostSettingsError(report.errorMessage ?? "The sign-in ended before GitHub issued a code.")
+                }
                 guard wait else { return }
                 while report.isConnecting {
                     try await Task.sleep(for: .seconds(2))
@@ -76,7 +84,7 @@ struct HostControl: AsyncParsableCommand {
                 abstract: "Sign the host out of GitHub. Its runners stay registered until it is connected again."
             )
 
-            func run() async throws { try await HostControl.perform(.github(.signOut)) }
+            func run() async throws { try await HostControl.change(.signOut) }
         }
 
         struct Reload: AsyncParsableCommand {
@@ -84,7 +92,7 @@ struct HostControl: AsyncParsableCommand {
                 abstract: "Read again which repositories the GitHub App is installed on."
             )
 
-            func run() async throws { try await HostControl.perform(.github(.reloadRepositories)) }
+            func run() async throws { try await HostControl.change(.reloadRepositories) }
         }
     }
 
@@ -168,6 +176,14 @@ struct HostControl: AsyncParsableCommand {
         case .github(let report): try write(report)
         default: throw unexpectedAnswer
         }
+    }
+
+    /// Signs the host out or reloads its repositories, and prints its answer. The host reports what went wrong with
+    /// GitHub or the Keychain in its answer, and clears that after either succeeds, so it is the command's failure.
+    @MainActor static func change(_ request: GitHubRequest) async throws {
+        guard case .github(let report) = try await reply(to: .github(request)) else { throw unexpectedAnswer }
+        try write(report)
+        if let error = report.errorMessage { throw HostSettingsError(error) }
     }
 
     /// Reads the host's GitHub sign-in, repositories, and runners.
