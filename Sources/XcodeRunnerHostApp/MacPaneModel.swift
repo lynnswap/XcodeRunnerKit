@@ -170,10 +170,11 @@ final class MacPaneModel {
     }
 
     var isApplyingPoolConfiguration: Bool { thisMac?.isSaving ?? paired?.isSaving ?? false }
-    /// Whether the edited settings differ from the saved ones, or the pool has none saved and takes the ones shown.
+    /// Whether the edited settings differ from the saved ones, or applying the saved ones again has something to do:
+    /// the pool has none saved and takes the ones shown, or the cleanup after the last change failed and runs again.
     var canApplyPoolConfiguration: Bool {
         guard let report, thisMac?.canApplyPoolConfiguration ?? paired?.canApplyPoolConfiguration ?? false else { return false }
-        return report.isNewPool || poolDraft.isEdited
+        return report.isNewPool || poolDraft.isEdited || report.configurationCleanupError != nil
     }
     var poolConfigurationError: String? { thisMac?.saveError ?? paired?.saveError }
 
@@ -263,9 +264,11 @@ final class MacPaneModel {
 
     var isSavingStorage: Bool { thisMac?.isSavingStorage ?? paired?.isSavingStorage ?? false }
     var canEditStorageDirectory: Bool { report?.canEditStorage == true && !isSavingStorage }
-    /// Whether the edited folder differs from the saved one.
+    /// Whether the edited folder differs from the saved one, or saving the same folder again repairs storage that
+    /// needs attention, such as a saved folder that could not be read.
     var canSaveStorageDirectory: Bool {
-        canEditStorageDirectory && storageDirectoryInput != report?.savedStorageDirectory?.path(percentEncoded: false) ?? ""
+        guard canEditStorageDirectory, let report else { return false }
+        return storageDirectoryInput != report.savedStorageDirectory?.path(percentEncoded: false) ?? "" || report.storageError != nil
     }
     var storageSaveError: String? { thisMac?.storageSaveError ?? paired?.storageSaveError }
     /// Whether a folder panel can choose the folder. Another Mac's folders are not shown in a panel on this Mac.
