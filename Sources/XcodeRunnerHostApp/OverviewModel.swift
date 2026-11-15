@@ -141,6 +141,8 @@ final class OverviewModel: PaneSaving {
         return canApplySelection && !isWaitingForGitHub
     }
 
+    var isSaving: Bool { github?.isSavingSelection == true }
+
     /// Applies the repository selection, which registers and removes runners.
     func save() {
         guard canSave else { return }

@@ -135,7 +135,6 @@ struct OverviewView: View {
                     if model.selection != github.savedRepositoryIDs, !github.isSavingSelection {
                         Text("Unsaved changes").foregroundStyle(.secondary)
                     }
-                    if github.isSavingSelection { ProgressView("Applying…").controlSize(.small) }
                     Spacer()
                     Button("Add Repositories on GitHub…") { model.addRepositories() }
                         .disabled(github.isBusy)

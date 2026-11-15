@@ -30,12 +30,16 @@ struct MacPaneView: View {
             ContentUnavailableView("This Mac was removed", systemImage: "desktopcomputer")
         } else {
             Form {
-                OverviewSection(model: model)
-                if let report = model.report {
-                    SimulatorsSection(model: model, report: report)
-                    XcodeSection(model: model, report: report)
-                    StorageSection(model: model, report: report)
+                // A value that is edited while the pane saves would be saved without another Save.
+                Group {
+                    OverviewSection(model: model)
+                    if let report = model.report {
+                        SimulatorsSection(model: model, report: report)
+                        XcodeSection(model: model, report: report)
+                        StorageSection(model: model, report: report)
+                    }
                 }
+                .disabled(model.isSaving)
                 if model.canRemove, let mac = model.listedMac { RemovalSection(model: model, mac: mac) }
             }
             .formStyle(.grouped)

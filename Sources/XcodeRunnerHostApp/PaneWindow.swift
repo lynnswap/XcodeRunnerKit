@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import SwiftUI
 
 /// What a window of panes shows: the panes that its sidebar lists, the one that is selected, and the window's title.
 @MainActor
@@ -19,8 +20,38 @@ protocol PaneWindowModel: AnyObject, Observable {
 protocol PaneSaving: AnyObject, Observable {
     /// Whether the pane has a value to save now: an edited one, or one whose last save failed.
     var canSave: Bool { get }
+    /// Whether a save from the pane runs now.
+    var isSaving: Bool { get }
     /// Saves those values. Each value that could not be saved shows why in the pane.
     func save()
+}
+
+/// The toolbar's Save button, which a progress indicator replaces while the shown pane saves.
+private struct SaveToolbarButton: View {
+    /// The shown pane's values, when it has any to save.
+    let saving: (any PaneSaving)?
+
+    var body: some View {
+        let isSaving = saving?.isSaving == true
+        ZStack {
+            if isSaving {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Saving")
+                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
+            } else {
+                Button("Save") { saving?.save() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(saving?.canSave != true)
+                    // The host's own window has no menu bar, so the button takes the shortcut itself.
+                    .keyboardShortcut("s", modifiers: .command)
+                    .help("Save the changes in this pane")
+                    .accessibilityIdentifier("save-pane")
+                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
+            }
+        }
+        .animation(.default, value: isSaving)
+    }
 }
 
 /// A pane's view controller whose pane has values to save.
@@ -57,7 +88,7 @@ final class PaneContainerViewController: NSViewController {
 ///
 /// A subclass makes the view controllers of its window's panes and pairs with Macs.
 @MainActor
-class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate {
+class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSMenuItemValidation {
     private let windowModel: any PaneWindowModel
     private let detail = PaneContainerViewController()
     private let autosaveName: String
@@ -66,6 +97,7 @@ class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate {
     /// What the toolbar's Save button saves: the shown pane's values, when it has any.
     private var saving: (any PaneSaving)?
     private let saveItem = NSToolbarItem(itemIdentifier: NSToolbarItem.Identifier("save"))
+    private let saveButton = NSHostingView(rootView: SaveToolbarButton(saving: nil))
 
     /// - Parameter autosaveName: Names the saved sidebar width and the toolbar.
     init(model: any PaneWindowModel, autosaveName: String) {
@@ -99,27 +131,15 @@ class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate {
         let controller = makePaneViewController()
         detail.show(controller)
         saving = (controller as? any SavingPaneViewController)?.saving
-        updateSaveItem()
+        saveButton.rootView = SaveToolbarButton(saving: saving)
     }
 
-    /// Enables Save while the shown pane has a value to save, then waits for that to change.
-    private func updateSaveItem() {
-        guard let saving else {
-            saveItem.isEnabled = false
-            return
-        }
-        let watched = ObjectIdentifier(saving)
-        saveItem.isEnabled = withObservationTracking {
-            saving.canSave
-        } onChange: { [weak self] in
-            Task { @MainActor in
-                // A pane that was replaced since is no longer watched.
-                if let self, self.saving.map(ObjectIdentifier.init) == watched { self.updateSaveItem() }
-            }
-        }
-    }
+    /// Saves the shown pane's edited values, for the File menu's Save command.
+    @objc func savePane(_ sender: Any?) { saving?.save() }
 
-    @objc private func savePane(_ sender: Any?) { saving?.save() }
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        menuItem.action == #selector(savePane) ? saving?.canSave == true : true
+    }
 
     /// Whether the sheet that pairs with a Mac is open. One sheet pairs at a time.
     var isAddingMac: Bool { presentedViewControllers?.contains { $0 is AddMacViewController } == true }
@@ -167,14 +187,7 @@ class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate {
     ) -> NSToolbarItem? {
         guard itemIdentifier == saveItem.itemIdentifier else { return nil }
         saveItem.label = "Save"
-        saveItem.title = "Save"
-        saveItem.toolTip = "Save the changes in this pane"
-        saveItem.isBordered = true
-        saveItem.style = .prominent
-        // The shown pane enables the item. Validation would ask the responder chain, which has no such action.
-        saveItem.autovalidates = false
-        saveItem.target = self
-        saveItem.action = #selector(savePane)
+        saveItem.view = saveButton
         return saveItem
     }
 
