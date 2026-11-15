@@ -142,10 +142,12 @@ final class MacPaneModel {
     }
 
     var isSavingRunnerLabels: Bool { thisMac?.isSavingRunnerLabels ?? paired?.isSavingRunnerLabels ?? false }
-    /// Whether the edited labels differ from the saved ones.
+    // A Save or Apply button is offered for an edited value, and after a failure, when saving the same value again
+    // can repair what failed.
+
     var canSaveRunnerLabels: Bool {
         guard let report, !isSavingRunnerLabels else { return false }
-        return RunnerLabels.parse(runnerLabelsInput) != report.runnerLabels
+        return RunnerLabels.parse(runnerLabelsInput) != report.runnerLabels || runnerLabelsError != nil
     }
     var runnerLabelsError: String? { thisMac?.runnerLabelsError ?? paired?.runnerLabelsError }
 
@@ -170,11 +172,12 @@ final class MacPaneModel {
     }
 
     var isApplyingPoolConfiguration: Bool { thisMac?.isSaving ?? paired?.isSaving ?? false }
-    /// Whether the edited settings differ from the saved ones, or applying the saved ones again has something to do:
-    /// the pool has none saved and takes the ones shown, or the cleanup after the last change failed and runs again.
+    /// A pool without saved settings takes the ones shown.
     var canApplyPoolConfiguration: Bool {
         guard let report, thisMac?.canApplyPoolConfiguration ?? paired?.canApplyPoolConfiguration ?? false else { return false }
-        return report.isNewPool || poolDraft.isEdited || report.configurationCleanupError != nil
+        let failed = report.poolError != nil || poolConfigurationError != nil || report.configurationCleanupError != nil
+            || report.simulatorPoolError != nil
+        return report.isNewPool || poolDraft.isEdited || failed
     }
     var poolConfigurationError: String? { thisMac?.saveError ?? paired?.saveError }
 
@@ -234,7 +237,9 @@ final class MacPaneModel {
     }
 
     var isSavingXcode: Bool { thisMac?.isSavingXcode ?? paired?.isSavingXcode ?? false }
-    var canSaveXcodeSelection: Bool { !isSavingXcode && selectedXcode != savedXcode }
+    var canSaveXcodeSelection: Bool {
+        !isSavingXcode && (selectedXcode != savedXcode || report?.xcodeError != nil || xcodeSaveError != nil)
+    }
     /// Why jobs that name no Xcode fail: the saved Xcode is no longer on the Mac.
     var savedXcodeProblem: String? {
         guard report?.savedXcodeIsMissing == true, let savedXcode else { return nil }
@@ -264,11 +269,10 @@ final class MacPaneModel {
 
     var isSavingStorage: Bool { thisMac?.isSavingStorage ?? paired?.isSavingStorage ?? false }
     var canEditStorageDirectory: Bool { report?.canEditStorage == true && !isSavingStorage }
-    /// Whether the edited folder differs from the saved one, or saving the same folder again repairs storage that
-    /// needs attention, such as a saved folder that could not be read.
     var canSaveStorageDirectory: Bool {
         guard canEditStorageDirectory, let report else { return false }
-        return storageDirectoryInput != report.savedStorageDirectory?.path(percentEncoded: false) ?? "" || report.storageError != nil
+        return storageDirectoryInput != report.savedStorageDirectory?.path(percentEncoded: false) ?? ""
+            || report.storageError != nil || storageSaveError != nil
     }
     var storageSaveError: String? { thisMac?.storageSaveError ?? paired?.storageSaveError }
     /// Whether a folder panel can choose the folder. Another Mac's folders are not shown in a panel on this Mac.

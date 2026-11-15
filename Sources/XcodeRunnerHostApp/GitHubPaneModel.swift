@@ -60,10 +60,12 @@ final class GitHubPaneModel {
         }
     }
 
-    /// Whether the edited selection differs from the saved one and can be saved now.
+    /// Whether the selection can be applied now: it differs from the saved one, or registering runners for the saved
+    /// one failed, which applying it again retries.
     var canApplySelection: Bool {
         guard let github, !github.isBusy, !github.isLoadingRepositories else { return false }
-        return selection != github.savedRepositoryIDs
+        return selection != github.savedRepositoryIDs || github.errorMessage != nil
+            || github.runnerStatuses.contains { $0.errorMessage != nil }
     }
 
     /// Why a host refused the last request from the dashboard, or why it did not confirm it.
