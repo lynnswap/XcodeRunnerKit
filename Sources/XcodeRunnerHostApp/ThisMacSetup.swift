@@ -30,16 +30,20 @@ final class ThisMacSetup {
     @ObservationIgnored private var watching: Task<Void, Never>?
     private let install: @MainActor () async throws -> Void
     private let pairing: @MainActor (HostPairingRequest) async throws -> HostPairingReport
+    private let hasHost: @MainActor () -> Bool
 
     /// - Parameters:
     ///   - install: Installs the host on this Mac and starts it.
     ///   - pairing: Asks this Mac's host about its pairings, or to change them.
+    ///   - hasHost: Whether this Mac has a host now, which the person can have installed since the sheet offered to.
     init(
         install: @escaping @MainActor () async throws -> Void = ThisMacSetup.runInstaller,
-        pairing: @escaping @MainActor (HostPairingRequest) async throws -> HostPairingReport = { try await HostControl.pairing($0) }
+        pairing: @escaping @MainActor (HostPairingRequest) async throws -> HostPairingReport = { try await HostControl.pairing($0) },
+        hasHost: @escaping @MainActor () -> Bool = { HostControl.runsHost }
     ) {
         self.install = install
         self.pairing = pairing
+        self.hasHost = hasHost
         phase = .offered
     }
 
@@ -69,10 +73,9 @@ final class ThisMacSetup {
         phase = .installing
         Task {
             do {
-                if !isInstalled {
-                    try await install()
-                    isInstalled = true
-                }
+                // Installing again would stop a host that runs, with its jobs.
+                if !isInstalled, !hasHost() { try await install() }
+                isInstalled = true
                 try await waitForManager()
                 phase = .waiting
                 watchWait()

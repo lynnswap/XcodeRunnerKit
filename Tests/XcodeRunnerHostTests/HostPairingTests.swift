@@ -364,10 +364,10 @@ struct HostPairingTests {
         // The host that the installer starts on this Mac, which answers once it is installed.
         let thisMac = managedMac(at: root)
         var isInstalled = false
-        let setup = ThisMacSetup(install: { isInstalled = true }) { request in
+        let setup = ThisMacSetup(install: { isInstalled = true }, pairing: { request in
             guard isInstalled else { throw HostSettingsError("This Mac has no host.") }
             return try thisMac.answer(request)
-        }
+        }, hasHost: { isInstalled })
         let host = PairedMacs(store: MemorySecretStore(), name: "Host", role: .manager, browses: false)
 
         setup.start()
