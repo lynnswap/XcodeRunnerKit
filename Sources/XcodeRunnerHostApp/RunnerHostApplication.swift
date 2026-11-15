@@ -111,7 +111,6 @@ public enum RunnerHostApplication {
                         store: KeychainSecretStore.dashboardHosts(hostRoot: installation.hostRoot), name: HostPane.macName,
                         role: .dashboard
                     ))
-                    application.setActivationPolicy(.regular)
                     application.delegate = dashboard
                     withExtendedLifetime(dashboard) { application.run() }
                     return

@@ -386,6 +386,11 @@ struct HostPairingTests {
         #expect(first.status(of: shown.id) == .online)
         #expect(second.status(of: alsoShown.id) == .online)
         #expect(second.settings[alsoShown.id]?.report?.poolStatus?.configuration.maximumConcurrentJobs == HostInstallation.defaultMaximumConcurrentJobs)
+        // The menu bar item's menu names the host with its state and jobs.
+        let menuBar = Dashboard(hosts: second)
+        menuBar.menuNeedsUpdate(menuBar.statusMenu)
+        #expect(menuBar.statusMenu.items.first?.title == "Managed")
+        #expect(menuBar.statusMenu.items.first?.subtitle == "Starting · 0 running · 0 waiting · Limit 4")
 
         // Pairing again replaces the dashboard's earlier pairing on the host as well.
         let shownAgain = try await pair(first, with: host.management)
@@ -409,6 +414,8 @@ struct HostPairingTests {
             return
         }
         #expect(second.settings[alsoShown.id]?.readAt == readAt)
+        menuBar.menuNeedsUpdate(menuBar.statusMenu)
+        #expect(menuBar.statusMenu.items.first?.subtitle == "Not responding")
 
         await host.management.shutDown()
         await runner.shutDown()
