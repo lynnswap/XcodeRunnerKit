@@ -527,7 +527,8 @@ final class PairedMacs: MacList {
             forgetStatus(of: mac.id)
             forgetSettings(of: mac.id)
         }
-        macs = next
+        // The list may have been read again while the earlier pairing was told, so the new one joins what it is now.
+        macs = macs.filter { $0.hostID != hostID } + [mac]
         settings[mac.id] = PairedMacSettings()
         message = keepsEarlierPairing
             ? "\(macName) could not be told to forget this Mac's earlier pairing. It lists this Mac twice under Dashboards until you remove one there."
