@@ -70,15 +70,19 @@ struct HostControl: AsyncParsableCommand {
                 abstract: "End the host's pairing with a Mac that it manages. The Mac's runners stay registered."
             )
 
-            @Argument(help: "The Mac's name, as `status` prints it.")
+            @Argument(help: "The Mac's name or ID, as `status` prints them.")
             var mac: String
             @OptionGroup var host: HostOption
 
             func run() async throws {
                 let host = host.host
-                let listed = try await HostControl.macs(.read(refreshing: nil), on: host).macs.filter { $0.name == mac }
+                let listed = try await HostControl.macs(.read(refreshing: nil), on: host).macs.filter {
+                    $0.name == mac || $0.id.uuidString.caseInsensitiveCompare(mac) == .orderedSame
+                }
                 guard let match = listed.first else { throw HostSettingsError("The host manages no Mac named \(mac).") }
-                guard listed.count == 1 else { throw HostSettingsError("The host manages \(listed.count) Macs named \(mac).") }
+                guard listed.count == 1 else {
+                    throw HostSettingsError("The host manages \(listed.count) Macs named \(mac). Pass the ID of one.")
+                }
                 let report = try await HostControl.macs(.remove(mac: match.id), on: host)
                 try HostControl.write(report)
                 if report.macs.contains(where: { $0.id == match.id }) {
@@ -619,12 +623,14 @@ struct HostControl: AsyncParsableCommand {
         guard case .macs(let list) = try await reply(to: .macs(.read(refreshing: nil)), on: host, over: bridge) else {
             throw unexpectedAnswer
         }
-        let named = list.macs.filter { $0.name == mac }
+        let named = list.macs.filter { $0.name == mac || $0.id.uuidString.caseInsensitiveCompare(mac) == .orderedSame }
         guard let match = named.first else {
             let listed = list.macs.map(\.name).sorted().joined(separator: ", ")
             throw HostSettingsError("The host manages no Mac named \(mac)." + (listed.isEmpty ? "" : " It manages \(listed)."))
         }
-        guard named.count == 1 else { throw HostSettingsError("The host manages \(named.count) Macs named \(mac).") }
+        guard named.count == 1 else {
+            throw HostSettingsError("The host manages \(named.count) Macs named \(mac). Pass the ID of one.")
+        }
         guard case .macs(let report) = try await reply(to: .macs(request(match.id)), on: host, over: bridge),
               let answered = report.macs.first(where: { $0.id == match.id }) else { throw unexpectedAnswer }
         return answered
@@ -730,6 +736,6 @@ struct HostOption: ParsableArguments {
 
 /// The Mac that a command reads or changes through its host.
 struct MacOption: ParsableArguments {
-    @Option(help: "A Mac that the host manages, by its name. Without it, the host itself.")
+    @Option(help: "A Mac that the host manages, by its name or ID. Without it, the host itself.")
     var mac: String?
 }
