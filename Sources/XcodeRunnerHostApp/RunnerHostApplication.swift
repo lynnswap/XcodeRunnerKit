@@ -403,11 +403,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     /// Opening the app shows the host that manages this Mac, where this Mac is one of the runners, when this Mac
     /// shows that host. Otherwise it shows this Mac's own settings.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if settings.management.manager != nil, !dashboardHosts.macs.isEmpty {
-            showDashboard(nil)
-        } else {
-            showSettings(nil)
-        }
+        if managingHostOnDashboard != nil { showDashboard(nil) } else { showSettings(nil) }
         return true
     }
 
@@ -427,6 +423,11 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         let dashboardItem = NSMenuItem(title: "Open Dashboard", action: #selector(showDashboard(_:)), keyEquivalent: "")
         dashboardItem.target = self
         menu.addItem(dashboardItem)
+        let showMacItem = NSMenuItem(
+            title: "Show a Mac on the Dashboard…", action: #selector(showMacOnDashboard(_:)), keyEquivalent: ""
+        )
+        showMacItem.target = self
+        menu.addItem(showMacItem)
         menu.addItem(.separator())
         let quitItem = NSMenuItem(title: "Quit XcodeHomeRunner", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quitItem.target = NSApplication.shared
@@ -450,16 +451,29 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         settingsWindow?.showWindow(nil)
     }
 
-    /// Shows the hosts on other Macs that this Mac paired with as a dashboard, or how to pair with one.
+    /// The host that manages this Mac, among the hosts that this Mac shows. The pairings share no ID, so the host is
+    /// known by its name.
+    private var managingHostOnDashboard: PairedMac? {
+        settings.management.manager.flatMap { manager in dashboardHosts.macs.first { $0.name == manager.name } }
+    }
+
+    /// Shows the hosts on other Macs that this Mac paired with as a dashboard, or how to pair with one. The window
+    /// opens on the host that manages this Mac, when it shows that host.
     @objc private func showDashboard(_ sender: Any?) {
         if dashboardWindow == nil {
+            let model = DashboardWindowModel(hosts: dashboardHosts, pane: managingHostOnDashboard.map { .overview($0.id) })
             dashboardWindow = makePaneWindowController(
-                content: DashboardSplitViewController(model: DashboardWindowModel(hosts: dashboardHosts)),
-                autosaveName: "XcodeHomeRunnerDashboard"
+                content: DashboardSplitViewController(model: model), autosaveName: "XcodeHomeRunnerDashboard"
             )
         }
         NSApplication.shared.activate()
         dashboardWindow?.showWindow(nil)
+    }
+
+    /// Pairs this Mac's dashboard with another host. The host has no menu bar for the dashboard's File menu.
+    @objc private func showMacOnDashboard(_ sender: Any?) {
+        showDashboard(nil)
+        (dashboardWindow?.contentViewController as? DashboardSplitViewController)?.showMacOnDashboard(sender)
     }
 
     @objc private func dashboardHostsChanged(_ notification: Notification) {

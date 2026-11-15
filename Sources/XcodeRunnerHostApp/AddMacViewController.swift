@@ -126,10 +126,14 @@ private struct ThisMacSection: View {
             case .installing:
                 HStack {
                     ProgressView().controlSize(.small)
-                    Text("Installing the host on this Mac…").foregroundStyle(.secondary)
+                    Text("Setting up the host on this Mac…").foregroundStyle(.secondary)
                 }
             case .waiting:
                 Text("This Mac waits to pair. Select it above and choose Continue.").foregroundStyle(.secondary)
+            case .ended:
+                LabeledContent("This Mac stopped waiting") {
+                    Button("Wait Again") { setup.start() }
+                }
             }
         } header: {
             Text("This Mac")
