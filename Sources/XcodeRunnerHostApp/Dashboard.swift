@@ -18,6 +18,9 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
     /// main actor does not run while a menu is open, so the hosts cannot be read then, and they are otherwise read
     /// once a minute.
     private var hostReading: Task<Void, Never>?
+    /// The hosts whose read has not ended. A host that does not answer is not read again before its request times
+    /// out, and does not keep the others waiting.
+    private var hostsBeingRead: Set<HostPairing.ID> = []
     private var stopped = false
 
     init(hosts: PairedMacs) {
@@ -28,11 +31,12 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         installMainMenu()
         installStatusItem()
         hosts.start()
-        hostReading = Task { [hosts] in
+        hostReading = Task {
             while true {
-                await withTaskGroup { group in
-                    for host in hosts.macs {
-                        group.addTask { await hosts.refresh(host.id) }
+                for host in hosts.macs where hostsBeingRead.insert(host.id).inserted {
+                    Task {
+                        await hosts.refresh(host.id)
+                        hostsBeingRead.remove(host.id)
                     }
                 }
                 do { try await Task.sleep(for: PairedMacs.settingsInterval) } catch { return }
