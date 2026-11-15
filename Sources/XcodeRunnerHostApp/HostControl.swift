@@ -63,6 +63,8 @@ struct HostControl: AsyncParsableCommand {
                     throw HostSettingsError("This Mac runs a host, which pairs with the Macs that it manages in its window.")
                 }
                 let hosts = await HostControl.dashboardHosts()
+                // A host that this Mac is paired with already is told to forget that pairing, if it is found.
+                await hosts.start()
                 await hosts.discoverPairableMacs()
                 let deadline = ContinuousClock.now + .seconds(timeout)
                 var found: PairedMacs.PairableMac?
@@ -92,6 +94,7 @@ struct HostControl: AsyncParsableCommand {
                     }
                     return code
                 }
+                HostControl.dashboardHostsChanged()
                 try HostControl.write(await DashboardPairingReport(hosts))
                 await hosts.stopDiscoveringPairableMacs()
                 await hosts.shutDown()
@@ -201,6 +204,7 @@ struct HostControl: AsyncParsableCommand {
                     try await Task.sleep(for: .milliseconds(250))
                 }
                 await hosts.remove(match.id)
+                HostControl.dashboardHostsChanged()
                 try HostControl.write(DashboardPairingReport(hosts))
                 let stayed = hosts.macs.contains { $0.id == match.id }
                 await hosts.shutDown()
@@ -412,6 +416,16 @@ struct HostControl: AsyncParsableCommand {
         PairedMacs(
             store: KeychainSecretStore.dashboardHosts(hostRoot: HostInstallation().hostRoot), name: HostPane.macName,
             role: .dashboard
+        )
+    }
+
+    /// Posted when a command changed the hosts of this Mac's dashboard, for a dashboard that is open to read them
+    /// again.
+    static let dashboardHostsChangedNotification = Notification.Name("lynnpd.xcodehomerunner.dashboard-hosts-changed")
+
+    static func dashboardHostsChanged() {
+        DistributedNotificationCenter.default().postNotificationName(
+            dashboardHostsChangedNotification, object: nil, userInfo: nil, deliverImmediately: true
         )
     }
 

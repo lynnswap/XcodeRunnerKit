@@ -31,6 +31,11 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         installMainMenu()
         installStatusItem()
         hosts.start()
+        // A command pairs and removes hosts in its own process, and saves them where this dashboard reads them.
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(hostsChangedByCommand(_:)), name: HostControl.dashboardHostsChangedNotification,
+            object: nil
+        )
         hostReading = Task {
             while true {
                 for host in hosts.macs where hostsBeingRead.insert(host.id).inserted {
@@ -79,6 +84,10 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate()
         windowController?.showWindow(nil)
+    }
+
+    @objc private func hostsChangedByCommand(_ notification: Notification) {
+        hosts.reload()
     }
 
     @objc private func windowWillClose(_ notification: Notification) {

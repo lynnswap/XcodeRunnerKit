@@ -539,37 +539,81 @@ final class PairedMacs: MacList {
     ///
     /// - Parameters:
     ///   - showCode: Called with this Mac's code once the Macs exchanged keys.
-    ///   - otherCode: Returns the code that the Mac shows. The pairing ends without a pairing if it differs.
+    ///   - otherCode: Returns the code that the Mac shows. The pairing ends without a pairing if it differs. It is
+    ///     not waited for once the Mac refused or left.
     func pair(
-        with id: WaitingMac.ID, showCode: (CodeConfirmation) throws -> Void, otherCode: () async throws -> String
+        with id: WaitingMac.ID, showCode: (CodeConfirmation) throws -> Void,
+        otherCode: @escaping @MainActor () async throws -> String
     ) async throws -> ListedMac {
-        // Set when the pairing ended, which it does before a code is shown if the Mac refuses or leaves.
-        final class Outcome { var result: Result<ListedMac, any Error>? }
-        let outcome = Outcome()
+        // Set when a task ended. The pairing ends before a code is shown, or while the other code is awaited, if the
+        // Mac refuses or leaves.
+        final class Outcome<Value> { var result: Result<Value, any Error>? }
+        let paired = Outcome<ListedMac>()
         let pairing = Task {
-            do { outcome.result = .success(try await pair(with: id)) } catch { outcome.result = .failure(error) }
+            do { paired.result = .success(try await pair(with: id)) } catch { paired.result = .failure(error) }
         }
+        let other = Outcome<String>()
+        var reading: Task<Void, Never>?
         do {
             while codeConfirmation == nil {
-                if let result = outcome.result { return try result.get() }
+                if let result = paired.result { return try result.get() }
                 try await Task.sleep(for: .milliseconds(50))
             }
             guard let shown = codeConfirmation else { throw HostLinkError.unexpectedReply }
             try showCode(shown)
-            let other = try await otherCode()
-            guard other == shown.code else {
+            reading = Task {
+                do { other.result = .success(try await otherCode()) } catch { other.result = .failure(error) }
+            }
+            while other.result == nil {
+                if let result = paired.result {
+                    _ = try result.get()
+                    throw HostLinkError.unexpectedReply
+                }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            guard let code = try other.result?.get(), code == shown.code else {
+                let code = (try? other.result?.get()) ?? ""
                 throw HostLinkError.refused(
-                    "\(shown.macName) shows the code \(other), and this Mac shows \(shown.code) for it. The Macs did not pair."
+                    "\(shown.macName) shows the code \(code), and this Mac shows \(shown.code) for it. The Macs did not pair."
                 )
             }
             confirmCode()
             await pairing.value
-            guard let result = outcome.result else { throw HostLinkError.unexpectedReply }
+            guard let result = paired.result else { throw HostLinkError.unexpectedReply }
             return try result.get()
         } catch {
+            reading?.cancel()
             pairing.cancel()
             await pairing.value
             throw error
+        }
+    }
+
+    /// Reads the paired Macs again after another process changed them in the store, as a command does for a
+    /// dashboard that is open, so that this list is not saved over that change.
+    func reload() {
+        let saved: [PairedMac]
+        do {
+            saved = try store.read().map { try JSONDecoder().decode([PairedMac].self, from: $0) } ?? []
+        } catch {
+            message = "Could not read the paired Macs: \(error.localizedDescription)"
+            return
+        }
+        guard saved != macs else { return }
+        for mac in macs where !saved.contains(where: { $0.id == mac.id }) {
+            forgetStatus(of: mac.id)
+            forgetSettings(of: mac.id)
+        }
+        for mac in saved where settings[mac.id] == nil { settings[mac.id] = PairedMacSettings() }
+        macs = saved
+        if macs.isEmpty {
+            browsing?.cancel()
+            browsing = nil
+            advertised = [:]
+        } else if browsing == nil {
+            start()
+        } else {
+            advertisedServicesChanged()
         }
     }
 

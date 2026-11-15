@@ -409,7 +409,10 @@ struct HostPairingTests {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let host = managedMac(at: root)
-        let dashboard = PairedMacs(store: MemorySecretStore(), name: "Dashboard", role: .dashboard, browses: false)
+        let store = MemorySecretStore()
+        let dashboard = PairedMacs(store: store, name: "Dashboard", role: .dashboard, browses: false)
+        // The dashboard that is open while the command runs, with the pairings that it read when it started.
+        let open = PairedMacs(store: store, name: "Dashboard", role: .dashboard, browses: false)
         dashboard.discoverPairableMacs()
         /// Lists the host as found on the network while it waits for a dashboard.
         func find() async throws -> PairedMacs.PairableMac {
@@ -440,11 +443,16 @@ struct HostPairingTests {
         }
         #expect(dashboard.macs.map(\.listed) == [paired])
         #expect(DashboardPairingReport(dashboard).hosts.map(\.name) == ["Managed"])
+        // The open dashboard reads the host that the command saved, so it does not save its earlier list over it.
+        #expect(open.macs.isEmpty)
+        open.reload()
+        #expect(open.macs.map(\.listed) == [paired])
         try await waitUntil { host.management.dashboards.map(\.id) == [paired.id] }
 
         dashboard.stopDiscoveringPairableMacs()
         await host.management.shutDown()
         await dashboard.shutDown()
+        await open.shutDown()
     }
 
     @Test func dashboardsPairWithAHostThatKeepsManagingItsMacs() async throws {
