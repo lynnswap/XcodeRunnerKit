@@ -534,6 +534,45 @@ final class PairedMacs: MacList {
         return mac
     }
 
+    /// Pairs with a Mac that `pairableMacs` lists, for a command: the code that the Mac shows is compared with this
+    /// Mac's in place of a person comparing the two.
+    ///
+    /// - Parameters:
+    ///   - showCode: Called with this Mac's code once the Macs exchanged keys.
+    ///   - otherCode: Returns the code that the Mac shows. The pairing ends without a pairing if it differs.
+    func pair(
+        with id: WaitingMac.ID, showCode: (CodeConfirmation) throws -> Void, otherCode: () async throws -> String
+    ) async throws -> ListedMac {
+        // Set when the pairing ended, which it does before a code is shown if the Mac refuses or leaves.
+        final class Outcome { var result: Result<ListedMac, any Error>? }
+        let outcome = Outcome()
+        let pairing = Task {
+            do { outcome.result = .success(try await pair(with: id)) } catch { outcome.result = .failure(error) }
+        }
+        do {
+            while codeConfirmation == nil {
+                if let result = outcome.result { return try result.get() }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            guard let shown = codeConfirmation else { throw HostLinkError.unexpectedReply }
+            try showCode(shown)
+            let other = try await otherCode()
+            guard other == shown.code else {
+                throw HostLinkError.refused(
+                    "\(shown.macName) shows the code \(other), and this Mac shows \(shown.code) for it. The Macs did not pair."
+                )
+            }
+            confirmCode()
+            await pairing.value
+            guard let result = outcome.result else { throw HostLinkError.unexpectedReply }
+            return try result.get()
+        } catch {
+            pairing.cancel()
+            await pairing.value
+            throw error
+        }
+    }
+
     /// Confirms that the Mac being paired shows the same code as `codeConfirmation`.
     func confirmCode() {
         guard var codeConfirmation, !codeConfirmation.isConfirmed, let confirmation else { return }

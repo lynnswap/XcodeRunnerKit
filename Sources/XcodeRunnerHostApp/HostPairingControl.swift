@@ -71,6 +71,18 @@ struct HostPairingReport: Codable, Equatable, Sendable {
     }
 }
 
+/// The pairings of a Mac without a host: the hosts that its dashboard shows, without the pairings' keys.
+struct DashboardPairingReport: Codable, Equatable, Sendable {
+    let hosts: [HostPairingReport.Mac]
+    /// What the last change left to do on a host, or why it failed.
+    let message: String?
+
+    @MainActor init(_ hosts: PairedMacs) {
+        self.hosts = hosts.macs.map { HostPairingReport.Mac($0.pairing) }
+        message = hosts.message
+    }
+}
+
 extension HostSettingsModel {
     /// Does what a command asks of this Mac's pairings, under the conditions of the window's buttons.
     func answer(_ request: HostPairingRequest) throws(HostSettingsError) -> HostPairingReport {

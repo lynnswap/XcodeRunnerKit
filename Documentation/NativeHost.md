@@ -380,6 +380,28 @@ and ends the wait. The Macs are paired once the other Mac confirmed as well,
 which is when `confirm` returns. `refuse` and `cancel` end the wait, and
 `stop-management` forgets the managing Mac.
 
+A Mac without a host pairs its dashboard with a host that waits for one:
+
+```sh
+xcode-runner host pairing request "Build Mac"  # the host's name on the network
+xcode-runner host pairing status               # the hosts that this Mac's dashboard shows
+xcode-runner host pairing remove "Build Mac"
+```
+
+`request` finds the host and prints `code`, the code that this Mac shows for
+the pairing. It then reads the code that the host shows from standard input and
+pairs if the two are the same. So an agent pairs two Macs in four steps:
+
+1. On the host, `pairing allow dashboard`.
+2. On the other Mac, start `pairing request` and read the code that it prints.
+3. On the host, read its code with `pairing status`, then give it the other
+   Mac's code with `pairing confirm`.
+4. Write the host's code to the standard input of `pairing request`.
+
+Each Mac gets the other's code, so each refuses a request that did not come
+from the Mac that the agent runs commands on. A dashboard that is open does not
+list a host that a command paired until it is opened again.
+
 These commands send the host what a dashboard sends it, so what a command can
 do and when the host refuses are the same as in the app, and the pairing
 commands follow the conditions of the window's buttons. They need the

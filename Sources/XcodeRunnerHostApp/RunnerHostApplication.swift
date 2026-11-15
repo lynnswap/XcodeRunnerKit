@@ -145,7 +145,7 @@ public enum RunnerHostApplication {
 }
 
 /// Whether the installer set up a host for this user, which it does by writing the host's LaunchAgent.
-private func hasInstalledHost(_ label: String, in installation: HostInstallation) -> Bool {
+func hasInstalledHost(_ label: String, in installation: HostInstallation) -> Bool {
     let agent = installation.homeDirectory.appending(path: "Library/LaunchAgents/\(label).plist")
     return FileManager.default.fileExists(atPath: agent.path(percentEncoded: false))
 }
