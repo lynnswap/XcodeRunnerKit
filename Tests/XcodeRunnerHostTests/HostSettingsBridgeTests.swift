@@ -66,6 +66,12 @@ struct HostSettingsBridgeTests {
         // A request that the host takes only from a paired Mac is refused as well.
         await #expect(throws: HostSettingsError.self) { _ = try await perform(.unpair) }
 
+        // `xcode-runner host settings` changes the labels and the pause through the host as well, and gets its refusal.
+        #expect(try await request(.setPaused(false), over: connection).error == nil)
+        #expect(!installation.isPaused())
+        #expect(try await request(.updateRunnerLabels(["one,two"]), over: connection).error != nil)
+        #expect(try installation.runnerLabels() == ["fast", "gpu"])
+
         // The host's pairings and its reasons for refusing reach a command the same way.
         #expect(try await HostControl.pairing(.read) { try await self.request($0, over: connection) }.dashboards.isEmpty)
         await #expect(throws: HostSettingsError.self) {

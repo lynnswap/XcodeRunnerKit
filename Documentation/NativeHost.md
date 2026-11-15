@@ -437,6 +437,14 @@ xcode-runner host settings update \
   '{"scope":"pool","maximumConcurrentJobs":2,"simulatorRetention":{"mode":"forever"}}'
 ```
 
+The runner labels and whether the Mac is paused are scopes too. The running
+host applies them, as its window does:
+
+```sh
+xcode-runner host settings update '{"scope":"runnerLabels","labels":["fast","gpu"]}'
+xcode-runner host settings update '{"scope":"paused","paused":true}'
+```
+
 Updates are partial and apply to one scope. Omitted fields retain their saved
 values. A new pool requires `maximumConcurrentJobs`. The catalog includes each
 setting's current value, type, constraints, choices, and application timing.

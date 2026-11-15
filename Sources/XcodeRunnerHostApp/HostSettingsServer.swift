@@ -51,6 +51,10 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
                 case .pairing(let data):
                     let report = try settings.answer(try JSONDecoder().decode(HostPairingRequest.self, from: data))
                     response = HostSettingsBridgeResponse(reply: try JSONEncoder().encode(report))
+                case .updateRunnerLabels(let labels):
+                    (response, followUp) = await change(.saveRunnerLabels(labels))
+                case .setPaused(let isPaused):
+                    (response, followUp) = await change(.setPaused(isPaused))
                 case let request:
                     response = await handle(request)
                 }
@@ -72,6 +76,13 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
 
     /// Names the commands on this Mac where a host tells its dashboards apart, as for the pairing that one starts.
     private static let commands = UUID(uuidString: "00000000-0000-0000-0000-00000000C0DE")!
+
+    /// Changes a setting for `xcode-runner host settings`, which reads the saved value afterwards.
+    private func change(_ request: HostSettingsRequest) async -> (HostSettingsBridgeResponse, FollowUp?) {
+        let answer = await answer(.settings(request))
+        if case .refused(let reason) = answer.reply { return (HostSettingsBridgeResponse(error: reason), nil) }
+        return (HostSettingsBridgeResponse(), answer.followUp)
+    }
 
     /// What this Mac does after an answer was sent.
     private typealias FollowUp = @MainActor () async -> Void
@@ -103,7 +114,7 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
 
     func handle(_ request: HostSettingsBridgeRequest) async -> HostSettingsBridgeResponse {
         switch request {
-        case .link, .pairing:
+        case .link, .pairing, .updateRunnerLabels, .setPaused:
             return HostSettingsBridgeResponse(error: "A request for the host is answered with its reply.")
         case .getRepositories:
             return HostSettingsBridgeResponse(settings: github.repositorySettings)

@@ -34,7 +34,7 @@ package enum HostSettingValue: Codable, Sendable, Equatable {
 }
 
 package enum HostSettingsScope: String, Codable, Sendable, CaseIterable {
-    case pool, buildService, xcode, storage, githubRepositories
+    case pool, buildService, xcode, storage, githubRepositories, runnerLabels, paused
 }
 
 package struct HostSettingChoice: Codable, Sendable {
@@ -75,6 +75,10 @@ package enum HostSettingsUpdate: Codable, Sendable {
     case xcode(developerDirectory: String?)
     case storage(directory: String)
     case githubRepositories(selectedRepositoryIDs: [Int])
+    /// The labels that this Mac's runners get beside the ones that GitHub sets.
+    case runnerLabels(labels: [String])
+    /// Whether this Mac takes no new jobs.
+    case paused(Bool)
 
     package var scope: HostSettingsScope {
         switch self {
@@ -83,11 +87,14 @@ package enum HostSettingsUpdate: Codable, Sendable {
         case .xcode: .xcode
         case .storage: .storage
         case .githubRepositories: .githubRepositories
+        case .runnerLabels: .runnerLabels
+        case .paused: .paused
         }
     }
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case scope, maximumConcurrentJobs, simulatorRetention, path, developerDirectory, directory, selectedRepositoryIDs
+        case labels, paused
     }
     private struct AnyKey: CodingKey {
         let stringValue: String
@@ -135,6 +142,12 @@ package enum HostSettingsUpdate: Codable, Sendable {
             fields = ["scope", "selectedRepositoryIDs"]
             let ids = try container.decode([Int].self, forKey: .selectedRepositoryIDs)
             self = .githubRepositories(selectedRepositoryIDs: ids)
+        case .runnerLabels:
+            fields = ["scope", "labels"]
+            self = .runnerLabels(labels: try container.decode([String].self, forKey: .labels))
+        case .paused:
+            fields = ["scope", "paused"]
+            self = .paused(try container.decode(Bool.self, forKey: .paused))
         }
         let allKeys = try decoder.container(keyedBy: AnyKey.self).allKeys.map(\.stringValue)
         if let unknown = allKeys.first(where: { !fields.contains($0) }) {
@@ -155,6 +168,8 @@ package enum HostSettingsUpdate: Codable, Sendable {
         case .xcode(let developerDirectory): try container.encode(developerDirectory, forKey: .developerDirectory)
         case .storage(let directory): try container.encode(directory, forKey: .directory)
         case .githubRepositories(let ids): try container.encode(ids, forKey: .selectedRepositoryIDs)
+        case .runnerLabels(let labels): try container.encode(labels, forKey: .labels)
+        case .paused(let isPaused): try container.encode(isPaused, forKey: .paused)
         }
     }
 
@@ -177,6 +192,8 @@ package enum HostSettingsUpdate: Codable, Sendable {
             guard ids.allSatisfy({ $0 > 0 }), Set(ids).count == ids.count else {
                 throw HostSettingsError("Repository IDs must be distinct positive integers.")
             }
+        // The running host checks the labels as its window does, and takes any pause.
+        case .runnerLabels, .paused: break
         }
     }
 }
@@ -186,17 +203,19 @@ package struct HostSettingsService: Sendable {
     package let pool: HostExecutionPool
     /// Lists the Xcode apps on this Mac.
     package let installedXcodes: @Sendable () -> [InstalledXcode]
-    private let githubRequest: @Sendable (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse
+    /// Asks the running host for what only it knows or applies: the GitHub repositories, the runner labels, and a
+    /// pause.
+    private let hostRequest: @Sendable (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse
 
     package init(
         installation: HostInstallation = .init(), pool: HostExecutionPool? = nil,
         installedXcodes: @escaping @Sendable () -> [InstalledXcode] = InstalledXcode.installed,
-        githubRequest: @escaping @Sendable (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = HostSettingsBridge.request
+        hostRequest: @escaping @Sendable (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = HostSettingsBridge.request
     ) {
         self.installation = installation
         self.pool = pool ?? HostExecutionPool(directory: installation.poolDirectory)
         self.installedXcodes = installedXcodes
-        self.githubRequest = githubRequest
+        self.hostRequest = hostRequest
     }
 
     @discardableResult
@@ -227,6 +246,8 @@ package struct HostSettingsService: Sendable {
         if scope == nil || scope == .xcode { settings.append(xcodeSetting()) }
         if scope == nil || scope == .storage { settings.append(storageSetting()) }
         if scope == nil || scope == .githubRepositories { settings.append(await repositorySetting()) }
+        if scope == nil || scope == .runnerLabels { settings.append(runnerLabelsSetting()) }
+        if scope == nil || scope == .paused { settings.append(pausedSetting()) }
         return HostSettingsSnapshot(settings: settings)
     }
 
@@ -244,7 +265,7 @@ package struct HostSettingsService: Sendable {
         case .storage(let directory):
             _ = try await requestStorageDirectory(URL(filePath: directory))
         case .githubRepositories(let ids):
-            let response = try await githubRequest(.updateRepositories(ids))
+            let response = try await hostRequest(.updateRepositories(ids))
             if let error = response.error { throw HostSettingsError(error) }
             if let error = response.synchronizationError { errors.append(error) }
             guard let saved = response.settings else { throw HostSettingsError("The host did not return the saved repository selection.") }
@@ -252,6 +273,11 @@ package struct HostSettingsService: Sendable {
                 scope: update.scope, state: errors.isEmpty ? "saved" : "savedWithErrors",
                 settings: [Self.repositorySetting(saved, editable: true)], errors: errors
             )
+        case .runnerLabels(let labels):
+            // The host saves the labels and gives them to its runners, as when its window saves them.
+            if let error = try await hostRequest(.updateRunnerLabels(labels)).error { throw HostSettingsError(error) }
+        case .paused(let isPaused):
+            if let error = try await hostRequest(.setPaused(isPaused)).error { throw HostSettingsError(error) }
         }
         let snapshot = await getSettings(scope: update.scope)
         errors += snapshot.settings.compactMap(\.readError)
@@ -317,9 +343,28 @@ package struct HostSettingsService: Sendable {
         return item
     }
 
+    private func runnerLabelsSetting() -> HostSetting {
+        var item = HostSetting(
+            key: "labels", scope: .runnerLabels, type: "stringArray", defaultValue: .array([]),
+            constraints: ["uniqueItems": .bool(true)], choices: [], appliesAt: "runnerSynchronization"
+        )
+        do { item.value = .array(try installation.runnerLabels().map { .string($0) }) }
+        catch { item.readError = error.localizedDescription }
+        return item
+    }
+
+    private func pausedSetting() -> HostSetting {
+        var item = HostSetting(
+            key: "paused", scope: .paused, type: "boolean", defaultValue: .bool(false), constraints: [:], choices: [],
+            appliesAt: "afterRunningJobs"
+        )
+        item.value = .bool(installation.isPaused())
+        return item
+    }
+
     private func repositorySetting() async -> HostSetting {
         do {
-            let response = try await githubRequest(.getRepositories)
+            let response = try await hostRequest(.getRepositories)
             if let error = response.error { throw HostSettingsError(error) }
             guard let settings = response.settings else { throw HostSettingsError("The host did not return repository settings.") }
             return Self.repositorySetting(settings, editable: true)
