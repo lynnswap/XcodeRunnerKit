@@ -202,12 +202,30 @@ final class DashboardWindowModel: PaneWindowModel {
 
     var sidebarGroups: [SidebarGroup] {
         hosts.macs.map { host in
-            SidebarGroup(title: host.name, rows: [
-                SidebarRow(pane: DashboardPane.overview(host.id), title: "Overview", icon: HostPane.overview.icon),
-                SidebarRow(pane: DashboardPane.github(host.id), title: "GitHub", icon: HostPane.github.icon),
-                SidebarRow(pane: DashboardPane.mac(host.id), title: host.name, icon: HostPane.mac.icon),
-            ] + hosts.macsManaged(by: host.id).listedMacs.map { mac in
-                SidebarRow(pane: DashboardPane.managedMac(mac.id, host: host.id), title: mac.name, icon: HostPane.mac.icon)
+            // What the host last answered names its state, and its connection does while it does not answer.
+            let answer = hosts.answer(of: host.id)
+            let connection = hosts.status(of: host.id)
+            let managed = hosts.macsManaged(by: host.id)
+            return SidebarGroup(title: host.name, rows: [
+                SidebarRow(
+                    pane: DashboardPane.overview(host.id), title: "Overview", subtitle: answer?.report.stateTitle ?? connection.title,
+                    icon: HostPane.overview.icon,
+                    status: answer.map { .init(symbol: $0.report.stateSymbol, color: $0.report.stateTint) }
+                        ?? .init(symbol: connection.systemImage, color: connection.tint)
+                ),
+                SidebarRow(
+                    pane: DashboardPane.github(host.id), title: "GitHub",
+                    subtitle: answer.map { $0.github.accountLogin ?? "Not connected" }, icon: HostPane.github.icon
+                ),
+                SidebarRow(
+                    pane: DashboardPane.mac(host.id), title: host.name, subtitle: answer?.report.runnerCountTitle, icon: HostPane.mac.icon
+                ),
+            ] + managed.listedMacs.map { mac in
+                let status = managed.status(of: mac.id)
+                return SidebarRow(
+                    pane: DashboardPane.managedMac(mac.id, host: host.id), title: mac.name, subtitle: status.title,
+                    icon: HostPane.mac.icon, status: .init(symbol: status.systemImage, color: status.tint)
+                )
             })
         }
     }

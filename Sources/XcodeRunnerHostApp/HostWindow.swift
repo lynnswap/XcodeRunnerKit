@@ -44,10 +44,21 @@ final class HostWindowModel: PaneWindowModel {
     }
 
     var sidebarGroups: [SidebarGroup] {
-        func row(_ pane: HostPane) -> SidebarRow { SidebarRow(pane: pane, title: pane.title(in: settings), icon: pane.icon) }
+        let report = HostSettingsReport(settings)
+        let github = settings.github.report
+        func row(_ pane: HostPane, subtitle: String?, status: SidebarRow.Status? = nil) -> SidebarRow {
+            SidebarRow(pane: pane, title: pane.title(in: settings), subtitle: subtitle, icon: pane.icon, status: status)
+        }
         return [
-            SidebarGroup(title: nil, rows: [row(.overview), row(.github)]),
-            SidebarGroup(title: "Runners", rows: [row(.mac)] + settings.managedMacs.macs.map { row(.managedMac($0.id)) }),
+            SidebarGroup(title: nil, rows: [
+                row(.overview, subtitle: report.stateTitle, status: .init(symbol: report.stateSymbol, color: report.stateTint)),
+                // The account is not known until the saved sign-in is read.
+                row(.github, subtitle: github.accountLogin ?? (github.hasRestored ? "Not connected" : nil)),
+            ]),
+            SidebarGroup(title: "Runners", rows: [row(.mac, subtitle: report.runnerCountTitle)] + settings.managedMacs.macs.map {
+                let status = settings.managedMacs.status(of: $0.id)
+                return row(.managedMac($0.id), subtitle: status.title, status: .init(symbol: status.systemImage, color: status.tint))
+            }),
         ]
     }
 
