@@ -245,9 +245,19 @@ package struct HostSettingsService: Sendable {
         if scope == nil || scope == .buildService { settings.append(buildServiceSetting()) }
         if scope == nil || scope == .xcode { settings.append(xcodeSetting()) }
         if scope == nil || scope == .storage { settings.append(storageSetting()) }
-        if scope == nil || scope == .githubRepositories { settings.append(await repositorySetting()) }
-        if scope == nil || scope == .runnerLabels { settings.append(runnerLabelsSetting()) }
-        if scope == nil || scope == .paused { settings.append(pausedSetting()) }
+        // The running host applies these three, so they can be edited only while it answers.
+        let hostSettings: [HostSettingsScope] = [.githubRepositories, .runnerLabels, .paused]
+        if scope.map(hostSettings.contains) ?? true {
+            let repositories = await savedRepositories()
+            var unavailableReason: String?
+            if case .failure(let error) = repositories { unavailableReason = error.localizedDescription }
+            if scope == nil || scope == .githubRepositories { settings.append(repositorySetting(repositories)) }
+            for var item in [runnerLabelsSetting(), pausedSetting()] where scope == nil || scope == item.scope {
+                item.editable = unavailableReason == nil
+                item.unavailableReason = unavailableReason
+                settings.append(item)
+            }
+        }
         return HostSettingsSnapshot(settings: settings)
     }
 
@@ -362,12 +372,21 @@ package struct HostSettingsService: Sendable {
         return item
     }
 
-    private func repositorySetting() async -> HostSetting {
+    /// Asks the running host for its repository selection, which fails only when the host does not answer.
+    private func savedRepositories() async -> Result<HostGitHubRepositorySettings, any Error> {
         do {
             let response = try await hostRequest(.getRepositories)
             if let error = response.error { throw HostSettingsError(error) }
             guard let settings = response.settings else { throw HostSettingsError("The host did not return repository settings.") }
-            return Self.repositorySetting(settings, editable: true)
+            return .success(settings)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func repositorySetting(_ answered: Result<HostGitHubRepositorySettings, any Error>) -> HostSetting {
+        do {
+            return Self.repositorySetting(try answered.get(), editable: true)
         } catch {
             var item = Self.repositorySetting(.init(selectedRepositoryIDs: [], choices: []), editable: false)
             item.unavailableReason = error.localizedDescription
