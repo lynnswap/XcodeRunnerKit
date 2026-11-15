@@ -12,8 +12,10 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
     private var windowController: NSWindowController?
     private var content: DashboardSplitViewController? { windowController?.contentViewController as? DashboardSplitViewController }
     private var statusItem: NSStatusItem?
-    /// The menu bar item's menu. It lists the hosts as they are when it opens.
+    /// The menu bar item's menu. It lists the hosts, and keeps their states current while it is open.
     let statusMenu = NSMenu()
+    /// Reads the listed hosts while the menu is open.
+    private var statusRefresh: Task<Void, Never>?
     private var stopped = false
 
     init(hosts: PairedMacs) {
@@ -77,24 +79,13 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         statusItem = item
     }
 
-    /// Lists each host with its state and jobs, as its Overview shows them, above the commands.
+    /// Lists each host above the commands.
     private func updateStatusMenu() {
         statusMenu.removeAllItems()
         for host in hosts.macs {
             let item = statusMenu.addItem(withTitle: host.name, action: #selector(showHost(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = host.id
-            let connection = hosts.status(of: host.id)
-            // What the host last answered names its state, and its connection does while it does not answer.
-            if let report = hosts.answer(of: host.id)?.report {
-                item.subtitle = "\(report.stateTitle) · \(report.jobSummary)"
-                item.image = NSImage(systemSymbolName: report.stateSymbol, accessibilityDescription: report.stateTitle)?
-                    .withSymbolConfiguration(.init(paletteColors: [report.stateTint]))
-            } else {
-                item.subtitle = connection.title
-                item.image = NSImage(systemSymbolName: connection.systemImage, accessibilityDescription: connection.title)?
-                    .withSymbolConfiguration(.init(paletteColors: [connection.tint]))
-            }
         }
         if hosts.macs.isEmpty {
             statusMenu.addItem(withTitle: "No Macs", action: nil, keyEquivalent: "")
@@ -105,6 +96,52 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         statusMenu.addItem(
             withTitle: "Quit XcodeHomeRunner", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"
         ).target = NSApplication.shared
+        showHostStates()
+    }
+
+    /// Shows each listed host's state and jobs on its item, as its Overview shows them, and again when they change
+    /// while the menu is open.
+    private func showHostStates() {
+        withObservationTracking {
+            for item in statusMenu.items {
+                guard let host = item.representedObject as? HostPairing.ID else { continue }
+                // What the host last answered names its state, and its connection does while it does not answer.
+                if let report = hosts.answer(of: host)?.report {
+                    item.subtitle = "\(report.stateTitle) · \(report.jobSummary)"
+                    item.image = NSImage(systemSymbolName: report.stateSymbol, accessibilityDescription: report.stateTitle)?
+                        .withSymbolConfiguration(.init(paletteColors: [report.stateTint]))
+                } else {
+                    let connection = hosts.status(of: host)
+                    item.subtitle = connection.title
+                    item.image = NSImage(systemSymbolName: connection.systemImage, accessibilityDescription: connection.title)?
+                        .withSymbolConfiguration(.init(paletteColors: [connection.tint]))
+                }
+            }
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self, self.statusRefresh != nil else { return }
+                self.showHostStates()
+            }
+        }
+    }
+
+    /// Hosts are otherwise read once a minute, which is too old for the jobs that the menu shows.
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === statusMenu else { return }
+        let hosts = hosts
+        statusRefresh = Task {
+            await withTaskGroup { group in
+                for host in hosts.macs {
+                    group.addTask { await hosts.watchSettings(of: host.id) }
+                }
+            }
+        }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        guard menu === statusMenu else { return }
+        statusRefresh?.cancel()
+        statusRefresh = nil
     }
 
     @objc private func showDashboard(_ sender: Any?) {
