@@ -123,11 +123,51 @@ struct HostSettingsBridgeTests {
         #expect(try await perform(.reloadRepositories).errorMessage != nil)
     }
 
-    private func host(_ installation: HostInstallation, github: GitHubHostSettings? = nil) -> HostSettingsModel {
+    @Test func commandsReachAMacThatTheHostManages() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = self.host(HostInstallation(homeDirectory: root.appending(path: "Host")))
+        let managed = self.host(HostInstallation(homeDirectory: root.appending(path: "Managed")), named: "Managed")
+        // The host pairs with the Mac as a person does after seeing the same code on both.
+        managed.management.allowManagement()
+        try await waitUntil { managed.management.pairingWindow?.port != nil }
+        let pairing = Task {
+            try await host.managedMacs.pair(at: .hostPort(host: "127.0.0.1", port: try #require(managed.management.pairingWindow?.port)))
+        }
+        try await waitUntil { host.managedMacs.codeConfirmation != nil && managed.management.pairingWindow?.request?.code != nil }
+        host.managedMacs.confirmCode()
+        managed.management.allowPairing()
+        let mac = try await pairing.value
+        try await waitUntil { managed.management.managementPort != nil }
+        await host.managedMacs.checkStatus(
+            of: mac.id, at: .hostPort(host: "127.0.0.1", port: try #require(managed.management.managementPort))
+        )
+        let (server, connection) = serve(host)
+        defer {
+            connection.invalidate()
+            server.stop()
+        }
+        let bridge: (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = {
+            try await self.request($0, over: connection)
+        }
+
+        // The command names the Mac as the host lists it, and the host passes the change on as for a dashboard.
+        let paused = try await HostControl.managed("Managed", on: nil, over: bridge) { .setPaused(true, mac: $0) }
+        #expect(paused.id == mac.id && paused.settings?.isPaused == true)
+        #expect(managed.installation.isPaused())
+        await #expect(throws: HostSettingsError.self) {
+            _ = try await HostControl.managed("Another Mac", on: nil, over: bridge) { .read(refreshing: $0) }
+        }
+
+        await managed.management.shutDown()
+        await host.managedMacs.shutDown()
+    }
+
+    private func host(_ installation: HostInstallation, github: GitHubHostSettings? = nil, named name: String = "Host") -> HostSettingsModel {
         HostSettingsModel(
             installation: installation, github: github,
-            management: HostManagement(store: MemorySecretStore(), name: "Host", advertises: false),
-            managedMacs: PairedMacs(store: MemorySecretStore(), name: "Host", role: .manager, browses: false)
+            management: HostManagement(store: MemorySecretStore(), name: name, advertises: false),
+            managedMacs: PairedMacs(store: MemorySecretStore(), name: name, role: .manager, browses: false)
         )
     }
 

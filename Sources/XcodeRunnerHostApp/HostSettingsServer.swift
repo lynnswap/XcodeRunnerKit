@@ -40,14 +40,14 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
         Task { @MainActor in
             let request = Result { try JSONDecoder().decode(HostSettingsBridgeRequest.self, from: request) }
             let response: HostSettingsBridgeResponse
-            var answered: (request: HostLinkRequest, reply: HostLinkReply)?
+            // What this Mac does once the command has its answer, as after a dashboard's request.
+            var followUp: FollowUp?
             do {
                 switch try request.get() {
                 case .link(let data):
-                    let request = try JSONDecoder().decode(HostLinkRequest.self, from: data)
-                    let answer = await answer(request)
-                    answered = (request, answer)
-                    response = HostSettingsBridgeResponse(reply: try JSONEncoder().encode(answer))
+                    let answer = await answer(try JSONDecoder().decode(HostLinkRequest.self, from: data))
+                    followUp = answer.followUp
+                    response = HostSettingsBridgeResponse(reply: try JSONEncoder().encode(answer.reply))
                 case .pairing(let data):
                     let report = try settings.answer(try JSONDecoder().decode(HostPairingRequest.self, from: data))
                     response = HostSettingsBridgeResponse(reply: try JSONEncoder().encode(report))
@@ -59,31 +59,45 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
             }
             do { reply(try JSONEncoder().encode(response)) }
             catch { reply(Data(#"{"error":"Could not encode the host settings response."}"#.utf8)) }
-            guard let answered else { return }
+            guard let followUp else { return }
             // The command has the answer before this Mac registers runners or restarts, as a dashboard has: a host
             // that stops right away would otherwise end the connection with the reply still unsent.
             if let connection {
                 // The connection calls the block on its own queue.
                 await withCheckedContinuation { sent in connection.scheduleSendBarrierBlock { @Sendable in sent.resume() } }
             }
-            switch answered.request {
-            case .settings(let request):
-                await settings.finish(request, answeredWith: answered.reply, registersRunners: true)
-            case .github(.applySelection):
-                // The selection is saved, and its runners are registered and removed after the answer, as for a dashboard.
-                if case .github = answered.reply { await github.synchronizeDashboardSelection() }
-            default:
-                break
-            }
+            await followUp()
         }
     }
 
-    /// Answers a command's request as this Mac answers a dashboard's.
-    private func answer(_ request: HostLinkRequest) async -> HostLinkReply {
+    /// Names the commands on this Mac where a host tells its dashboards apart, as for the pairing that one starts.
+    private static let commands = UUID(uuidString: "00000000-0000-0000-0000-00000000C0DE")!
+
+    /// What this Mac does after an answer was sent.
+    private typealias FollowUp = @MainActor () async -> Void
+
+    /// Answers a command's request as this Mac answers a dashboard's, with what follows the answer.
+    private func answer(_ request: HostLinkRequest) async -> (reply: HostLinkReply, followUp: FollowUp?) {
+        let settings = settings
         switch request {
-        case .settings(let request): await settings.answer(request)
-        case .github(let request): await github.answer(request)
-        default: .refused("\(HostPane.macName) takes no such command.")
+        case .settings(let request):
+            let reply = await settings.answer(request)
+            let followUp: FollowUp = { await settings.finish(request, answeredWith: reply, registersRunners: true) }
+            return (reply, followUp)
+        case .github(let request):
+            let reply = await github.answer(request)
+            // The selection is saved, and its runners are registered and removed after the answer.
+            guard case .applySelection = request, case .github = reply else { return (reply, nil) }
+            let followUp: FollowUp = { await settings.github.synchronizeDashboardSelection() }
+            return (reply, followUp)
+        case .macs(let request):
+            let answer = await settings.managedMacsRelay.answer(request, from: Self.commands)
+            // The limit is saved, and runners are registered for it after the answer.
+            guard answer.registrationsChanged else { return (answer.reply, nil) }
+            let followUp: FollowUp = { await settings.github.synchronize() }
+            return (answer.reply, followUp)
+        default:
+            return (.refused("\(HostPane.macName) takes no such command."), nil)
         }
     }
 

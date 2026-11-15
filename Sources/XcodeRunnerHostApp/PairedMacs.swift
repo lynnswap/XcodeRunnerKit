@@ -810,8 +810,8 @@ final class PairedMacs: MacList {
         guard let endpoint = endpoint ?? endpoints[mac.id] else {
             throw HostLinkError.unreachable("\(mac.name) was not found on the local network.")
         }
-        let timeout = if case .read = request { HostLink.requestTimeout } else { Self.changeTimeout }
-        let reply = try await send(.settings(request), to: mac, at: endpoint, timeout: timeout)
+        let request = HostLinkRequest.settings(request)
+        let reply = try await send(request, to: mac, at: endpoint, timeout: request.replyTimeout)
         switch reply {
         case .settings(let report): return report
         case .refused(let message): throw HostLinkError.refused(message)
@@ -888,8 +888,8 @@ final class PairedMacs: MacList {
         guard let endpoint = endpoint ?? endpoints[mac.id] else {
             throw HostLinkError.unreachable("\(mac.name) was not found on the local network.")
         }
-        let timeout = if case .read = request { HostLink.requestTimeout } else { Self.changeTimeout }
-        let reply = try await send(.github(request), to: mac, at: endpoint, timeout: timeout)
+        let request = HostLinkRequest.github(request)
+        let reply = try await send(request, to: mac, at: endpoint, timeout: request.replyTimeout)
         switch reply {
         case .github(let report): return report
         case .refused(let message): throw HostLinkError.refused(message)
@@ -909,13 +909,8 @@ final class PairedMacs: MacList {
         guard let endpoint = endpoint ?? endpoints[mac.id] else {
             throw HostLinkError.unreachable("\(mac.name) was not found on the local network.")
         }
-        // The host reads or changes one of its Macs before it answers, within its own time limits.
-        let timeout = switch request {
-        case .read(refreshing: nil), .discover, .pair, .confirmCode, .cancelPairing: HostLink.requestTimeout
-        case .read: HostLink.requestTimeout * 3
-        case .configurePool, .saveStorage, .saveXcode, .saveRunnerLabels, .setPaused, .restart, .remove: Self.changeTimeout
-        }
-        let reply = try await send(.macs(request), to: mac, at: endpoint, timeout: timeout)
+        let request = HostLinkRequest.macs(request)
+        let reply = try await send(request, to: mac, at: endpoint, timeout: request.replyTimeout)
         switch reply {
         case .macs(let report): return report
         case .refused(let message): throw HostLinkError.refused(message)
@@ -935,12 +930,8 @@ final class PairedMacs: MacList {
         guard let endpoint = endpoints[mac.id] else {
             throw HostLinkError.unreachable("\(mac.name) was not found on the local network.")
         }
-        let timeout = switch request {
-        case .prepareArchive: Self.downloadTimeout
-        case .install: Self.changeTimeout
-        default: HostLink.requestTimeout
-        }
-        let reply = try await send(.runners(request), to: mac, at: endpoint, timeout: timeout)
+        let request = HostLinkRequest.runners(request)
+        let reply = try await send(request, to: mac, at: endpoint, timeout: request.replyTimeout)
         if case .refused(let message) = reply { throw HostLinkError.refused(message) }
         return reply
     }
@@ -1025,5 +1016,34 @@ final class PairedMacs: MacList {
         browsing = nil
         advertised = [:]
         message = "Could not look for paired Macs on the local network: \(error.localizedDescription)"
+    }
+}
+
+extension HostLinkRequest {
+    /// How long a paired Mac has to answer the request. A Mac answers a read at once, and a change once it applied
+    /// it, which can take a download or a call to GitHub.
+    @MainActor var replyTimeout: Duration {
+        switch self {
+        case .settings(.read), .github(.read):
+            HostLink.requestTimeout
+        case .settings, .github:
+            PairedMacs.changeTimeout
+        case .macs(let request):
+            // The host reads or changes one of its Macs before it answers, within its own time limits.
+            switch request {
+            case .read(refreshing: nil), .discover, .pair, .confirmCode, .cancelPairing: HostLink.requestTimeout
+            case .read: HostLink.requestTimeout * 3
+            case .configurePool, .saveStorage, .saveXcode, .saveRunnerLabels, .setPaused, .restart, .remove:
+                PairedMacs.changeTimeout
+            }
+        case .runners(let request):
+            switch request {
+            case .prepareArchive: PairedMacs.downloadTimeout
+            case .install: PairedMacs.changeTimeout
+            default: HostLink.requestTimeout
+            }
+        case .operation, .unpair:
+            HostLink.requestTimeout
+        }
     }
 }
