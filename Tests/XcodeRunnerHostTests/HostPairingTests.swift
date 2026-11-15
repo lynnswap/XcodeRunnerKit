@@ -405,6 +405,56 @@ struct HostPairingTests {
         await dashboard.shutDown()
     }
 
+    @Test func aDashboardsCommandPairsWithAHostGivenItsCode() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = managedMac(at: root)
+        let store = MemorySecretStore()
+        let dashboard = PairedMacs(store: store, name: "Dashboard", role: .dashboard, browses: false)
+        // The dashboard that is open while the command runs, with the pairings that it read when it started.
+        let open = PairedMacs(store: store, name: "Dashboard", role: .dashboard, browses: false)
+        dashboard.discoverPairableMacs()
+        /// Lists the host as found on the network while it waits for a dashboard.
+        func find() async throws -> PairedMacs.PairableMac {
+            _ = try host.answer(.allow(.dashboard))
+            try await waitUntil { host.management.pairingWindow?.port != nil }
+            let found = PairedMacs.PairableMac(id: UUID().uuidString, name: "Managed", endpoint: try local(host.management.pairingWindow?.port))
+            dashboard.pairableMacsChanged([found])
+            return found
+        }
+
+        // Another code than this Mac's ends the pairing here, and the host stops waiting for its confirmation.
+        var shown: [String] = []
+        await #expect(throws: HostLinkError.self) {
+            _ = try await dashboard.pair(with: try await find().id) { shown.append($0.code) } otherCode: {
+                shown.last == "000000" ? "111111" : "000000"
+            }
+        }
+        #expect(shown.count == 1 && dashboard.macs.isEmpty)
+        try await waitUntil { host.management.pairingWindow?.request == nil }
+        _ = try host.answer(.cancel)
+
+        // Each Mac's command gets the other's code, as an agent that runs both passes them on.
+        let paired = try await dashboard.pair(with: try await find().id) { shown.append($0.code) } otherCode: {
+            try await waitUntil { host.management.pairingWindow?.request?.code != nil }
+            let hostCode = try #require(host.management.pairingWindow?.request?.code)
+            _ = try host.answer(.confirm(code: try #require(shown.last)))
+            return hostCode
+        }
+        #expect(dashboard.macs.map(\.listed) == [paired])
+        #expect(DashboardPairingReport(dashboard).hosts.map(\.name) == ["Managed"])
+        // The open dashboard reads the host that the command saved, so it does not save its earlier list over it.
+        #expect(open.macs.isEmpty)
+        open.reload()
+        #expect(open.macs.map(\.listed) == [paired])
+        try await waitUntil { host.management.dashboards.map(\.id) == [paired.id] }
+
+        dashboard.stopDiscoveringPairableMacs()
+        await host.management.shutDown()
+        await dashboard.shutDown()
+        await open.shutDown()
+    }
+
     @Test func dashboardsPairWithAHostThatKeepsManagingItsMacs() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

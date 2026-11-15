@@ -502,6 +502,8 @@ final class PairedMacs: MacList {
         }
         let macName = pairing.name
         let mac = PairedMac(pairing: pairing, hostID: hostID)
+        // The pairing took as long as the person or a command needed, and another process may have changed the list.
+        reload()
         let replaced = macs.filter { $0.hostID == hostID }
         let next = macs.filter { $0.hostID != hostID } + [mac]
         do {
@@ -525,13 +527,97 @@ final class PairedMacs: MacList {
             forgetStatus(of: mac.id)
             forgetSettings(of: mac.id)
         }
-        macs = next
+        // The list may have been read again while the earlier pairing was told, so the new one joins what it is now.
+        macs = macs.filter { $0.hostID != hostID } + [mac]
         settings[mac.id] = PairedMacSettings()
         message = keepsEarlierPairing
             ? "\(macName) could not be told to forget this Mac's earlier pairing. It lists this Mac twice under Dashboards until you remove one there."
             : nil
         if browsing == nil { start() } else { advertisedServicesChanged() }
         return mac
+    }
+
+    /// Pairs with a Mac that `pairableMacs` lists, for a command: the code that the Mac shows is compared with this
+    /// Mac's in place of a person comparing the two.
+    ///
+    /// - Parameters:
+    ///   - showCode: Called with this Mac's code once the Macs exchanged keys.
+    ///   - otherCode: Returns the code that the Mac shows. The pairing ends without a pairing if it differs. It is
+    ///     not waited for once the Mac refused or left.
+    func pair(
+        with id: WaitingMac.ID, showCode: (CodeConfirmation) throws -> Void,
+        otherCode: @escaping @MainActor () async throws -> String
+    ) async throws -> ListedMac {
+        // Set when a task ended. The pairing ends before a code is shown, or while the other code is awaited, if the
+        // Mac refuses or leaves.
+        final class Outcome<Value> { var result: Result<Value, any Error>? }
+        let paired = Outcome<ListedMac>()
+        let pairing = Task {
+            do { paired.result = .success(try await pair(with: id)) } catch { paired.result = .failure(error) }
+        }
+        let other = Outcome<String>()
+        var reading: Task<Void, Never>?
+        do {
+            while codeConfirmation == nil {
+                if let result = paired.result { return try result.get() }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            guard let shown = codeConfirmation else { throw HostLinkError.unexpectedReply }
+            try showCode(shown)
+            reading = Task {
+                do { other.result = .success(try await otherCode()) } catch { other.result = .failure(error) }
+            }
+            while other.result == nil {
+                if let result = paired.result {
+                    _ = try result.get()
+                    throw HostLinkError.unexpectedReply
+                }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            guard let code = try other.result?.get(), code == shown.code else {
+                let code = (try? other.result?.get()) ?? ""
+                throw HostLinkError.refused(
+                    "\(shown.macName) shows the code \(code), and this Mac shows \(shown.code) for it. The Macs did not pair."
+                )
+            }
+            confirmCode()
+            await pairing.value
+            guard let result = paired.result else { throw HostLinkError.unexpectedReply }
+            return try result.get()
+        } catch {
+            reading?.cancel()
+            pairing.cancel()
+            await pairing.value
+            throw error
+        }
+    }
+
+    /// Reads the paired Macs again after another process changed them in the store, as a command does for a
+    /// dashboard that is open, so that this list is not saved over that change.
+    func reload() {
+        let saved: [PairedMac]
+        do {
+            saved = try store.read().map { try JSONDecoder().decode([PairedMac].self, from: $0) } ?? []
+        } catch {
+            message = "Could not read the paired Macs: \(error.localizedDescription)"
+            return
+        }
+        guard saved != macs else { return }
+        for mac in macs where !saved.contains(where: { $0.id == mac.id }) {
+            forgetStatus(of: mac.id)
+            forgetSettings(of: mac.id)
+        }
+        for mac in saved where settings[mac.id] == nil { settings[mac.id] = PairedMacSettings() }
+        macs = saved
+        if macs.isEmpty {
+            browsing?.cancel()
+            browsing = nil
+            advertised = [:]
+        } else if browsing == nil {
+            start()
+        } else {
+            advertisedServicesChanged()
+        }
     }
 
     /// Confirms that the Mac being paired shows the same code as `codeConfirmation`.
@@ -577,6 +663,8 @@ final class PairedMacs: MacList {
                 notice = "\(mac.name) was not found on the local network. \(remainingAccess(on: mac.name))"
             }
         }
+        // Telling the Mac took a moment, in which another process may have changed the list.
+        reload()
         let next = macs.filter { $0.id != id }
         do {
             try save(next)

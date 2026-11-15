@@ -22,7 +22,9 @@ struct HostControl: AsyncParsableCommand {
     struct Pairing: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             abstract: "Pair this host with a dashboard or a managing Mac, and list or remove its pairings.",
-            subcommands: [Status.self, Allow.self, Confirm.self, Refuse.self, Cancel.self, Remove.self, StopManagement.self]
+            subcommands: [
+                Status.self, Allow.self, Confirm.self, Refuse.self, Cancel.self, Request.self, Remove.self, StopManagement.self,
+            ]
         )
 
         struct Status: AsyncParsableCommand {
@@ -30,7 +32,73 @@ struct HostControl: AsyncParsableCommand {
                 abstract: "Print the paired Macs, and the Mac that asks to pair with its code, as JSON."
             )
 
-            func run() async throws { try HostControl.write(try await HostControl.pairing(.read)) }
+            func run() async throws {
+                // A Mac without a host is a dashboard, and its pairings are the hosts that it shows.
+                guard await HostControl.runsHost else {
+                    let hosts = await HostControl.dashboardHosts()
+                    return try HostControl.write(await DashboardPairingReport(hosts))
+                }
+                try HostControl.write(try await HostControl.pairing(.read))
+            }
+        }
+
+        struct Request: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Pair this Mac's dashboard with a host that waits for one, given the code that the host shows.",
+                discussion: """
+                    Run `xcode-runner host pairing allow dashboard` on the host first. This command finds the host \
+                    on the local network and prints the code that this Mac shows for the pairing. It then reads the \
+                    code that the host shows from standard input, and pairs if the two are the same. The host needs \
+                    this Mac's code as well, with `xcode-runner host pairing confirm`.
+                    """
+            )
+
+            @Argument(help: "The host's name, as its Mac is named on the network.")
+            var host: String
+            @Option(help: "How many seconds to look for the host.")
+            var timeout = 60
+
+            func run() async throws {
+                guard await !HostControl.runsHost else {
+                    throw HostSettingsError("This Mac runs a host, which pairs with the Macs that it manages in its window.")
+                }
+                let hosts = await HostControl.dashboardHosts()
+                // A host that this Mac is paired with already is told to forget that pairing, if it is found.
+                await hosts.start()
+                await hosts.discoverPairableMacs()
+                let deadline = ContinuousClock.now + .seconds(timeout)
+                var found: PairedMacs.PairableMac?
+                while found == nil {
+                    let named = await hosts.pairableMacs.filter { $0.name == host }
+                    guard named.count <= 1 else {
+                        throw HostSettingsError("\(named.count) Macs named \(host) wait to pair. Rename one, or pair in the window.")
+                    }
+                    found = named.first
+                    if found == nil {
+                        guard ContinuousClock.now < deadline else {
+                            throw HostSettingsError(
+                                await hosts.discoveryMessage ?? "No Mac named \(host) waits for a dashboard on the local network."
+                            )
+                        }
+                        try await Task.sleep(for: .milliseconds(500))
+                    }
+                }
+                guard let found else { return }
+                _ = try await hosts.pair(with: found.id) { shown in
+                    try HostControl.write(shown)
+                } otherCode: {
+                    // Reading blocks its thread, and the Macs' connection needs the main actor meanwhile.
+                    let line = await Task.detached { readLine() }.value
+                    guard let code = line?.trimmingCharacters(in: .whitespacesAndNewlines), !code.isEmpty else {
+                        throw HostSettingsError("Standard input ended without the code that \(host) shows.")
+                    }
+                    return code
+                }
+                HostControl.dashboardHostsChanged()
+                try HostControl.write(await DashboardPairingReport(hosts))
+                await hosts.stopDiscoveringPairableMacs()
+                await hosts.shutDown()
+            }
         }
 
         struct Allow: AsyncParsableCommand {
@@ -107,6 +175,7 @@ struct HostControl: AsyncParsableCommand {
             var dashboard: String
 
             func run() async throws {
+                guard await HostControl.runsHost else { return try await removeHost() }
                 let dashboards = try await HostControl.pairing(.read).dashboards
                 let named = dashboards.filter { $0.name == dashboard || $0.id.uuidString.caseInsensitiveCompare(dashboard) == .orderedSame }
                 guard let match = named.first else {
@@ -116,6 +185,30 @@ struct HostControl: AsyncParsableCommand {
                     throw HostSettingsError("This host is paired with \(named.count) dashboards named \(dashboard). Pass the ID of one.")
                 }
                 try HostControl.write(try await HostControl.pairing(.removeDashboard(match.id)))
+            }
+
+            /// Removes a host from this Mac's dashboard, and tells the host if it is found on the network.
+            @MainActor private func removeHost() async throws {
+                let hosts = HostControl.dashboardHosts()
+                let named = hosts.macs.filter { $0.name == dashboard || $0.id.uuidString.caseInsensitiveCompare(dashboard) == .orderedSame }
+                guard let match = named.first else {
+                    throw HostSettingsError("This Mac's dashboard shows no host named \(dashboard).")
+                }
+                guard named.count == 1 else {
+                    throw HostSettingsError("This Mac's dashboard shows \(named.count) hosts named \(dashboard). Pass the ID of one.")
+                }
+                // The host forgets this Mac when it is told, so it is looked for first.
+                hosts.start()
+                let deadline = ContinuousClock.now + .seconds(5)
+                while hosts.status(of: match.id) != .online, ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(250))
+                }
+                await hosts.remove(match.id)
+                HostControl.dashboardHostsChanged()
+                try HostControl.write(DashboardPairingReport(hosts))
+                let stayed = hosts.macs.contains { $0.id == match.id }
+                await hosts.shutDown()
+                if stayed { throw HostSettingsError(hosts.message ?? "Could not remove \(match.name).") }
             }
         }
 
@@ -310,6 +403,30 @@ struct HostControl: AsyncParsableCommand {
     @MainActor static func github() async throws -> GitHubReport {
         guard case .github(let report) = try await reply(to: .github(.read)) else { throw unexpectedAnswer }
         return report
+    }
+
+    /// Whether the installer set up a host on this Mac. Without one the app is a dashboard.
+    @MainActor static var runsHost: Bool {
+        guard let label = Bundle.main.bundleIdentifier else { return false }
+        return hasInstalledHost(label, in: HostInstallation())
+    }
+
+    /// The hosts that this Mac's dashboard shows, from the Keychain item that the app keeps them in.
+    @MainActor static func dashboardHosts() -> PairedMacs {
+        PairedMacs(
+            store: KeychainSecretStore.dashboardHosts(hostRoot: HostInstallation().hostRoot), name: HostPane.macName,
+            role: .dashboard
+        )
+    }
+
+    /// Posted when a command changed the hosts of this Mac's dashboard, for a dashboard that is open to read them
+    /// again.
+    static let dashboardHostsChangedNotification = Notification.Name("lynnpd.xcodehomerunner.dashboard-hosts-changed")
+
+    static func dashboardHostsChanged() {
+        DistributedNotificationCenter.default().postNotificationName(
+            dashboardHostsChangedNotification, object: nil, userInfo: nil, deliverImmediately: true
+        )
     }
 
     /// Asks this Mac's host about its pairings, or to change them. Throws the host's reason when it refuses.
