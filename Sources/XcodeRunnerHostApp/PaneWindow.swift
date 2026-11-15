@@ -22,12 +22,63 @@ protocol PaneSaving: AnyObject, Observable {
     var canSave: Bool { get }
     /// Whether a save from the pane runs now.
     var isSaving: Bool { get }
+    /// How many of the values of the running save are saved, and how many it saves in all.
+    var saveProgress: (completed: Int, total: Int) { get }
     /// Whether a value in the pane differs from the saved one.
     var hasEdits: Bool { get }
     /// Shows the saved values again in place of the edited ones.
     func revert()
     /// Saves those values. Each value that could not be saved shows why in the pane.
     func save()
+}
+
+/// A thin bar under the toolbar that fills while the shown pane saves, as a browser's does while a page loads. A save
+/// does not tell how far a value is, so the bar moves on by itself within each value and jumps when one is saved.
+private struct SaveProgressBar: View {
+    let saving: (any PaneSaving)?
+    /// When the save that the bar shows began. `nil` hides the bar.
+    @State private var startedAt: Date?
+    /// Whether the save ended, so that the bar fills before it fades.
+    @State private var isComplete = false
+
+    var body: some View {
+        let isSaving = saving?.isSaving == true
+        TimelineView(.animation(paused: startedAt == nil || isComplete)) { timeline in
+            GeometryReader { geometry in
+                Capsule()
+                    .fill(.tint)
+                    .frame(width: geometry.size.width * fraction(at: timeline.date))
+                    .animation(.easeOut(duration: 0.25), value: saving?.saveProgress.completed)
+                    .animation(.easeOut(duration: 0.25), value: isComplete)
+            }
+        }
+        .frame(height: 3)
+        .opacity(startedAt == nil ? 0 : 1)
+        .accessibilityHidden(true)
+        .onChange(of: isSaving, initial: true) { _, isSaving in
+            if isSaving {
+                isComplete = false
+                startedAt = .now
+            } else if startedAt != nil {
+                isComplete = true
+                Task {
+                    try? await Task.sleep(for: .milliseconds(450))
+                    // A save that began meanwhile keeps its bar.
+                    if isComplete { withAnimation(.easeOut(duration: 0.3)) { startedAt = nil } }
+                }
+            }
+        }
+    }
+
+    private func fraction(at date: Date) -> Double {
+        guard let startedAt, let saving else { return 0 }
+        if isComplete { return 1 }
+        let progress = saving.saveProgress
+        let total = Double(max(progress.total, 1))
+        // Within the value being saved the bar nears its end without reaching it.
+        let within = 0.9 * (1 - exp(-date.timeIntervalSince(startedAt) / 3))
+        return min((Double(progress.completed) + within) / total, 1)
+    }
 }
 
 /// The toolbar's Save button, which a progress indicator replaces while the shown pane saves.
@@ -68,17 +119,29 @@ protocol SavingPaneViewController: NSViewController {
 /// The detail side of a window: the view controller of the pane that is selected in the sidebar.
 @MainActor
 final class PaneContainerViewController: NSViewController {
-    override func loadView() { view = NSView() }
+    private let progressBar = NSHostingView(rootView: SaveProgressBar(saving: nil))
 
-    /// Shows a pane in place of the one shown before.
+    override func loadView() {
+        view = NSView()
+        progressBar.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(progressBar)
+        NSLayoutConstraint.activate([
+            progressBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            progressBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            progressBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+        ])
+    }
+
+    /// Shows a pane in place of the one shown before, with the progress of its saves under the toolbar.
     func show(_ pane: NSViewController) {
+        progressBar.rootView = SaveProgressBar(saving: (pane as? any SavingPaneViewController)?.saving)
         for child in children {
             child.view.removeFromSuperview()
             child.removeFromParent()
         }
         addChild(pane)
         pane.view.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(pane.view)
+        view.addSubview(pane.view, positioned: .below, relativeTo: progressBar)
         NSLayoutConstraint.activate([
             pane.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             pane.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),

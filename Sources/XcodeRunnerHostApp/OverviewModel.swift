@@ -143,6 +143,8 @@ final class OverviewModel: PaneSaving {
 
     var isSaving: Bool { github?.isSavingSelection == true }
 
+    var saveProgress: (completed: Int, total: Int) { (0, 1) }
+
     var hasEdits: Bool {
         guard let github, github.accountLogin != nil, github.managerName == nil else { return false }
         return selection != github.savedRepositoryIDs

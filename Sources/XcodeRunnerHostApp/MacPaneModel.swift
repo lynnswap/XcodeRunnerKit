@@ -316,6 +316,11 @@ final class MacPaneModel: PaneSaving {
 
     var isSaving: Bool { !valuesBeingSaved.isEmpty }
 
+    /// How many values the running save saves.
+    private var savedValueCount = 0
+
+    var saveProgress: (completed: Int, total: Int) { (savedValueCount - valuesBeingSaved.count, savedValueCount) }
+
     /// A Mac that does not answer shows no values, so it has none to save. While the Mac cannot apply an edited job
     /// limit or Simulator retention, as while it registers runners, Save waits, so that it saves every edit.
     var canSave: Bool {
@@ -347,6 +352,7 @@ final class MacPaneModel: PaneSaving {
         if canApplyPoolConfiguration { valuesBeingSaved.insert(.pool) }
         if canSaveXcodeSelection { valuesBeingSaved.insert(.xcode) }
         if canSaveStorageDirectory { valuesBeingSaved.insert(.storage) }
+        savedValueCount = valuesBeingSaved.count
         Task {
             // The limit comes first: saving labels registers runners, and the Mac applies no limit meanwhile.
             if valuesBeingSaved.contains(.pool) { await applyPoolConfiguration() }
