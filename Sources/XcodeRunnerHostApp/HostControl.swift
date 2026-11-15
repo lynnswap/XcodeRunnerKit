@@ -537,7 +537,7 @@ struct HostControl: AsyncParsableCommand {
             let paired = try RemoteOperationClient.host(named: host, installation: HostInstallation())
             reply = try await HostLink.send(
                 request, to: try await RemoteOperationClient.find(paired), key: paired.pairing.symmetricKey,
-                identity: paired.id.uuidString
+                identity: paired.id.uuidString, timeout: request.replyTimeout
             )
         } else {
             let response = try await bridge(.link(JSONEncoder().encode(request)))
