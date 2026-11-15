@@ -67,6 +67,56 @@ struct HostSettingsBridgeTests {
         await #expect(throws: HostSettingsError.self) { _ = try await perform(.unpair) }
     }
 
+    @Test func commandsConnectTheHostToGitHub() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root)
+        let transport = GitHubTestTransport([
+            .init(path: "/login/device/code", body: #"{"device_code":"device-secret","user_code":"USER-CODE","verification_uri":"https://github.com/login/device","expires_in":900,"interval":5}"#),
+            .init(path: "/login/oauth/access_token", body: #"{"access_token":"token-secret"}"#),
+            .init(path: "/user", body: #"{"id":1,"login":"owner"}"#),
+            .init(path: "/user/installations", body: #"{"installations":[]}"#),
+        ])
+        let client = await transport.client
+        // The host asks GitHub for the token once the test lets its wait end, as after the code is entered.
+        let authorized = AsyncStream<Void>.makeStream()
+        let authentication = GitHubAuthentication(clientID: "app", client: client, store: MemorySecretStore(), sleep: { _ in
+            for await _ in authorized.stream { return }
+        })
+        var opened: [URL] = []
+        let github = GitHubHostSettings(
+            installation: installation, pool: HostExecutionPool(directory: installation.poolDirectory),
+            app: GitHubApp(clientID: "app", slug: "host-app"), client: client, authentication: authentication,
+            openURL: { opened.append($0); return true }
+        )
+        let (server, connection) = serve(host(installation, github: github))
+        defer {
+            connection.invalidate()
+            server.stop()
+        }
+        func perform(_ request: GitHubRequest) async throws -> GitHubReport {
+            let reply = try await HostControl.reply(to: .github(request)) { try await self.request($0, over: connection) }
+            guard case .github(let report) = reply else { throw CocoaError(.coderInvalidValue) }
+            return report
+        }
+
+        // The command gets the code to enter, and the host opens no browser for a sign-in that a command started.
+        #expect(try await perform(.signIn).isConnecting)
+        try await waitUntil { github.deviceAuthorization != nil }
+        let waiting = try await perform(.read)
+        #expect(waiting.signInCode?.userCode == "USER-CODE")
+        #expect(waiting.accountLogin == nil)
+        #expect(opened.isEmpty)
+
+        authorized.continuation.yield()
+        try await waitUntil { github.account != nil && !github.isConnecting }
+        #expect(try await perform(.read).accountLogin == "owner")
+        #expect(try await perform(.signOut).accountLogin == nil)
+
+        // Reloading without a sign-in fails on the host, which says so in its answer for the command to fail with.
+        #expect(try await perform(.reloadRepositories).errorMessage != nil)
+    }
+
     private func host(_ installation: HostInstallation, github: GitHubHostSettings? = nil) -> HostSettingsModel {
         HostSettingsModel(
             installation: installation, github: github,
