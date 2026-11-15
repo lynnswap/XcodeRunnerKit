@@ -69,6 +69,10 @@ package struct HostGitHubRepositorySettings: Codable, Sendable, Equatable {
 package enum HostSettingsBridgeRequest: Codable, Sendable {
     case getRepositories
     case updateRepositories([Int])
+    /// Saves the labels that this Mac's runners get, as the host's window does. A refusal is in `error`.
+    case updateRunnerLabels([String])
+    /// Pauses or resumes this Mac, as the host's window does. A refusal is in `error`.
+    case setPaused(Bool)
     /// A request that a dashboard sends a host, encoded as the app encodes it for a paired Mac. The host answers it
     /// as it answers a dashboard, and the answer is in `reply`.
     case link(Data)

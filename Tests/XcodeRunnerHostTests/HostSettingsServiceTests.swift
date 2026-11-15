@@ -6,7 +6,7 @@ import XcodeRunnerKit
 @Suite(.timeLimit(.minutes(1)))
 struct HostSettingsServiceTests {
     private func service(at root: URL) -> HostSettingsService {
-        HostSettingsService(installation: HostInstallation(homeDirectory: root), githubRequest: { _ in
+        HostSettingsService(installation: HostInstallation(homeDirectory: root), hostRequest: { _ in
             HostSettingsBridgeResponse(settings: .init(selectedRepositoryIDs: [], choices: []))
         })
     }
@@ -41,10 +41,45 @@ struct HostSettingsServiceTests {
         #expect(try service.pool.configuration()?.maximumConcurrentJobs == 3)
     }
 
+    @Test func runnerLabelsAndPauseAreSettingsThatTheRunningHostApplies() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root)
+        // The host saves what it takes, and refuses what it cannot apply now.
+        let service = HostSettingsService(installation: installation, hostRequest: { request in
+            switch request {
+            case .updateRunnerLabels(let labels):
+                try installation.saveRunnerLabels(labels)
+                return HostSettingsBridgeResponse()
+            case .setPaused:
+                return HostSettingsBridgeResponse(error: "The host is stopping.")
+            default:
+                return HostSettingsBridgeResponse(settings: .init(selectedRepositoryIDs: [], choices: []))
+            }
+        })
+        let patch = try JSONDecoder().decode(HostSettingsUpdate.self, from: Data(#"{"scope":"runnerLabels","labels":["fast"]}"#.utf8))
+        let saved = try await service.update(patch)
+        #expect(saved.state == "saved" && saved.settings.map(\.value) == [.array([.string("fast")])])
+
+        await #expect(throws: HostSettingsError.self) { try await service.update(.paused(true)) }
+        let catalog = await service.getSettings()
+        #expect(catalog.settings.first { $0.scope == .paused }?.value == .bool(false))
+        #expect(catalog.settings.first { $0.scope == .runnerLabels }?.value == .array([.string("fast")]))
+        #expect(catalog.settings.allSatisfy { $0.editable })
+
+        // Without the running host the saved values are still read, and the catalog says that they cannot be changed.
+        let stopped = await HostSettingsService(installation: installation, hostRequest: { _ in
+            throw HostSettingsError("Host unavailable.")
+        }).getSettings(scope: .runnerLabels)
+        let labels = try #require(stopped.settings.first)
+        #expect(labels.value == .array([.string("fast")]))
+        #expect(!labels.editable && labels.unavailableReason == "Host unavailable.")
+    }
+
     @Test func synchronizationFailureReportsSavedRepositorySelection() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let service = HostSettingsService(installation: HostInstallation(homeDirectory: root), githubRequest: { _ in
+        let service = HostSettingsService(installation: HostInstallation(homeDirectory: root), hostRequest: { _ in
             HostSettingsBridgeResponse(settings: .init(selectedRepositoryIDs: [7], choices: [.init(id: 7, fullName: "owner/Project")]), synchronizationError: "GitHub is unavailable.")
         })
         let result = try await service.update(.githubRepositories(selectedRepositoryIDs: [7]))
@@ -113,7 +148,7 @@ struct HostSettingsServiceTests {
         try FileManager.default.createDirectory(at: installation.hostRoot, withIntermediateDirectories: true)
         try Data(#"{"repositories":[{"id":7,"full_name":"owner/Project"}]}"#.utf8)
             .write(to: installation.hostRoot.appending(path: "github-host.json"))
-        let service = HostSettingsService(installation: installation, githubRequest: { _ in throw HostSettingsError("Host unavailable.") })
+        let service = HostSettingsService(installation: installation, hostRequest: { _ in throw HostSettingsError("Host unavailable.") })
         let snapshot = await service.getSettings(scope: .githubRepositories)
         let item = try #require(snapshot.settings.first)
         #expect(item.value == .array([.integer(7)]))

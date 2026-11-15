@@ -437,6 +437,14 @@ xcode-runner host settings update \
   '{"scope":"pool","maximumConcurrentJobs":2,"simulatorRetention":{"mode":"forever"}}'
 ```
 
+The runner labels and whether the Mac is paused are scopes too. The running
+host applies them, as its window does:
+
+```sh
+xcode-runner host settings update '{"scope":"runnerLabels","labels":["fast","gpu"]}'
+xcode-runner host settings update '{"scope":"paused","paused":true}'
+```
+
 Updates are partial and apply to one scope. Omitted fields retain their saved
 values. A new pool requires `maximumConcurrentJobs`. The catalog includes each
 setting's current value, type, constraints, choices, and application timing.
@@ -467,12 +475,16 @@ Available scopes and when they take effect:
 | `xcode` | `developerDirectory` (an Xcode's `Contents/Developer` path, or `null` for the system selection) | Next CLI operation that names no Xcode |
 | `storage` | `directory` (absolute path to an existing folder) | Next host launch, after migration succeeds |
 | `githubRepositories` | `selectedRepositoryIDs` | Saved by the running app, then runner registrations synchronize |
+| `runnerLabels` | `labels` (the runners' own labels; an empty list removes them) | Saved by the running app; runners get them at the next synchronization |
+| `paused` | `paused` (`true` or `false`) | Saved by the running app; no new jobs start after the ones that run |
 
-GitHub repository updates need the installed app running. Synchronizing runner
-registrations also requires sign-in; a saved selection with pending
-synchronization returns `savedWithErrors`. The catalog reports availability and
-the selectable repository IDs. Credentials remain in the app's Keychain. Other
-scopes can be read and saved without the app.
+Updates of `githubRepositories`, `runnerLabels`, and `paused` need the
+installed app running, and the catalog reports each as not `editable` with an
+`unavailableReason` while it does not answer. Their saved values can still be
+read. Synchronizing runner registrations also requires sign-in; a saved
+selection with pending synchronization returns `savedWithErrors`. The catalog
+reports the selectable repository IDs. Credentials remain in the app's
+Keychain. The other scopes can be read and saved without the app.
 
 Pool fields are saved together under the pool lock. Saving a configuration can
 succeed even if subsequent Simulator cleanup or runner synchronization fails;
