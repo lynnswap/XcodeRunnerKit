@@ -143,6 +143,15 @@ final class OverviewModel: PaneSaving {
 
     var isSaving: Bool { github?.isSavingSelection == true }
 
+    var hasEdits: Bool {
+        guard let github, github.accountLogin != nil, github.managerName == nil else { return false }
+        return selection != github.savedRepositoryIDs
+    }
+
+    func revert() {
+        if let github { selection = github.savedRepositoryIDs }
+    }
+
     /// Applies the repository selection, which registers and removes runners.
     func save() {
         guard canSave else { return }

@@ -324,6 +324,21 @@ final class MacPaneModel: PaneSaving {
         return canSaveRunnerLabels || canApplyPoolConfiguration || canSaveXcodeSelection || canSaveStorageDirectory
     }
 
+    var hasEdits: Bool {
+        guard let report else { return false }
+        return RunnerLabels.parse(runnerLabelsInput) != report.runnerLabels || poolDraft.isEdited
+            || selectedXcode != savedXcode
+            || storageDirectoryInput != report.savedStorageDirectory?.path(percentEncoded: false) ?? ""
+    }
+
+    func revert() {
+        guard let report else { return }
+        runnerLabelsInput = RunnerLabels.text(report.runnerLabels)
+        poolDraft.revert()
+        selectedXcode = savedXcode
+        storageDirectoryInput = report.savedStorageDirectory?.path(percentEncoded: false) ?? ""
+    }
+
     /// Saves the values that can be saved now, one after the other, because the Mac applies one change at a time.
     /// Each input takes edits again once its value is saved.
     func save() {

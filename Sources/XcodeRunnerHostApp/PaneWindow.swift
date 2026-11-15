@@ -22,6 +22,10 @@ protocol PaneSaving: AnyObject, Observable {
     var canSave: Bool { get }
     /// Whether a save from the pane runs now.
     var isSaving: Bool { get }
+    /// Whether a value in the pane differs from the saved one.
+    var hasEdits: Bool { get }
+    /// Shows the saved values again in place of the edited ones.
+    func revert()
     /// Saves those values. Each value that could not be saved shows why in the pane.
     func save()
 }
@@ -41,7 +45,8 @@ private struct SaveToolbarButton: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
             } else {
                 Button("Save") { saving?.save() }
-                    .buttonStyle(.borderedProminent)
+                    // The toolbar item draws the button's shape, tinted while there is a value to save.
+                    .buttonStyle(.borderless)
                     .disabled(saving?.canSave != true)
                     // The host's own window has no menu bar, so the button takes the shortcut itself.
                     .keyboardShortcut("s", modifiers: .command)
@@ -101,6 +106,8 @@ class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSMenuI
     private var panesLeftSaving: [AnyHashable?: NSViewController] = [:]
     private let saveItem = NSToolbarItem(itemIdentifier: NSToolbarItem.Identifier("save"))
     private let saveButton = NSHostingView(rootView: SaveToolbarButton(saving: nil))
+    /// Drops the shown pane's edits. The toolbar shows it only while the pane has any.
+    private let revertItem = NSToolbarItem(itemIdentifier: NSToolbarItem.Identifier("revert"))
 
     /// - Parameter autosaveName: Names the saved sidebar width and the toolbar.
     init(model: any PaneWindowModel, autosaveName: String) {
@@ -139,10 +146,37 @@ class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSMenuI
         detail.show(controller)
         saving = (controller as? any SavingPaneViewController)?.saving
         saveButton.rootView = SaveToolbarButton(saving: saving)
+        updateSaveItemStyle()
+    }
+
+    /// Tints the toolbar's Save while the shown pane has a value to save and shows Revert while it has edits, then
+    /// waits for either to change.
+    private func updateSaveItemStyle() {
+        guard let saving else {
+            saveItem.style = .plain
+            revertItem.isHidden = true
+            return
+        }
+        let watched = ObjectIdentifier(saving)
+        let (canSave, canRevert) = withObservationTracking {
+            (saving.canSave, saving.hasEdits && !saving.isSaving)
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                // A pane that was replaced since is no longer watched.
+                if let self, self.saving.map(ObjectIdentifier.init) == watched { self.updateSaveItemStyle() }
+            }
+        }
+        saveItem.style = canSave ? .prominent : .plain
+        revertItem.isHidden = !canRevert
     }
 
     /// Saves the shown pane's edited values, for the File menu's Save command.
     @objc func savePane(_ sender: Any?) { saving?.save() }
+
+    @objc private func revertPane(_ sender: Any?) {
+        guard let saving, !saving.isSaving else { return }
+        saving.revert()
+    }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         menuItem.action == #selector(savePane) ? saving?.canSave == true : true
@@ -185,13 +219,24 @@ class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSMenuI
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, saveItem.itemIdentifier]
+        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, revertItem.itemIdentifier, saveItem.itemIdentifier]
     }
 
     func toolbar(
         _ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
         willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
+        if itemIdentifier == revertItem.itemIdentifier {
+            revertItem.label = "Revert"
+            revertItem.title = "Revert"
+            revertItem.toolTip = "Show the saved values again"
+            revertItem.isBordered = true
+            // The shown pane shows and hides the item. Validation would ask the responder chain.
+            revertItem.autovalidates = false
+            revertItem.target = self
+            revertItem.action = #selector(revertPane)
+            return revertItem
+        }
         guard itemIdentifier == saveItem.itemIdentifier else { return nil }
         saveItem.label = "Save"
         saveItem.view = saveButton

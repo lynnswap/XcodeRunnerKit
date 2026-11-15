@@ -128,11 +128,13 @@ struct OverviewView: View {
                 Text("To list a repository here, choose Add Repositories on GitHub…, install the app on it, then reload the list.")
                     .foregroundStyle(.secondary)
             }
-            if github.isSynchronizing { ProgressView("Synchronizing runner registrations…") }
             if isSignedIn, let error = github.errorMessage { ErrorText(error) }
             if isSignedIn {
                 HStack {
-                    if model.selection != github.savedRepositoryIDs, !github.isSavingSelection {
+                    if github.isSynchronizing {
+                        ProgressView().controlSize(.small)
+                        Text("Synchronizing runner registrations…").foregroundStyle(.secondary)
+                    } else if model.selection != github.savedRepositoryIDs {
                         Text("Unsaved changes").foregroundStyle(.secondary)
                     }
                     Spacer()
