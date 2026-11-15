@@ -65,14 +65,15 @@ struct HostSettingsServiceTests {
         let catalog = await service.getSettings()
         #expect(catalog.settings.first { $0.scope == .paused }?.value == .bool(false))
         #expect(catalog.settings.first { $0.scope == .runnerLabels }?.value == .array([.string("fast")]))
-        #expect(catalog.settings.allSatisfy(\.editable))
+        #expect(catalog.settings.allSatisfy { $0.editable })
 
         // Without the running host the saved values are still read, and the catalog says that they cannot be changed.
         let stopped = await HostSettingsService(installation: installation, hostRequest: { _ in
             throw HostSettingsError("Host unavailable.")
         }).getSettings(scope: .runnerLabels)
-        #expect(stopped.settings.map(\.value) == [.array([.string("fast")])])
-        #expect(stopped.settings.map(\.editable) == [false] && stopped.settings.first?.unavailableReason == "Host unavailable.")
+        let labels = try #require(stopped.settings.first)
+        #expect(labels.value == .array([.string("fast")]))
+        #expect(!labels.editable && labels.unavailableReason == "Host unavailable.")
     }
 
     @Test func synchronizationFailureReportsSavedRepositorySelection() async throws {
