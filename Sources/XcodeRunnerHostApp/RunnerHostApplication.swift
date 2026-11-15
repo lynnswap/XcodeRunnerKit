@@ -93,8 +93,11 @@ public enum RunnerHostApplication {
                 withExtendedLifetime(service) { dispatchMain() }
             }
             if options.control {
-                // The command prints its result or its failure and ends the process.
-                Task { await HostControl.main(options.operation) }
+                Task {
+                    // A command that fails prints why and ends the process itself.
+                    await HostControl.main(options.operation)
+                    Darwin.exit(EXIT_SUCCESS)
+                }
                 dispatchMain()
             }
             let installation = options.installation
