@@ -83,9 +83,9 @@ struct AddMacView: View {
         } footer: {
             switch model.role {
             case .manager:
-                Text("On the Mac to add, choose Settings… from the XcodeHomeRunner menu, then choose Allow Management… in Overview to list it here.")
+                Text("On the Mac to add, choose Settings… from the XcodeHomeRunner menu, then turn off Host under Roles to list it here.")
             case .dashboard:
-                Text("On the Mac to show, choose Settings… from the XcodeHomeRunner menu, then choose Allow Dashboard… in Overview to list it here.")
+                Text("On the Mac to show, choose Settings… from the XcodeHomeRunner menu, then choose Allow Dashboard… under Dashboards to list it here.")
             }
         }
     }

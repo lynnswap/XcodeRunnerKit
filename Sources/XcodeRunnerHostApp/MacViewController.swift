@@ -84,7 +84,7 @@ private struct RunnerServicesSection: View {
             if let name = model.mac.name {
                 Text("Processes on \(name).")
             } else {
-                Text("Processes on this Mac. Overview shows each repository's connection and job counts from GitHub.")
+                Text("Processes on this Mac. Settings shows each repository's connection and job counts from GitHub.")
             }
         }
     }

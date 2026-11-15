@@ -125,7 +125,7 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         showHostStates()
     }
 
-    /// Shows each listed host's state and jobs on its item, as its Overview shows them.
+    /// Shows each listed host's state and jobs on its item, as its Settings pane shows them.
     private func showHostStates() {
         for item in statusMenu.items {
             guard let host = item.representedObject as? HostPairing.ID else { continue }
@@ -147,7 +147,7 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         showWindow(nil)
     }
 
-    /// Opens the window on the Overview of the host that the person chose in the menu bar item's menu.
+    /// Opens the window on the settings of the host that the person chose in the menu bar item's menu.
     @objc private func showHost(_ sender: NSMenuItem) {
         guard let host = sender.representedObject as? HostPairing.ID else { return }
         showWindow(nil)
@@ -274,8 +274,8 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
 
 /// A pane in the dashboard window's sidebar, for one of the hosts.
 enum DashboardPane: Hashable {
+    /// The host's role, status, GitHub sign-in, repositories, and pairings.
     case overview(HostPairing.ID)
-    case github(HostPairing.ID)
     /// The host's runner services and execution settings.
     case mac(HostPairing.ID)
     /// A Mac that the host manages, which the dashboard reaches through the host.
@@ -283,7 +283,7 @@ enum DashboardPane: Hashable {
 
     var host: HostPairing.ID {
         switch self {
-        case .overview(let host), .github(let host), .mac(let host), .managedMac(_, let host): host
+        case .overview(let host), .mac(let host), .managedMac(_, let host): host
         }
     }
 }
@@ -295,7 +295,7 @@ final class DashboardWindowModel: PaneWindowModel {
     /// The pane that the person selected. One stays selected while a host is shown.
     var pane: DashboardPane?
 
-    /// - Parameter pane: The pane to show first, or `nil` for the first host's Overview.
+    /// - Parameter pane: The pane to show first, or `nil` for the first host's Settings.
     init(hosts: PairedMacs, pane: DashboardPane? = nil) {
         self.hosts = hosts
         self.pane = pane ?? hosts.macs.first.map { .overview($0.id) }
@@ -304,34 +304,38 @@ final class DashboardWindowModel: PaneWindowModel {
     /// The selected pane, while the dashboard still shows its host. A pane leaves with its host.
     var shownPane: DashboardPane? { pane.flatMap { hosts.mac($0.host) == nil ? nil : $0 } }
 
+    /// A host's settings are those of everything that it manages, and the Macs that run its jobs follow under
+    /// Runners, the host among them, as in the host's own window. Several hosts are told apart by their names.
     var sidebarGroups: [SidebarGroup] {
-        hosts.macs.map { host in
+        let namesHosts = hosts.macs.count > 1
+        return hosts.macs.flatMap { host in
             // What the host last answered names its state, and its connection does while it does not answer.
             let answer = hosts.answer(of: host.id)
             let connection = hosts.status(of: host.id)
             let managed = hosts.macsManaged(by: host.id)
-            return SidebarGroup(title: host.name, rows: [
-                SidebarRow(
-                    pane: DashboardPane.overview(host.id), title: "Overview", subtitle: answer?.report.stateTitle ?? connection.title,
-                    icon: HostPane.overview.icon,
-                    status: answer.map { .init(symbol: $0.report.stateSymbol, color: $0.report.stateTint) }
-                        ?? .init(symbol: connection.systemImage, color: connection.tint)
-                ),
-                SidebarRow(
-                    pane: DashboardPane.github(host.id), title: "GitHub",
-                    subtitle: answer.map { $0.github.accountLogin ?? "Not connected" }, icon: HostPane.github.icon
-                ),
-                SidebarRow(
-                    pane: DashboardPane.mac(host.id), title: host.name, subtitle: answer?.report.runnerCountTitle, icon: HostPane.mac.icon
-                ),
-            ] + managed.listedMacs.map { mac in
-                // The host's list of Macs is as old as its last answer, so their states are not shown without one.
-                let status = answer == nil ? nil : managed.status(of: mac.id)
-                return SidebarRow(
-                    pane: DashboardPane.managedMac(mac.id, host: host.id), title: mac.name, subtitle: status?.title,
-                    icon: HostPane.mac.icon, status: status.map { .init(symbol: $0.systemImage, color: $0.tint) }
-                )
-            })
+            return [
+                SidebarGroup(title: namesHosts ? host.name : nil, rows: [
+                    SidebarRow(
+                        pane: DashboardPane.overview(host.id), title: "Settings",
+                        subtitle: answer?.report.stateTitle ?? connection.title, icon: HostPane.overview.icon,
+                        status: answer.map { .init(symbol: $0.report.stateSymbol, color: $0.report.stateTint) }
+                            ?? .init(symbol: connection.systemImage, color: connection.tint)
+                    ),
+                ]),
+                SidebarGroup(title: namesHosts ? "\(host.name) Runners" : "Runners", rows: [
+                    SidebarRow(
+                        pane: DashboardPane.mac(host.id), title: host.name, subtitle: answer?.report.runnerCountTitle,
+                        icon: HostPane.mac.icon
+                    ),
+                ] + managed.listedMacs.map { mac in
+                    // The host's list of Macs is as old as its last answer, so their states are not shown without one.
+                    let status = answer == nil ? nil : managed.status(of: mac.id)
+                    return SidebarRow(
+                        pane: DashboardPane.managedMac(mac.id, host: host.id), title: mac.name, subtitle: status?.title,
+                        icon: HostPane.mac.icon, status: status.map { .init(symbol: $0.systemImage, color: $0.tint) }
+                    )
+                }),
+            ]
         }
     }
 
@@ -345,8 +349,7 @@ final class DashboardWindowModel: PaneWindowModel {
     var title: String {
         guard let pane = shownPane, let host = hosts.mac(pane.host) else { return "Dashboard" }
         return switch pane {
-        case .overview: "Overview"
-        case .github: "GitHub"
+        case .overview: "Settings"
         case .mac: host.name
         case .managedMac(let id, _): hosts.macsManaged(by: host.id).listedMacs.first { $0.id == id }?.name ?? "Mac"
         }
@@ -372,11 +375,9 @@ final class DashboardSplitViewController: PaneSplitViewController {
         }
         switch pane {
         case .overview:
-            return OverviewViewController(model: OverviewModel(
-                hosts: hosts, host: host, showGitHub: { [model] in model.pane = .github(host.id) },
-                addMac: { [weak self] in self?.addMac(managedBy: host.id) }
-            ))
-        case .github: return GitHubViewController(model: GitHubPaneModel(hosts: hosts, host: host))
+            return OverviewViewController(model: OverviewModel(hosts: hosts, host: host) { [weak self] in
+                self?.addMac(managedBy: host.id)
+            })
         case .mac:
             // The host registers runners for a changed limit itself.
             return MacViewController(model: MacPaneModel(macs: hosts, id: host.id) { [hosts, model] in
@@ -442,9 +443,6 @@ struct NoMacsView: View {
 
 #if DEBUG
 #Preview("Dashboard") { HostPreview.dashboard(hasHost: true) }
-#Preview("Dashboard GitHub") {
-    HostPreview.dashboard(hasHost: true, pane: { .github($0) })
-}
 #Preview("Dashboard Mac") {
     HostPreview.dashboard(hasHost: true, pane: { .mac($0) })
 }

@@ -1,7 +1,8 @@
 import Foundation
 import Observation
 
-/// What the Overview pane shows and does for a Mac: this Mac in its own window, or a host on a dashboard.
+/// What the Settings pane shows and does for a Mac: this Mac in its own window, or a host on a dashboard. It has the
+/// Mac's roles, status, GitHub sign-in, repositories, and pairings.
 @MainActor @Observable
 final class OverviewModel {
     private enum Source {
@@ -10,27 +11,19 @@ final class OverviewModel {
     }
 
     private let source: Source
-    private let showGitHub: @MainActor () -> Void
     private let pairManagedMac: @MainActor () -> Void
 
-    /// - Parameters:
-    ///   - showGitHub: Shows the GitHub pane, where the sign-in code and the repository selection are.
-    ///   - addMac: Pairs this Mac with a Mac for it to manage.
-    init(settings: HostSettingsModel, showGitHub: @escaping @MainActor () -> Void, addMac: @escaping @MainActor () -> Void) {
+    /// - Parameter addMac: Pairs this Mac with a Mac for it to manage.
+    init(settings: HostSettingsModel, addMac: @escaping @MainActor () -> Void) {
         source = .thisMac(settings)
-        self.showGitHub = showGitHub
         pairManagedMac = addMac
     }
 
     /// - Parameters:
     ///   - host: A host that the dashboard shows.
-    ///   - showGitHub: Shows the host's GitHub pane.
     ///   - addMac: Pairs the host with a Mac for it to manage.
-    init(
-        hosts: PairedMacs, host: PairedMac, showGitHub: @escaping @MainActor () -> Void, addMac: @escaping @MainActor () -> Void
-    ) {
+    init(hosts: PairedMacs, host: PairedMac, addMac: @escaping @MainActor () -> Void) {
         source = .host(hosts, host)
-        self.showGitHub = showGitHub
         pairManagedMac = addMac
     }
 
@@ -70,16 +63,64 @@ final class OverviewModel {
         return [answer.settings.githubError, hosts.macsManaged(by: host.id).message].compactMap { $0 }
     }
 
-    /// Shows the GitHub pane and starts the sign-in, whose code appears there.
-    func connectGitHub() {
-        showGitHub()
+    // MARK: GitHub
+
+    /// The repository selection being edited.
+    var selection: Set<Int> {
+        get {
+            switch source {
+            case .thisMac(let settings): settings.github.selectedRepositoryIDs
+            case .host(let hosts, let host): hosts.settings(of: host.id)?.selectedRepositoryIDs ?? []
+            }
+        }
+        set {
+            switch source {
+            case .thisMac(let settings): settings.github.selectedRepositoryIDs = newValue
+            case .host(let hosts, let host): hosts.settings(of: host.id)?.selectedRepositoryIDs = newValue
+            }
+        }
+    }
+
+    /// Whether the GitHub controls wait: for a host to answer a request, or for this Mac to apply a job limit, which
+    /// changes the runners that it registers.
+    var isWaitingForGitHub: Bool {
+        switch source {
+        case .thisMac(let settings): settings.isSaving
+        case .host(let hosts, let host): hosts.settings(of: host.id)?.isChangingGitHub ?? false
+        }
+    }
+
+    /// Whether the selection can be applied now: it differs from the saved one, or registering runners for the saved
+    /// one failed, which applying it again retries.
+    var canApplySelection: Bool {
+        guard let github, !github.isBusy, !github.isLoadingRepositories else { return false }
+        return selection != github.savedRepositoryIDs || github.errorMessage != nil
+            || github.runnerStatuses.contains { $0.errorMessage != nil }
+    }
+
+    /// Starts the sign-in, whose code the pane then shows.
+    func signIn() {
         switch source {
         case .thisMac(let settings): settings.github.signIn()
         case .host(let hosts, let host): Task { await hosts.signIn(to: host.id) }
         }
     }
 
-    /// Opens the page that chooses the GitHub App's repositories.
+    func cancelSignIn() {
+        switch source {
+        case .thisMac(let settings): settings.github.cancelConnection()
+        case .host(let hosts, let host): Task { await hosts.cancelSignIn(to: host.id) }
+        }
+    }
+
+    func signOut() {
+        switch source {
+        case .thisMac(let settings): Task { await settings.github.signOut() }
+        case .host(let hosts, let host): Task { await hosts.signOut(of: host.id) }
+        }
+    }
+
+    /// Opens the page that chooses the GitHub App's repositories. A host's page opens in this Mac's browser.
     func addRepositories() {
         switch source {
         case .thisMac(let settings): settings.github.installApp()
@@ -94,7 +135,12 @@ final class OverviewModel {
         }
     }
 
-    func chooseRepositories() { showGitHub() }
+    func applySelection() {
+        switch source {
+        case .thisMac(let settings): Task { await settings.github.applyRepositorySelection() }
+        case .host(let hosts, let host): Task { await hosts.applyRepositorySelection(of: host.id) }
+        }
+    }
 
     // MARK: Other Macs
 
@@ -122,9 +168,49 @@ final class OverviewModel {
         if case .thisMac(let settings) = source { settings.management } else { nil }
     }
 
-    /// Whether another Mac can manage this Mac, which then manages no Macs itself.
-    var canAllowManagement: Bool {
-        if case .thisMac(let settings) = source { settings.canAllowManagement } else { false }
+    // MARK: Roles
+
+    /// Whether this Mac is a host, which signs in to GitHub and registers runners for itself and the Macs that it
+    /// manages. It is none once a host on another Mac manages it, or while it waits for one. A host on a dashboard
+    /// has no roles here, because they are changed on that Mac.
+    var isHost: Bool? {
+        guard let management else { return nil }
+        return management.manager == nil && management.pairingWindow?.role != .manager
+    }
+
+    /// Whether this Mac can stop being a host now. A Mac that manages Macs cannot, and one wait for a Mac runs at a
+    /// time.
+    var canStopHosting: Bool {
+        guard case .thisMac(let settings) = source else { return false }
+        return settings.canAllowManagement && settings.management.pairingWindow == nil
+    }
+
+    /// Waits for a host on another Mac to pair with this Mac and manage it.
+    func stopHosting() {
+        guard canStopHosting else { return }
+        management?.allowManagement()
+    }
+
+    /// Makes this Mac a host again: it stops waiting for a host, or ends its management by one.
+    func becomeHost() {
+        guard let management else { return }
+        if management.manager != nil { management.stopManagement() } else { management.cancelPairing() }
+    }
+
+    /// Whether this Mac is a runner, which takes jobs. A host that is none still registers the runners of the Macs
+    /// that it manages.
+    var isRunner: Bool? {
+        if case .thisMac(let settings) = source { !settings.isPaused } else { nil }
+    }
+
+    /// Resumes or pauses this Mac, which starts or stops its runner services without changing their registrations.
+    func setRunner(_ isRunner: Bool) {
+        if case .thisMac(let settings) = source { settings.setPaused(!isRunner) }
+    }
+
+    /// Why this Mac did not pause or resume.
+    var runnerError: String? {
+        if case .thisMac(let settings) = source { settings.pauseError } else { nil }
     }
 
     /// What this Mac's last changes to the Macs that it manages left to tell.
