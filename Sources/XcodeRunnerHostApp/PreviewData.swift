@@ -223,7 +223,7 @@ enum HostPreview {
         let hosts = PairedMacs(store: store, name: HostPane.macName, role: .dashboard, browses: false)
         if hasHost, !notFound { connect(host, to: hosts, stopsAnswering: false, managing: hostManagedMac) }
         return DashboardSplitViewController(
-            model: DashboardWindowModel(hosts: hosts, pane: hasHost ? pane(host.id) : nil), addMacMenu: NSMenu(title: "Add Mac")
+            model: DashboardWindowModel(hosts: hosts, pane: hasHost ? pane(host.id) : nil)
         )
     }
 }

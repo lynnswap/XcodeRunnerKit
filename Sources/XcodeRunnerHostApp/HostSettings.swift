@@ -111,6 +111,9 @@ struct PoolSettingsDraft: Equatable {
         base = next
     }
 
+    /// Whether an input differs from the saved settings.
+    var isEdited: Bool { capacityInput != String(base.maximumConcurrentJobs) || !shows(base.simulatorRetention) }
+
     /// Shows the settings that Apply saved in every input.
     mutating func reset(to saved: HostExecutionPool.Configuration) {
         capacityInput = String(saved.maximumConcurrentJobs)

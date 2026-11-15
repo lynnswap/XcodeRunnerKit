@@ -44,7 +44,7 @@ struct GitHubPaneView: View {
                 LabeledContent("Connected account") {
                     HStack {
                         Text(login)
-                        Button("Disconnect") { model.signOut() }
+                        Button("Disconnect", role: .destructive) { model.signOut() }
                             .disabled(!github.canDisconnect)
                     }
                 }

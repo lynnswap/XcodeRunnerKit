@@ -43,7 +43,7 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
     private func showWindow(_ sender: Any?) {
         if windowController == nil {
             windowController = makePaneWindowController(
-                content: DashboardSplitViewController(model: DashboardWindowModel(hosts: hosts), addMacMenu: makeAddMacMenu()),
+                content: DashboardSplitViewController(model: DashboardWindowModel(hosts: hosts)),
                 autosaveName: "XcodeHomeRunnerDashboard"
             )
         }
@@ -55,8 +55,8 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         NSWorkspace.shared.open(URL(string: "https://github.com/lynnswap/XcodeRunnerKit/blob/main/Documentation/NativeHost.md")!)
     }
 
-    /// The menus that people expect in the menu bar, in their usual order. Every command of the window's toolbar is
-    /// here too, because a toolbar can be hidden. The menu bar host has no menu bar of its own.
+    /// The menus that people expect in the menu bar, in their usual order, with the commands that pair with Macs. The
+    /// menu bar host has no menu bar of its own.
     private func installMainMenu() {
         let application = NSApplication.shared
         let main = NSMenu()
@@ -125,7 +125,7 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         application.mainMenu = main
     }
 
-    /// The Add Mac menu of the toolbar and of the File menu. It lists the commands for the hosts shown when it opens.
+    /// The File menu's Add Mac menu. It lists the commands for the hosts shown when it opens.
     private func makeAddMacMenu() -> NSMenu {
         let menu = NSMenu(title: "Add Mac")
         menu.delegate = self
@@ -230,18 +230,14 @@ final class DashboardWindowModel: PaneWindowModel {
     }
 }
 
-/// The dashboard window's content: the paired hosts and their panes in a sidebar beside the selected pane, with Add Mac
-/// in the toolbar.
+/// The dashboard window's content: the paired hosts and their panes in a sidebar beside the selected pane.
 @MainActor
 final class DashboardSplitViewController: PaneSplitViewController {
     private let model: DashboardWindowModel
     private var hosts: PairedMacs { model.hosts }
-    private let toolbarMenu: NSMenu
 
-    /// - Parameter addMacMenu: The Add Mac toolbar item's choices, which the menu's delegate fills when it opens.
-    init(model: DashboardWindowModel, addMacMenu: NSMenu) {
+    init(model: DashboardWindowModel) {
         self.model = model
-        toolbarMenu = addMacMenu
         super.init(model: model, autosaveName: "XcodeHomeRunnerDashboard")
     }
 
@@ -253,7 +249,10 @@ final class DashboardSplitViewController: PaneSplitViewController {
         }
         switch pane {
         case .overview:
-            return OverviewViewController(model: OverviewModel(hosts: hosts, host: host) { [model] in model.pane = .github(host.id) })
+            return OverviewViewController(model: OverviewModel(
+                hosts: hosts, host: host, showGitHub: { [model] in model.pane = .github(host.id) },
+                addMac: { [weak self] in self?.addMac(managedBy: host.id) }
+            ))
         case .github: return GitHubViewController(model: GitHubPaneModel(hosts: hosts, host: host))
         case .mac:
             // The host registers runners for a changed limit itself.
@@ -268,12 +267,6 @@ final class DashboardSplitViewController: PaneSplitViewController {
             ))
         }
     }
-
-    override var addMacToolTip: String {
-        "Pair with a Mac that runs XcodeHomeRunner to show it here, or pair one of the Macs shown here with a Mac for it to manage."
-    }
-
-    override var addMacMenu: NSMenu? { toolbarMenu }
 
     /// Pairs this dashboard with a Mac that runs a host, and shows that host.
     @objc func showMacOnDashboard(_ sender: Any?) {

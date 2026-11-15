@@ -60,8 +60,7 @@ final class HostWindowModel: PaneWindowModel {
     var title: String { pane.title(in: settings) }
 }
 
-/// The host window's content: this Mac's panes and the Macs that it manages in a sidebar beside the selected pane, with
-/// Add Mac in the toolbar.
+/// The host window's content: this Mac's panes and the Macs that it manages in a sidebar beside the selected pane.
 @MainActor
 final class HostSplitViewController: PaneSplitViewController {
     private let model: HostWindowModel
@@ -77,7 +76,9 @@ final class HostSplitViewController: PaneSplitViewController {
     override func makePaneViewController() -> NSViewController {
         switch model.pane {
         case .overview:
-            OverviewViewController(model: OverviewModel(settings: settings) { [model] in model.pane = .github })
+            OverviewViewController(model: OverviewModel(
+                settings: settings, showGitHub: { [model] in model.pane = .github }, addMac: { [weak self] in self?.addMac() }
+            ))
         case .github: GitHubViewController(model: GitHubPaneModel(settings: settings))
         case .mac: MacViewController(model: MacPaneModel(settings: settings))
         case .managedMac(let id):
@@ -90,14 +91,9 @@ final class HostSplitViewController: PaneSplitViewController {
         }
     }
 
-    override var addMacToolTip: String {
-        "Pair a Mac on the local network so that this Mac manages its runners. A Mac that another Mac manages cannot add Macs."
-    }
-
-    override var canAddMac: Bool { super.canAddMac && settings.canAddMacs }
-
-    override func addMac(_ sender: Any?) {
-        guard canAddMac else { return }
+    /// Pairs this Mac with a Mac on the local network for it to manage, and shows that Mac.
+    private func addMac() {
+        guard !isAddingMac, settings.canAddMacs else { return }
         presentAddMacSheet(for: settings.managedMacs) { [model] mac in model.pane = .managedMac(mac.id) }
     }
 }
@@ -128,22 +124,19 @@ func makeHostWindowController(settings: HostSettingsModel) -> NSWindowController
     HostPreview.hostWindow(pane: .overview, isSignedIn: true, isPaused: true)
 }
 #Preview("Waiting to Pair") {
-    HostPreview.hostWindow(pane: .mac, isSignedIn: true, pairing: .waitingToPair)
+    HostPreview.hostWindow(pane: .overview, isSignedIn: true, pairing: .waitingToPair)
 }
 #Preview("Pairing Request") {
-    HostPreview.hostWindow(pane: .mac, isSignedIn: true, pairing: .asked(by: "Mac mini"))
+    HostPreview.hostWindow(pane: .overview, isSignedIn: true, pairing: .asked(by: "Mac mini"))
 }
 #Preview("Managed by Another Mac") {
-    HostPreview.hostWindow(pane: .mac, isSignedIn: true, pairing: .managed(by: "Mac mini"))
+    HostPreview.hostWindow(pane: .overview, isSignedIn: true, pairing: .managed(by: "Mac mini"))
 }
 #Preview("Shown on Dashboards") {
-    HostPreview.hostWindow(pane: .mac, isSignedIn: true, pairing: .shown(on: ["MacBook Pro", "Mac Studio"]))
+    HostPreview.hostWindow(pane: .overview, isSignedIn: true, pairing: .shown(on: ["MacBook Pro", "Mac Studio"]))
 }
 #Preview("Dashboard Pairing Request") {
-    HostPreview.hostWindow(pane: .mac, isSignedIn: true, pairing: .askedToShow(by: "MacBook Pro"))
-}
-#Preview("Overview Managed by Another Mac") {
-    HostPreview.hostWindow(pane: .overview, isSignedIn: true, pairing: .managed(by: "Mac mini"))
+    HostPreview.hostWindow(pane: .overview, isSignedIn: true, pairing: .askedToShow(by: "MacBook Pro"))
 }
 #Preview("Managed Mac") {
     HostPreview.hostWindow(

@@ -116,16 +116,6 @@ final class MacPaneModel {
         }
     }
 
-    // MARK: Pairing
-
-    /// This Mac's pairings with the Macs that manage and show it. Another Mac's pairings are changed on that Mac.
-    var management: HostManagement? { thisMac?.management }
-    /// Whether another Mac can manage this Mac, which then manages no Macs itself.
-    var canAllowManagement: Bool { thisMac?.canAllowManagement ?? false }
-    var managedMacCount: Int { thisMac?.managedMacs.macs.count ?? 0 }
-    /// What this Mac's last changes to the Macs that it manages left to tell.
-    var managedMacsMessage: String? { thisMac?.managedMacs.message }
-
     // MARK: Runner services
 
     var isChangingPause: Bool { paired?.isChangingPause ?? false }
@@ -152,6 +142,11 @@ final class MacPaneModel {
     }
 
     var isSavingRunnerLabels: Bool { thisMac?.isSavingRunnerLabels ?? paired?.isSavingRunnerLabels ?? false }
+    /// Whether the edited labels differ from the saved ones.
+    var canSaveRunnerLabels: Bool {
+        guard let report, !isSavingRunnerLabels else { return false }
+        return RunnerLabels.parse(runnerLabelsInput) != report.runnerLabels
+    }
     var runnerLabelsError: String? { thisMac?.runnerLabelsError ?? paired?.runnerLabelsError }
 
     func saveRunnerLabels() {
@@ -175,7 +170,11 @@ final class MacPaneModel {
     }
 
     var isApplyingPoolConfiguration: Bool { thisMac?.isSaving ?? paired?.isSaving ?? false }
-    var canApplyPoolConfiguration: Bool { thisMac?.canApplyPoolConfiguration ?? paired?.canApplyPoolConfiguration ?? false }
+    /// Whether the edited settings differ from the saved ones, or the pool has none saved and takes the ones shown.
+    var canApplyPoolConfiguration: Bool {
+        guard let report, thisMac?.canApplyPoolConfiguration ?? paired?.canApplyPoolConfiguration ?? false else { return false }
+        return report.isNewPool || poolDraft.isEdited
+    }
     var poolConfigurationError: String? { thisMac?.saveError ?? paired?.saveError }
 
     func applyPoolConfiguration() {
@@ -263,6 +262,11 @@ final class MacPaneModel {
     }
 
     var isSavingStorage: Bool { thisMac?.isSavingStorage ?? paired?.isSavingStorage ?? false }
+    var canEditStorageDirectory: Bool { report?.canEditStorage == true && !isSavingStorage }
+    /// Whether the edited folder differs from the saved one.
+    var canSaveStorageDirectory: Bool {
+        canEditStorageDirectory && storageDirectoryInput != report?.savedStorageDirectory?.path(percentEncoded: false) ?? ""
+    }
     var storageSaveError: String? { thisMac?.storageSaveError ?? paired?.storageSaveError }
     /// Whether a folder panel can choose the folder. Another Mac's folders are not shown in a panel on this Mac.
     var canChooseStorageDirectory: Bool { thisMac != nil }

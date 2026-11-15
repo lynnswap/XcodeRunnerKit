@@ -209,12 +209,11 @@ final class PaneContainerViewController: NSViewController {
 }
 
 /// A window's content: a sidebar of panes beside the selected pane. It gives its window the toolbar that hides the
-/// sidebar and adds Macs, so that every window that shows it has one, a preview's window included.
+/// sidebar, so that every window that shows it has one, a preview's window included.
 ///
 /// A subclass makes the view controllers of its window's panes and pairs with Macs.
 @MainActor
-class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSToolbarItemValidation {
-    private static let addMacIdentifier = NSToolbarItem.Identifier("AddMac")
+class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate {
     private let windowModel: any PaneWindowModel
     private let detail = PaneContainerViewController()
     private let autosaveName: String
@@ -255,16 +254,6 @@ class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSToolb
         detail.show(makePaneViewController())
     }
 
-    /// What the Add Mac toolbar item's help tag says about the Macs that the window adds.
-    var addMacToolTip: String { "" }
-    /// The Add Mac toolbar item's choices, in a window that adds more than one kind of Mac. The menu's delegate fills
-    /// it when it opens.
-    var addMacMenu: NSMenu? { nil }
-    var canAddMac: Bool { !isAddingMac }
-
-    /// Pairs with a Mac, in a window whose Add Mac toolbar item has no menu.
-    @objc func addMac(_ sender: Any?) {}
-
     /// Whether the sheet that pairs with a Mac is open. One sheet pairs at a time.
     var isAddingMac: Bool { presentedViewControllers?.contains { $0 is AddMacViewController } == true }
 
@@ -299,36 +288,11 @@ class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSToolb
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, Self.addMacIdentifier]
+        [.toggleSidebar, .sidebarTrackingSeparator]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         toolbarDefaultItemIdentifiers(toolbar)
-    }
-
-    func toolbar(
-        _ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool
-    ) -> NSToolbarItem? {
-        guard itemIdentifier == Self.addMacIdentifier else { return nil }
-        let item: NSToolbarItem
-        if let menu = addMacMenu {
-            let menuItem = NSMenuToolbarItem(itemIdentifier: itemIdentifier)
-            menuItem.menu = menu
-            menuItem.showsIndicator = true
-            item = menuItem
-        } else {
-            item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.target = self
-            item.action = #selector(addMac(_:))
-        }
-        item.label = "Add Mac"
-        item.toolTip = addMacToolTip
-        item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Mac")
-        return item
-    }
-
-    func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
-        item.itemIdentifier != Self.addMacIdentifier || canAddMac
     }
 }
 
