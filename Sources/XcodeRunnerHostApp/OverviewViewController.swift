@@ -30,7 +30,10 @@ struct OverviewView: View {
                 // The host of a managed Mac selects the repositories and manages the other Macs.
                 Group {
                     account(github)
-                    if github.accountLogin != nil, github.managerName == nil { repositories(github) }
+                    // Runners that the Mac registered stay listed after its sign-in ends.
+                    if github.managerName == nil, github.accountLogin != nil || !github.runnerStatuses.isEmpty {
+                        repositories(github)
+                    }
                 }
                 .disabled(model.isWaitingForGitHub)
                 if github.managerName == nil { managedMacs }
@@ -81,7 +84,7 @@ struct OverviewView: View {
                     .disabled(github.isBusy)
                     .accessibilityIdentifier("github-sign-in")
             }
-            // Without an account, and on a managed Mac, the repositories' section, which shows this otherwise, is hidden.
+            // The repositories' section shows this on a Mac that is signed in and selects its repositories.
             if github.accountLogin == nil || github.managerName != nil, let error = github.errorMessage { ErrorText(error) }
         } header: {
             Text("GitHub")
@@ -93,8 +96,9 @@ struct OverviewView: View {
     }
 
     /// The repositories that the app is installed on, each with its runners once it is selected, and the ones whose
-    /// runners are still to be removed.
+    /// runners are still to be removed. Without a sign-in it lists only the runners that the Mac registered.
     private func repositories(_ github: GitHubReport) -> some View {
+        let isSignedIn = github.accountLogin != nil
         let statuses = Dictionary(github.runnerStatuses.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let listed = Set(github.selectableRepositories.map(\.id))
         return Section {
@@ -108,7 +112,7 @@ struct OverviewView: View {
                     Text(repository.fullName)
                     if let status = statuses[repository.id] { runners(status) }
                 }
-                .disabled(github.isBusy)
+                .disabled(github.isBusy || !isSignedIn)
             }
             // A repository that the app can no longer reach has no switch, and its runners are listed all the same.
             ForEach(github.runnerStatuses.filter { !listed.contains($0.id) }) { status in
@@ -117,22 +121,24 @@ struct OverviewView: View {
                     runners(status)
                 }
             }
-            if !github.isLoadingRepositories, !github.hasListedRepositories {
+            if isSignedIn, !github.isLoadingRepositories, !github.hasListedRepositories {
                 Text("To list a repository here, choose Add Repositories on GitHub…, install the app on it, then reload the list.")
                     .foregroundStyle(.secondary)
             }
             if github.isSynchronizing { ProgressView("Synchronizing runner registrations…") }
-            if let error = github.errorMessage { ErrorText(error) }
-            HStack {
-                if model.selection != github.savedRepositoryIDs {
-                    Text("Unapplied changes").foregroundStyle(.secondary)
+            if isSignedIn, let error = github.errorMessage { ErrorText(error) }
+            if isSignedIn {
+                HStack {
+                    if model.selection != github.savedRepositoryIDs {
+                        Text("Unapplied changes").foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Add Repositories on GitHub…") { model.addRepositories() }
+                        .disabled(github.isBusy)
+                    Button(github.isSavingSelection ? "Applying…" : "Apply") { model.applySelection() }
+                        .disabled(!model.canApplySelection)
+                        .accessibilityIdentifier("apply-repository-selection")
                 }
-                Spacer()
-                Button("Add Repositories on GitHub…") { model.addRepositories() }
-                    .disabled(github.isBusy)
-                Button(github.isSavingSelection ? "Applying…" : "Apply") { model.applySelection() }
-                    .disabled(!model.canApplySelection)
-                    .accessibilityIdentifier("apply-repository-selection")
             }
         } header: {
             HStack {
@@ -144,7 +150,7 @@ struct OverviewView: View {
                         .controlSize(.mini)
                         .accessibilityLabel("Loading repositories")
                         .transition(.opacity)
-                } else {
+                } else if isSignedIn {
                     Button("Reload", systemImage: "arrow.clockwise") { model.reloadRepositories() }
                         .labelStyle(.iconOnly)
                         .buttonStyle(.borderless)
