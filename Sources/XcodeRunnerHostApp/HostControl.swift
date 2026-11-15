@@ -235,7 +235,9 @@ struct HostControl: AsyncParsableCommand {
                 abstract: "Print the sign-in, the repositories, and their runners as JSON."
             )
 
-            func run() async throws { try await HostControl.perform(.github(.read)) }
+            @OptionGroup var host: HostOption
+
+            func run() async throws { try await HostControl.perform(.github(.read), on: host.host) }
         }
 
         struct Connect: AsyncParsableCommand {
@@ -250,11 +252,13 @@ struct HostControl: AsyncParsableCommand {
 
             @Flag(help: "Print the code, then wait until the sign-in has ended and print the result.")
             var wait = false
+            @OptionGroup var host: HostOption
 
             func run() async throws {
                 // The window offers no sign-in while an account is connected, and a sign-in that failed then would
                 // leave that account in place of a result.
-                let current = try await HostControl.github()
+                let host = host.host
+                let current = try await HostControl.github(on: host)
                 // Until the host has read its saved sign-in, it shows no account although it may have one.
                 guard current.hasRestored else {
                     throw HostSettingsError("The host has not read its saved GitHub sign-in yet. Try again in a moment.")
@@ -262,13 +266,13 @@ struct HostControl: AsyncParsableCommand {
                 if let login = current.accountLogin {
                     throw HostSettingsError("The host is connected to GitHub as \(login). Disconnect it before connecting again.")
                 }
-                guard case .github(var report) = try await HostControl.reply(to: .github(.signIn)) else {
+                guard case .github(var report) = try await HostControl.reply(to: .github(.signIn), on: host) else {
                     throw HostControl.unexpectedAnswer
                 }
                 // The host answers before GitHub issues the code, so that a dashboard can cancel meanwhile.
                 while report.isConnecting, report.signInCode == nil {
                     try await Task.sleep(for: .milliseconds(500))
-                    report = try await HostControl.github()
+                    report = try await HostControl.github(on: host)
                 }
                 try HostControl.write(report)
                 guard report.signInCode != nil else {
@@ -277,7 +281,7 @@ struct HostControl: AsyncParsableCommand {
                 guard wait else { return }
                 while report.isConnecting {
                     try await Task.sleep(for: .seconds(2))
-                    report = try await HostControl.github()
+                    report = try await HostControl.github(on: host)
                 }
                 try HostControl.write(report)
                 guard report.accountLogin != nil else {
@@ -289,7 +293,9 @@ struct HostControl: AsyncParsableCommand {
         struct Cancel: AsyncParsableCommand {
             static let configuration = CommandConfiguration(abstract: "End a sign-in that waits for its code.")
 
-            func run() async throws { try await HostControl.perform(.github(.cancelSignIn)) }
+            @OptionGroup var host: HostOption
+
+            func run() async throws { try await HostControl.perform(.github(.cancelSignIn), on: host.host) }
         }
 
         struct Disconnect: AsyncParsableCommand {
@@ -297,7 +303,9 @@ struct HostControl: AsyncParsableCommand {
                 abstract: "Sign the host out of GitHub. Its runners stay registered until it is connected again."
             )
 
-            func run() async throws { try await HostControl.change(.signOut) }
+            @OptionGroup var host: HostOption
+
+            func run() async throws { try await HostControl.change(.signOut, on: host.host) }
         }
 
         struct Reload: AsyncParsableCommand {
@@ -305,7 +313,9 @@ struct HostControl: AsyncParsableCommand {
                 abstract: "Read again which repositories the GitHub App is installed on."
             )
 
-            func run() async throws { try await HostControl.change(.reloadRepositories) }
+            @OptionGroup var host: HostOption
+
+            func run() async throws { try await HostControl.change(.reloadRepositories, on: host.host) }
         }
     }
 
@@ -314,7 +324,10 @@ struct HostControl: AsyncParsableCommand {
             abstract: "Print the host's state, jobs, runners, and settings as JSON."
         )
 
-        func run() async throws { try await HostControl.perform(.settings(.read)) }
+        @OptionGroup var host: HostOption
+        @OptionGroup var mac: MacOption
+
+        func run() async throws { try await HostControl.perform(.read, host: host.host, mac: mac.mac) }
     }
 
     struct Pause: AsyncParsableCommand {
@@ -322,13 +335,19 @@ struct HostControl: AsyncParsableCommand {
             abstract: "Take no new jobs. Runner services stop after the jobs that they run."
         )
 
-        func run() async throws { try await HostControl.perform(.settings(.setPaused(true))) }
+        @OptionGroup var host: HostOption
+        @OptionGroup var mac: MacOption
+
+        func run() async throws { try await HostControl.perform(.setPaused(true), host: host.host, mac: mac.mac) }
     }
 
     struct Resume: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Take jobs again after a pause.")
 
-        func run() async throws { try await HostControl.perform(.settings(.setPaused(false))) }
+        @OptionGroup var host: HostOption
+        @OptionGroup var mac: MacOption
+
+        func run() async throws { try await HostControl.perform(.setPaused(false), host: host.host, mac: mac.mac) }
     }
 
     struct Restart: AsyncParsableCommand {
@@ -336,14 +355,16 @@ struct HostControl: AsyncParsableCommand {
             abstract: "Stop the host and start it again. Its runner services stop with the jobs that they run."
         )
 
-        @Flag(help: "Restart although Xcode jobs run on this Mac. The jobs of its runners end.")
+        @Flag(help: "Restart although Xcode jobs run on the Mac. The jobs of its runners end.")
         var stopJobs = false
+        @OptionGroup var host: HostOption
+        @OptionGroup var mac: MacOption
 
         func run() async throws {
             // The window names the running jobs before a person confirms, and a command is refused in their place.
             // The count is the host's last, as it is in the window: a job can start after it.
-            if !stopJobs, case .settings(let report) = try await HostControl.reply(to: .settings(.read)) {
-                let running = report.poolStatus?.activeJobCount
+            if !stopJobs {
+                let running = try await HostControl.settings(host: host.host, mac: mac.mac)?.poolStatus?.activeJobCount
                 guard running == 0 else {
                     let jobs = switch running {
                     case nil: "The host has not counted the Xcode jobs"
@@ -351,11 +372,11 @@ struct HostControl: AsyncParsableCommand {
                     case let count?: "\(count) Xcode jobs run"
                     }
                     throw HostSettingsError(
-                        "\(jobs) on this Mac. Restarting ends the jobs of its runners: wait for them, or pass --stop-jobs."
+                        "\(jobs) on the Mac. Restarting ends the jobs of its runners: wait for them, or pass --stop-jobs."
                     )
                 }
             }
-            try await HostControl.perform(.settings(.restart))
+            try await HostControl.perform(.restart, host: host.host, mac: mac.mac)
         }
     }
 
@@ -368,6 +389,8 @@ struct HostControl: AsyncParsableCommand {
         var labels: [String] = []
         @Flag(help: "Leave the runners with no label of their own.")
         var none = false
+        @OptionGroup var host: HostOption
+        @OptionGroup var mac: MacOption
 
         func validate() throws {
             guard labels.isEmpty == none else {
@@ -375,33 +398,81 @@ struct HostControl: AsyncParsableCommand {
             }
         }
 
-        func run() async throws { try await HostControl.perform(.settings(.saveRunnerLabels(labels))) }
+        func run() async throws { try await HostControl.perform(.saveRunnerLabels(labels), host: host.host, mac: mac.mac) }
     }
 
     static var unexpectedAnswer: HostSettingsError {
         HostSettingsError("The host answered with something else than what the command asked for.")
     }
 
-    /// Sends this Mac's host a request and prints its answer.
-    @MainActor static func perform(_ request: HostLinkRequest) async throws {
-        switch try await reply(to: request) {
+    /// Sends a host a request and prints its answer.
+    @MainActor static func perform(_ request: HostLinkRequest, on host: String? = nil) async throws {
+        switch try await reply(to: request, on: host) {
         case .settings(let report): try write(report)
         case .github(let report): try write(report)
         default: throw unexpectedAnswer
         }
     }
 
+    /// Reads or changes the settings of a host, or of a Mac that it manages, and prints them.
+    @MainActor static func perform(_ request: HostSettingsRequest, host: String?, mac: String?) async throws {
+        guard let mac else { return try await perform(.settings(request), on: host) }
+        try write(try await managed(mac, on: host) { id in
+            switch request {
+            case .read: .read(refreshing: id)
+            case .configurePool(let changes): .configurePool(changes, mac: id)
+            case .saveStorage(let directory): .saveStorage(directory: directory, mac: id)
+            case .saveXcode(let developerDirectory): .saveXcode(developerDirectory: developerDirectory, mac: id)
+            case .saveRunnerLabels(let labels): .saveRunnerLabels(labels, mac: id)
+            case .setPaused(let isPaused): .setPaused(isPaused, mac: id)
+            case .restart: .restart(mac: id)
+            }
+        })
+    }
+
+    /// Reads the settings of a host, or the ones that the host last read from a Mac that it manages.
+    @MainActor static func settings(host: String?, mac: String?) async throws -> HostSettingsReport? {
+        if let mac { return try await managed(mac, on: host) { .read(refreshing: $0) }.settings }
+        guard case .settings(let report) = try await reply(to: .settings(.read), on: host) else { throw unexpectedAnswer }
+        return report
+    }
+
+    /// Sends a host a request about a Mac that it manages, as a dashboard does through the host, and returns what
+    /// the host then lists for the Mac.
+    ///
+    /// - Parameters:
+    ///   - bridge: Sends the request to the host on this Mac. Tests pass a connection to a host of their own.
+    ///   - request: Makes the request for the Mac's ID, which the host's list gives for its name.
+    @MainActor static func managed(
+        _ mac: String, on host: String?,
+        over bridge: (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = HostSettingsBridge.request,
+        _ request: (HostPairing.ID) -> ManagedMacsRequest
+    ) async throws -> ManagedMacsReport.Mac {
+        guard case .macs(let list) = try await reply(to: .macs(.read(refreshing: nil)), on: host, over: bridge) else {
+            throw unexpectedAnswer
+        }
+        let named = list.macs.filter { $0.name == mac }
+        guard let match = named.first else {
+            let listed = list.macs.map(\.name).sorted().joined(separator: ", ")
+            throw HostSettingsError("The host manages no Mac named \(mac)." + (listed.isEmpty ? "" : " It manages \(listed)."))
+        }
+        guard named.count == 1 else { throw HostSettingsError("The host manages \(named.count) Macs named \(mac).") }
+        guard case .macs(let report) = try await reply(to: .macs(request(match.id)), on: host, over: bridge),
+              let answered = report.macs.first(where: { $0.id == match.id }) else { throw unexpectedAnswer }
+        return answered
+    }
+
     /// Signs the host out or reloads its repositories, and prints its answer. The host reports what went wrong with
     /// GitHub or the Keychain in its answer, and clears that after either succeeds, so it is the command's failure.
-    @MainActor static func change(_ request: GitHubRequest) async throws {
-        guard case .github(let report) = try await reply(to: .github(request)) else { throw unexpectedAnswer }
+    @MainActor static func change(_ request: GitHubRequest, on host: String?) async throws {
+        guard case .github(let report) = try await reply(to: .github(request), on: host) else { throw unexpectedAnswer }
         try write(report)
         if let error = report.errorMessage { throw HostSettingsError(error) }
     }
 
     /// Reads the host's GitHub sign-in, repositories, and runners.
-    @MainActor static func github() async throws -> GitHubReport {
-        guard case .github(let report) = try await reply(to: .github(.read)) else { throw unexpectedAnswer }
+    @MainActor static func github(on host: String?) async throws -> GitHubReport {
+        guard case .github(let report) = try await reply(to: .github(.read), on: host) else { throw unexpectedAnswer }
         return report
     }
 
@@ -451,22 +522,46 @@ struct HostControl: AsyncParsableCommand {
         try FileHandle.standardOutput.write(contentsOf: encoder.encode(answer) + Data("\n".utf8))
     }
 
-    /// Sends this Mac's host a request and returns its answer. Throws the host's reason when it refuses.
+    /// Sends a host a request and returns its answer. Throws the host's reason when it refuses.
     ///
-    /// - Parameter bridge: Sends the request to the running host. Tests pass a connection to a host of their own.
+    /// - Parameters:
+    ///   - host: A host that this Mac's dashboard shows, which gets the request over the Macs' pairing. `nil` for the
+    ///     host on this Mac, which gets it over its settings service.
+    ///   - bridge: Sends the request to the host on this Mac. Tests pass a connection to a host of their own.
     @MainActor static func reply(
-        to request: HostLinkRequest,
+        to request: HostLinkRequest, on host: String? = nil,
         over bridge: (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = HostSettingsBridge.request
     ) async throws -> HostLinkReply {
-        let response = try await bridge(.link(JSONEncoder().encode(request)))
-        if let error = response.error { throw HostSettingsError(error) }
-        guard let data = response.reply else {
-            throw HostSettingsError("The host that runs on this Mac does not take this command. Update it and try again.")
+        let reply: HostLinkReply
+        if let host {
+            let paired = try RemoteOperationClient.host(named: host, installation: HostInstallation())
+            reply = try await HostLink.send(
+                request, to: try await RemoteOperationClient.find(paired), key: paired.pairing.symmetricKey,
+                identity: paired.id.uuidString
+            )
+        } else {
+            let response = try await bridge(.link(JSONEncoder().encode(request)))
+            if let error = response.error { throw HostSettingsError(error) }
+            guard let data = response.reply else {
+                throw HostSettingsError("The host that runs on this Mac does not take this command. Update it and try again.")
+            }
+            reply = try JSONDecoder().decode(HostLinkReply.self, from: data)
         }
-        let reply = try JSONDecoder().decode(HostLinkReply.self, from: data)
         if case .refused(let reason) = reply { throw HostSettingsError(reason) }
         return reply
     }
 }
 
 extension PairingRole: ExpressibleByArgument {}
+
+/// The host that a command reads or changes.
+struct HostOption: ParsableArguments {
+    @Option(help: "A host that this Mac's dashboard shows, by its name. Without it, the host on this Mac.")
+    var host: String?
+}
+
+/// The Mac that a command reads or changes through its host.
+struct MacOption: ParsableArguments {
+    @Option(help: "A Mac that the host manages, by its name. Without it, the host itself.")
+    var mac: String?
+}

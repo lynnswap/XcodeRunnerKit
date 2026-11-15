@@ -242,6 +242,25 @@ enum RemoteOperationClient {
         }
     }
 
+    /// The host that this Mac's dashboard shows under `hostName`.
+    @MainActor static func host(named hostName: String, installation: HostInstallation) throws -> PairedMac {
+        let hosts = PairedMacs(
+            store: KeychainSecretStore.dashboardHosts(hostRoot: installation.hostRoot), name: HostPane.macName,
+            role: .dashboard, browses: false
+        )
+        if let message = hosts.message { throw RemoteOperationFailure(message) }
+        let named = hosts.macs.filter { $0.name.localizedCaseInsensitiveCompare(hostName) == .orderedSame }
+        guard let host = named.first else {
+            let shown = hosts.macs.map(\.name).sorted().joined(separator: ", ")
+            throw RemoteOperationFailure("XcodeHomeRunner on this Mac shows no host named \(hostName). "
+                + (shown.isEmpty ? "Open XcodeHomeRunner and add the host first." : "It shows \(shown)."))
+        }
+        guard named.count == 1 else {
+            throw RemoteOperationFailure("XcodeHomeRunner on this Mac shows \(named.count) hosts named \(hostName). Remove the ones that you no longer use.")
+        }
+        return host
+    }
+
     /// Runs an `xcode-runner` command on a host for the command line: the checkout is the one that contains the
     /// current directory, and the output goes to standard output.
     ///
@@ -251,20 +270,7 @@ enum RemoteOperationClient {
         _ command: [String], onHostNamed hostName: String, installation: HostInstallation, outputDirectory: URL
     ) async -> Int32 {
         do {
-            let hosts = PairedMacs(
-                store: KeychainSecretStore.dashboardHosts(hostRoot: installation.hostRoot), name: HostPane.macName,
-                role: .dashboard, browses: false
-            )
-            if let message = hosts.message { throw RemoteOperationFailure(message) }
-            let named = hosts.macs.filter { $0.name.localizedCaseInsensitiveCompare(hostName) == .orderedSame }
-            guard let host = named.first else {
-                let shown = hosts.macs.map(\.name).sorted().joined(separator: ", ")
-                throw RemoteOperationFailure("XcodeHomeRunner on this Mac shows no host named \(hostName). "
-                    + (shown.isEmpty ? "Open XcodeHomeRunner and add the host first." : "It shows \(shown)."))
-            }
-            guard named.count == 1 else {
-                throw RemoteOperationFailure("XcodeHomeRunner on this Mac shows \(named.count) hosts named \(hostName). Remove the ones that you no longer use.")
-            }
+            let host = try self.host(named: hostName, installation: installation)
             let checkout = try await Checkout.containing(.currentDirectory())
             let endpoint = try await find(host)
             return try await run(
