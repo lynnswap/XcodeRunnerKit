@@ -344,6 +344,22 @@ Restarting stops the runner services with the jobs that they run. `restart` is
 refused unless the host last counted no Xcode job on the Mac; pass `--stop-jobs`
 to restart anyway. A job can start between that count and the restart.
 
+The GitHub pane's controls are commands as well:
+
+```sh
+xcode-runner host github status         # sign-in, repositories, and their runners
+xcode-runner host github connect --wait # print the code and its page, then the result
+xcode-runner host github cancel         # end a sign-in that waits for its code
+xcode-runner host github reload         # read the app's repositories again
+xcode-runner host github disconnect
+```
+
+`connect` prints `signInCode` with the code and the page to enter it on, and
+opens no browser. With `--wait` it prints the sign-in's result once the code
+was entered, and fails if the sign-in ended without an account. To select the
+repositories, update the `githubRepositories` scope under
+[Settings from CLI and MCP](#settings-from-cli-and-mcp).
+
 These commands send the host what a dashboard sends it, so what a command can
 do and when the host refuses are the same as in the app. They need the
 `xcode-runner` at `Contents/Helpers` in the app, which

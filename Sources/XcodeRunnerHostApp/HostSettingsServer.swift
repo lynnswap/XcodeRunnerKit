@@ -40,13 +40,13 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
         Task { @MainActor in
             let request = Result { try JSONDecoder().decode(HostSettingsBridgeRequest.self, from: request) }
             let response: HostSettingsBridgeResponse
-            var answered: (request: HostSettingsRequest, reply: HostLinkReply)?
+            var answered: (request: HostLinkRequest, reply: HostLinkReply)?
             do {
                 switch try request.get() {
                 case .link(let data):
                     let request = try JSONDecoder().decode(HostLinkRequest.self, from: data)
                     let answer = await answer(request)
-                    if case .settings(let request) = request { answered = (request, answer) }
+                    answered = (request, answer)
                     response = HostSettingsBridgeResponse(reply: try JSONEncoder().encode(answer))
                 case let request:
                     response = await handle(request)
@@ -63,7 +63,15 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
                 // The connection calls the block on its own queue.
                 await withCheckedContinuation { sent in connection.scheduleSendBarrierBlock { @Sendable in sent.resume() } }
             }
-            await settings.finish(answered.request, answeredWith: answered.reply, registersRunners: true)
+            switch answered.request {
+            case .settings(let request):
+                await settings.finish(request, answeredWith: answered.reply, registersRunners: true)
+            case .github(.applySelection):
+                // The selection is saved, and its runners are registered and removed after the answer, as for a dashboard.
+                if case .github = answered.reply { await github.synchronizeDashboardSelection() }
+            default:
+                break
+            }
         }
     }
 
@@ -71,6 +79,7 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
     private func answer(_ request: HostLinkRequest) async -> HostLinkReply {
         switch request {
         case .settings(let request): await settings.answer(request)
+        case .github(let request): await github.answer(request)
         default: .refused("\(HostPane.macName) takes no such command.")
         }
     }

@@ -11,8 +11,82 @@ struct HostControl: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "xcode-runner host",
         abstract: "Read and change the host on this Mac.",
-        subcommands: [Status.self, Pause.self, Resume.self, Restart.self, Labels.self]
+        subcommands: [Status.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self]
     )
+
+    /// The GitHub pane's controls. The repository selection is a setting of `xcode-runner host settings`.
+    struct GitHub: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "github",
+            abstract: "Connect the host to GitHub, and read its sign-in, repositories, and runners.",
+            subcommands: [Status.self, Connect.self, Cancel.self, Disconnect.self, Reload.self]
+        )
+
+        struct Status: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Print the sign-in, the repositories, and their runners as JSON."
+            )
+
+            func run() async throws { try await HostControl.perform(.github(.read)) }
+        }
+
+        struct Connect: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Start a sign-in and print the code to enter on GitHub's page.",
+                discussion: """
+                    The answer's `signInCode` has the code and the page. The host finishes the sign-in once the code \
+                    is entered there; `github status` then names the account. With --wait the command returns when \
+                    the sign-in has ended, and fails if it ended without an account.
+                    """
+            )
+
+            @Flag(help: "Print the code, then wait until the sign-in has ended and print the result.")
+            var wait = false
+
+            func run() async throws {
+                guard case .github(var report) = try await HostControl.reply(to: .github(.signIn)) else {
+                    throw HostControl.unexpectedAnswer
+                }
+                // The host answers before GitHub issues the code, so that a dashboard can cancel meanwhile.
+                while report.isConnecting, report.signInCode == nil {
+                    try await Task.sleep(for: .milliseconds(500))
+                    report = try await HostControl.github()
+                }
+                try HostControl.write(report)
+                guard wait else { return }
+                while report.isConnecting {
+                    try await Task.sleep(for: .seconds(2))
+                    report = try await HostControl.github()
+                }
+                try HostControl.write(report)
+                guard report.accountLogin != nil else {
+                    throw HostSettingsError(report.errorMessage ?? "The sign-in ended without an account.")
+                }
+            }
+        }
+
+        struct Cancel: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(abstract: "End a sign-in that waits for its code.")
+
+            func run() async throws { try await HostControl.perform(.github(.cancelSignIn)) }
+        }
+
+        struct Disconnect: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Sign the host out of GitHub. Its runners stay registered until it is connected again."
+            )
+
+            func run() async throws { try await HostControl.perform(.github(.signOut)) }
+        }
+
+        struct Reload: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Read again which repositories the GitHub App is installed on."
+            )
+
+            func run() async throws { try await HostControl.perform(.github(.reloadRepositories)) }
+        }
+    }
 
     struct Status: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
@@ -83,15 +157,29 @@ struct HostControl: AsyncParsableCommand {
         func run() async throws { try await HostControl.perform(.settings(.saveRunnerLabels(labels))) }
     }
 
+    static var unexpectedAnswer: HostSettingsError {
+        HostSettingsError("The host answered with something else than what the command asked for.")
+    }
+
     /// Sends this Mac's host a request and prints its answer.
     @MainActor static func perform(_ request: HostLinkRequest) async throws {
+        switch try await reply(to: request) {
+        case .settings(let report): try write(report)
+        case .github(let report): try write(report)
+        default: throw unexpectedAnswer
+        }
+    }
+
+    /// Reads the host's GitHub sign-in, repositories, and runners.
+    @MainActor static func github() async throws -> GitHubReport {
+        guard case .github(let report) = try await reply(to: .github(.read)) else { throw unexpectedAnswer }
+        return report
+    }
+
+    static func write(_ answer: some Encodable) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let answer: Data = switch try await reply(to: request) {
-        case .settings(let report): try encoder.encode(report)
-        default: throw HostSettingsError("The host answered with something else than what the command asked for.")
-        }
-        try FileHandle.standardOutput.write(contentsOf: answer + Data("\n".utf8))
+        try FileHandle.standardOutput.write(contentsOf: encoder.encode(answer) + Data("\n".utf8))
     }
 
     /// Sends this Mac's host a request and returns its answer. Throws the host's reason when it refuses.
