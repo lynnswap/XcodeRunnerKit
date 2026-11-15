@@ -1,6 +1,5 @@
-import AppKit
+import Foundation
 import Observation
-import SwiftUI
 
 /// Whether a paired Mac answers and, while it does not, when its settings were last read.
 struct MacConnection {
@@ -190,16 +189,58 @@ final class MacPaneModel {
 
     // MARK: Xcode
 
-    /// The selected Xcode's `Contents/Developer` directory, or an empty string for the system selection.
-    var xcodeSelectionInput: String {
-        get { thisMac?.xcodeSelectionInput ?? paired?.xcodeSelectionInput ?? "" }
+    /// An Xcode that the Mac's jobs can use.
+    struct XcodeChoice: Identifiable, Equatable {
+        /// Names the Xcode to the Mac that saves it.
+        let id: String
+        let title: String
+    }
+
+    /// The Xcodes to choose from: the ones installed on the Mac and, so that the choices show what is saved, a saved
+    /// one that is not among them.
+    var xcodeChoices: [XcodeChoice] {
+        guard let report else { return [] }
+        var choices = report.installedXcodes.map {
+            XcodeChoice(id: $0.developerDirectory.path(percentEncoded: false), title: $0.name)
+        }
+        if let savedXcode, !choices.contains(where: { $0.id == savedXcode }) {
+            // People know an Xcode by its app, and a developer directory outside an app only by its path.
+            let name = Self.xcodeApplication(at: savedXcode).map { URL(filePath: $0).deletingPathExtension().lastPathComponent }
+                ?? savedXcode
+            choices.append(XcodeChoice(id: savedXcode, title: report.savedXcodeIsMissing ? "\(name) (not installed)" : name))
+        }
+        return choices
+    }
+
+    /// The chosen Xcode, or `nil` for the one that `xcode-select` names.
+    var selectedXcode: XcodeChoice.ID? {
+        get {
+            let input = thisMac?.xcodeSelectionInput ?? paired?.xcodeSelectionInput ?? ""
+            return input.isEmpty ? nil : input
+        }
         set {
-            thisMac?.xcodeSelectionInput = newValue
-            paired?.xcodeSelectionInput = newValue
+            thisMac?.xcodeSelectionInput = newValue ?? ""
+            paired?.xcodeSelectionInput = newValue ?? ""
         }
     }
 
+    /// The saved Xcode, as its choice names it.
+    private var savedXcode: XcodeChoice.ID? { report?.savedDeveloperDirectory?.path(percentEncoded: false) }
+
+    /// The Xcode app that holds a developer directory, or `nil` for a directory that is not inside an app.
+    private static func xcodeApplication(at developerDirectory: String) -> String? {
+        let inApplication = "/Contents/Developer"
+        return developerDirectory.hasSuffix(inApplication) ? String(developerDirectory.dropLast(inApplication.count)) : nil
+    }
+
     var isSavingXcode: Bool { thisMac?.isSavingXcode ?? paired?.isSavingXcode ?? false }
+    var canSaveXcodeSelection: Bool { !isSavingXcode && selectedXcode != savedXcode }
+    /// Why jobs that name no Xcode fail: the saved Xcode is no longer on the Mac.
+    var savedXcodeProblem: String? {
+        guard report?.savedXcodeIsMissing == true, let savedXcode else { return nil }
+        let location = Self.xcodeApplication(at: savedXcode) ?? savedXcode
+        return "The saved Xcode at \(location) is no longer installed on \(mac.object). Jobs that name no Xcode fail until another one is saved."
+    }
     var xcodeSaveError: String? { thisMac?.xcodeSaveError ?? paired?.xcodeSaveError }
 
     func saveXcodeSelection() {
@@ -287,188 +328,6 @@ final class MacPaneModel {
             await host
         } else {
             await macs.watchSettings(of: id)
-        }
-    }
-}
-
-/// A Mac's pane: its pairings, runner services, and execution settings.
-@MainActor
-final class MacViewController: NSHostingController<MacPaneView> {
-    init(model: MacPaneModel) {
-        super.init(rootView: MacPaneView(model: model))
-        // The split view and the window decide the pane's size.
-        sizingOptions = []
-    }
-
-    required init?(coder: NSCoder) { nil }
-}
-
-@MainActor
-struct MacPaneView: View {
-    @Bindable var model: MacPaneModel
-    @State private var isConfirmingRemoval = false
-
-    var body: some View {
-        content.task { await model.watch() }
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        if model.isRemoved {
-            ContentUnavailableView("This Mac was removed", systemImage: "desktopcomputer")
-        } else {
-            Form {
-                // Other Macs' changes to this Mac's settings appear below, so who can make them comes first.
-                if let management = model.management {
-                    HostManagementSection(model: model, management: management)
-                    HostDashboardsSection(management: management)
-                }
-                if let connection = model.connection {
-                    Section {
-                        MacConnectionRows(connection: connection)
-                        if let report = model.report { HostStatusRows(settings: report) }
-                    }
-                }
-                if let report = model.report { settings(report) }
-                if model.canRemove, let mac = model.listedMac { removal(of: mac) }
-            }
-            .formStyle(.grouped)
-        }
-    }
-
-    @ViewBuilder
-    private func settings(_ report: HostSettingsReport) -> some View {
-        RunnerServicesSection(
-            settings: report, mac: model.mac, isChangingPause: model.isChangingPause, pauseError: model.pauseError,
-            setPaused: { model.setPaused($0) }
-        ) {
-            if let name = model.mac.name {
-                Text("Processes on \(name).")
-            } else {
-                Text("Processes on this Mac. Overview shows each repository's connection and job counts from GitHub.")
-            }
-        }
-        RunnerLabelsSection(
-            labels: $model.runnerLabelsInput, isSaving: model.isSavingRunnerLabels, saveError: model.runnerLabelsError,
-            mac: model.mac
-        ) {
-            model.saveRunnerLabels()
-        }
-        XcodeExecutionSection(
-            settings: report, draft: $model.poolDraft, isSaving: model.isApplyingPoolConfiguration,
-            canApply: model.canApplyPoolConfiguration, saveError: model.poolConfigurationError
-        ) {
-            model.applyPoolConfiguration()
-        }
-        XcodeSection(
-            settings: report, selection: $model.xcodeSelectionInput, isSaving: model.isSavingXcode,
-            saveError: model.xcodeSaveError, mac: model.mac
-        ) {
-            model.saveXcodeSelection()
-        }
-        StorageSection(
-            settings: report, directory: $model.storageDirectoryInput, isSaving: model.isSavingStorage,
-            saveError: model.storageSaveError, mac: model.mac, isRestarting: model.isRestarting,
-            restartError: model.restartError,
-            choose: model.canChooseStorageDirectory ? { model.chooseStorageDirectory() } : nil,
-            restart: { model.restart() }
-        ) {
-            model.saveStorageDirectory()
-        }
-    }
-
-    private func removal(of mac: ListedMac) -> some View {
-        Section {
-            HStack {
-                Spacer()
-                Button(model.isRemoving ? "Removing…" : "Remove Mac…", role: .destructive) { isConfirmingRemoval = true }
-                    .disabled(model.isRemoving)
-                    .accessibilityIdentifier("remove-mac")
-            }
-        } footer: {
-            Text("Removing ends the pairing on both Macs. Runner services on \(mac.name) keep running.")
-        }
-        .confirmationDialog("Remove \(mac.name)?", isPresented: $isConfirmingRemoval) {
-            Button("Remove", role: .destructive) { model.remove() }
-        } message: {
-            Text(model.removalConsequence)
-        }
-    }
-}
-
-/// Whether a paired Mac answers and, while it does not, when its settings were last read.
-@MainActor
-struct MacConnectionRows: View {
-    let connection: MacConnection
-
-    var body: some View {
-        LabeledContent("Connection") {
-            Label {
-                Text(connection.status.title)
-            } icon: {
-                Image(systemName: connection.status.systemImage).foregroundStyle(connection.status.tint)
-            }
-        }
-        switch connection.status {
-        case .notFound:
-            Text("\(connection.macName) appears here while XcodeHomeRunner runs on it and \(sameNetwork). \(endedElsewhere)")
-                .font(.callout).foregroundStyle(.secondary)
-        case .rejected:
-            Text("\(connection.macName) no longer accepts \(connection.pairedWith.object). Remove it, then pair again.")
-                .font(.callout).foregroundStyle(.secondary)
-        case .incompatible(let mismatch):
-            Text("\(mismatch.explanation(of: connection.macName, for: connection.pairedWith)) The pairing is kept, and the Macs connect again after the update.")
-                .font(.callout).foregroundStyle(.secondary)
-        case .unreachable(let message): ErrorText(message)
-        case .checking, .online: EmptyView()
-        }
-        if let readAt = connection.settingsReadAt {
-            LabeledContent("Settings last read") { Text(readAt, format: .dateTime) }
-        }
-        if let message = connection.message { ErrorText(message) }
-    }
-
-    /// Where the Mac has to be for the Mac that is paired with it to find it.
-    private var sameNetwork: String {
-        connection.pairedWith.name.map { "it is on the same local network as \($0)" } ?? "both Macs are on the same local network"
-    }
-
-    /// What to do here when the pairing was ended on the other Mac.
-    private var endedElsewhere: String {
-        switch connection.role {
-        case .manager: "If you chose Stop Management on \(connection.macName), remove it here."
-        case .dashboard: "If you removed this Mac under Dashboards on \(connection.macName), remove it here."
-        }
-    }
-}
-
-private extension PairedMacs.Status {
-    var title: String {
-        switch self {
-        case .notFound: "Not found on the local network"
-        case .checking: "Checking…"
-        case .online: "Connected"
-        case .rejected: "Pairing no longer applies"
-        case .incompatible: "Runs another version"
-        case .unreachable: "Not responding"
-        }
-    }
-
-    var systemImage: String {
-        switch self {
-        case .notFound: "questionmark.circle"
-        case .checking: "circle.dotted"
-        case .online: "checkmark.circle.fill"
-        case .rejected, .incompatible, .unreachable: "exclamationmark.triangle.fill"
-        }
-    }
-
-    var tint: Color {
-        switch self {
-        case .online: .green
-        case .incompatible, .unreachable: .orange
-        case .rejected: .red
-        case .notFound, .checking: .secondary
         }
     }
 }
