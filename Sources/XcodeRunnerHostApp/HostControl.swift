@@ -46,7 +46,12 @@ struct HostControl: AsyncParsableCommand {
             func run() async throws {
                 // The window offers no sign-in while an account is connected, and a sign-in that failed then would
                 // leave that account in place of a result.
-                if let login = try await HostControl.github().accountLogin {
+                let current = try await HostControl.github()
+                // Until the host has read its saved sign-in, it shows no account although it may have one.
+                guard current.hasRestored else {
+                    throw HostSettingsError("The host has not read its saved GitHub sign-in yet. Try again in a moment.")
+                }
+                if let login = current.accountLogin {
                     throw HostSettingsError("The host is connected to GitHub as \(login). Disconnect it before connecting again.")
                 }
                 guard case .github(var report) = try await HostControl.reply(to: .github(.signIn)) else {
