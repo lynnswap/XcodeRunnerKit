@@ -14,9 +14,15 @@ final class AddMacModel {
     private(set) var errorMessage: String?
     @ObservationIgnored private var pairing: Task<Void, Never>?
 
-    /// - Parameter macs: The list that the paired Mac joins.
-    init(macs: any MacList) {
+    /// Sets up this Mac as a runner for the sheet to pair, on a Mac that has no host.
+    let thisMac: ThisMacSetup?
+
+    /// - Parameters:
+    ///   - macs: The list that the paired Mac joins.
+    ///   - thisMac: Sets up this Mac for the sheet to pair, when it can be.
+    init(macs: any MacList, thisMac: ThisMacSetup? = nil) {
         self.macs = macs
+        self.thisMac = thisMac
     }
 
     /// What the Mac that pairs does with the Mac that it pairs with.
@@ -67,7 +73,23 @@ final class AddMacModel {
     }
 
     /// Confirms that the other Mac shows the same code.
-    func confirmCode() { macs.confirmCode() }
+    ///
+    /// Nobody compares the codes of this Mac, which the sheet set up, by eye. Its host is told the code first and
+    /// allows the pairing only if it shows the same one, and the pairing is confirmed here only then. A Mac that
+    /// merely has this Mac's name shows another code to its own host, so this Mac's host refuses and the pairing ends.
+    func confirmCode() {
+        guard let thisMac, thisMac.phase == .waiting, let confirmation = macs.codeConfirmation,
+              confirmation.macName == HostPane.macName else { return macs.confirmCode() }
+        Task {
+            do {
+                try await thisMac.allowPairing(showing: confirmation.code)
+                macs.confirmCode()
+            } catch {
+                pairing?.cancel()
+                errorMessage = "This Mac's host did not allow the pairing: \(error.localizedDescription)"
+            }
+        }
+    }
 
     func cancel() {
         pairing?.cancel()

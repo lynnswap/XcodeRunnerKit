@@ -261,6 +261,10 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var poolMenuItem: NSMenuItem?
     private var settingsWindow: NSWindowController?
+    /// The hosts on other Macs that this Mac shows, as a Mac without a host shows them in its dashboard. A Mac that
+    /// another Mac manages sees that host and its Macs there.
+    private let dashboardHosts: PairedMacs
+    private var dashboardWindow: NSWindowController?
     private var monitoring: Task<Void, Never>?
     private var poolMonitoring: Task<Void, Never>?
     private var githubMonitoring: Task<Void, Never>?
@@ -278,6 +282,9 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         self.logs = logs
         self.installation = installation
         self.settings = HostSettingsModel(installation: installation)
+        dashboardHosts = PairedMacs(
+            store: KeychainSecretStore.dashboardHosts(hostRoot: installation.hostRoot), name: HostPane.macName, role: .dashboard
+        )
         guard let executable = Bundle.main.executableURL else {
             throw ValidationError("Cannot locate the runner host executable.")
         }
@@ -315,6 +322,12 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         settingsServer?.start()
         settings.management.start()
         settings.managedMacs.start()
+        dashboardHosts.start()
+        // A command pairs and removes the hosts that this Mac shows in its own process.
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(dashboardHostsChanged(_:)), name: HostControl.dashboardHostsChangedNotification,
+            object: nil
+        )
         settings.hostState = .preparingStorage
         for number in [SIGTERM, SIGINT] {
             signal(number, SIG_IGN)
@@ -387,8 +400,10 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    /// Opening the app shows the dashboard on a Mac that another Mac manages and that shows hosts, because its
+    /// repositories and the other runners are a host's. Otherwise it shows this Mac's own settings.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showSettings(nil)
+        if settings.management.manager != nil, !dashboardHosts.macs.isEmpty { showDashboard(nil) } else { showSettings(nil) }
         return true
     }
 
@@ -405,6 +420,14 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
+        let dashboardItem = NSMenuItem(title: "Open Dashboard", action: #selector(showDashboard(_:)), keyEquivalent: "")
+        dashboardItem.target = self
+        menu.addItem(dashboardItem)
+        let showMacItem = NSMenuItem(
+            title: "Show a Mac on the Dashboard…", action: #selector(showMacOnDashboard(_:)), keyEquivalent: ""
+        )
+        showMacItem.target = self
+        menu.addItem(showMacItem)
         menu.addItem(.separator())
         let quitItem = NSMenuItem(title: "Quit XcodeHomeRunner", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quitItem.target = NSApplication.shared
@@ -426,6 +449,28 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         if settingsWindow == nil { settingsWindow = makeHostWindowController(settings: settings) }
         NSApplication.shared.activate()
         settingsWindow?.showWindow(nil)
+    }
+
+    /// Shows the hosts on other Macs that this Mac paired with as a dashboard, or how to pair with one.
+    @objc private func showDashboard(_ sender: Any?) {
+        if dashboardWindow == nil {
+            dashboardWindow = makePaneWindowController(
+                content: DashboardSplitViewController(model: DashboardWindowModel(hosts: dashboardHosts)),
+                autosaveName: "XcodeHomeRunnerDashboard"
+            )
+        }
+        NSApplication.shared.activate()
+        dashboardWindow?.showWindow(nil)
+    }
+
+    /// Pairs this Mac's dashboard with another host. The host has no menu bar for the dashboard's File menu.
+    @objc private func showMacOnDashboard(_ sender: Any?) {
+        showDashboard(nil)
+        (dashboardWindow?.contentViewController as? DashboardSplitViewController)?.showMacOnDashboard(sender)
+    }
+
+    @objc private func dashboardHostsChanged(_ notification: Notification) {
+        dashboardHosts.reload()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -450,6 +495,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             await settings.management.shutDown()
             await settings.managedMacsRelay.shutDown()
             await settings.managedMacs.shutDown()
+            await dashboardHosts.shutDown()
             await storagePreparation?.value
             await monitoring?.value
             await poolMonitoring?.value

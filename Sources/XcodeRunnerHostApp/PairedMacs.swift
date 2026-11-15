@@ -953,6 +953,9 @@ final class PairedMacs: MacList {
 
     private func save(_ macs: [PairedMac]) throws {
         if macs.isEmpty { try store.remove() } else { try store.write(JSONEncoder().encode(macs)) }
+        // A Mac with a host shows its dashboard from the host's process, and a dashboard opened before the host was
+        // set up runs in another one. Each reads the hosts again after the other saved them.
+        if role == .dashboard, browses { HostControl.dashboardHostsChanged() }
     }
 
     private func forgetStatus(of id: HostPairing.ID) {

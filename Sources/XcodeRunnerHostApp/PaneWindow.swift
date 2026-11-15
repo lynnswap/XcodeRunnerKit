@@ -252,7 +252,7 @@ class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSMenuI
     ///
     /// - Parameter paired: Called with the Mac after the sheet closed, unless the person cancelled.
     func presentAddMacSheet(for macs: any MacList, paired: @escaping @MainActor (ListedMac) -> Void) {
-        let model = AddMacModel(macs: macs)
+        let model = AddMacModel(macs: macs, thisMac: .forSheet(role: macs.role))
         let sheet = AddMacViewController(model: model)
         model.onFinish = { [weak self, weak sheet] mac in
             if let sheet { self?.dismiss(sheet) }
