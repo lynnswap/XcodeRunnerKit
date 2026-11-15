@@ -221,10 +221,11 @@ final class DashboardWindowModel: PaneWindowModel {
                     pane: DashboardPane.mac(host.id), title: host.name, subtitle: answer?.report.runnerCountTitle, icon: HostPane.mac.icon
                 ),
             ] + managed.listedMacs.map { mac in
-                let status = managed.status(of: mac.id)
+                // The host's list of Macs is as old as its last answer, so their states are not shown without one.
+                let status = answer == nil ? nil : managed.status(of: mac.id)
                 return SidebarRow(
-                    pane: DashboardPane.managedMac(mac.id, host: host.id), title: mac.name, subtitle: status.title,
-                    icon: HostPane.mac.icon, status: .init(symbol: status.systemImage, color: status.tint)
+                    pane: DashboardPane.managedMac(mac.id, host: host.id), title: mac.name, subtitle: status?.title,
+                    icon: HostPane.mac.icon, status: status.map { .init(symbol: $0.systemImage, color: $0.tint) }
                 )
             })
         }

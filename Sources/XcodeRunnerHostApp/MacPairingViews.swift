@@ -155,7 +155,7 @@ private struct PairingWindowRows: View {
     private var instruction: String {
         switch window.role {
         case .manager: "On the managing Mac, choose Add Mac… in Overview and select \(HostPane.macName)."
-        case .dashboard: "On the other Mac, open XcodeHomeRunner, choose Add Mac…, and select \(HostPane.macName)."
+        case .dashboard: "On the other Mac, open XcodeHomeRunner, choose File > Add Mac > Show a Mac on This Dashboard…, and select \(HostPane.macName)."
         }
     }
 }
