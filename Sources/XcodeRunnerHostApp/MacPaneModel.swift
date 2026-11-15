@@ -141,7 +141,9 @@ final class MacPaneModel: PaneSaving {
         }
     }
 
-    var isSavingRunnerLabels: Bool { thisMac?.isSavingRunnerLabels ?? paired?.isSavingRunnerLabels ?? false }
+    var isSavingRunnerLabels: Bool {
+        valuesBeingSaved.contains(.runnerLabels) || thisMac?.isSavingRunnerLabels ?? paired?.isSavingRunnerLabels ?? false
+    }
     // A value can be saved once it is edited, and after a failure, when saving the same value again can repair what
     // failed.
 
@@ -169,7 +171,9 @@ final class MacPaneModel: PaneSaving {
         }
     }
 
-    var isApplyingPoolConfiguration: Bool { thisMac?.isSaving ?? paired?.isSaving ?? false }
+    var isApplyingPoolConfiguration: Bool {
+        valuesBeingSaved.contains(.pool) || thisMac?.isSaving ?? paired?.isSaving ?? false
+    }
     /// A pool without saved settings takes the ones shown.
     var canApplyPoolConfiguration: Bool {
         guard let report, thisMac?.canApplyPoolConfiguration ?? paired?.canApplyPoolConfiguration ?? false else { return false }
@@ -232,7 +236,7 @@ final class MacPaneModel: PaneSaving {
         return developerDirectory.hasSuffix(inApplication) ? String(developerDirectory.dropLast(inApplication.count)) : nil
     }
 
-    var isSavingXcode: Bool { thisMac?.isSavingXcode ?? paired?.isSavingXcode ?? false }
+    var isSavingXcode: Bool { valuesBeingSaved.contains(.xcode) || thisMac?.isSavingXcode ?? paired?.isSavingXcode ?? false }
     var canSaveXcodeSelection: Bool {
         !isSavingXcode && (selectedXcode != savedXcode || report?.xcodeError != nil || xcodeSaveError != nil)
     }
@@ -261,7 +265,9 @@ final class MacPaneModel: PaneSaving {
         }
     }
 
-    var isSavingStorage: Bool { thisMac?.isSavingStorage ?? paired?.isSavingStorage ?? false }
+    var isSavingStorage: Bool {
+        valuesBeingSaved.contains(.storage) || thisMac?.isSavingStorage ?? paired?.isSavingStorage ?? false
+    }
     var canEditStorageDirectory: Bool { report?.canEditStorage == true && !isSavingStorage }
     var canSaveStorageDirectory: Bool {
         guard canEditStorageDirectory, let report else { return false }
@@ -297,25 +303,42 @@ final class MacPaneModel: PaneSaving {
 
     // MARK: Saving
 
-    /// Whether a save from this pane runs now.
-    private(set) var isSaving = false
+    /// A value that the pane saves.
+    enum SavedValue: Hashable {
+        /// The job limit and the Simulator retention, which the Mac applies together.
+        case pool
+        case runnerLabels, xcode, storage
+    }
 
+    /// The values that a save from this pane has still to save. Their inputs take no edits until then, so that the
+    /// value that was there when the person chose Save is the one saved.
+    private(set) var valuesBeingSaved: Set<SavedValue> = []
+
+    var isSaving: Bool { !valuesBeingSaved.isEmpty }
+
+    /// A Mac that does not answer shows no values, so it has none to save.
     var canSave: Bool {
-        !isSaving && (canSaveRunnerLabels || canApplyPoolConfiguration || canSaveXcodeSelection || canSaveStorageDirectory)
+        guard report != nil, !isSaving else { return false }
+        return canSaveRunnerLabels || canApplyPoolConfiguration || canSaveXcodeSelection || canSaveStorageDirectory
     }
 
     /// Saves the values that can be saved now, one after the other, because the Mac applies one change at a time.
+    /// Each input takes edits again once its value is saved.
     func save() {
         guard canSave else { return }
-        let labels = canSaveRunnerLabels, pool = canApplyPoolConfiguration, xcode = canSaveXcodeSelection
-        let storage = canSaveStorageDirectory
-        isSaving = true
+        if canSaveRunnerLabels { valuesBeingSaved.insert(.runnerLabels) }
+        if canApplyPoolConfiguration { valuesBeingSaved.insert(.pool) }
+        if canSaveXcodeSelection { valuesBeingSaved.insert(.xcode) }
+        if canSaveStorageDirectory { valuesBeingSaved.insert(.storage) }
         Task {
-            if labels { await saveRunnerLabels() }
-            if pool { await applyPoolConfiguration() }
-            if xcode { await saveXcodeSelection() }
-            if storage { await saveStorageDirectory() }
-            isSaving = false
+            if valuesBeingSaved.contains(.runnerLabels) { await saveRunnerLabels() }
+            valuesBeingSaved.remove(.runnerLabels)
+            if valuesBeingSaved.contains(.pool) { await applyPoolConfiguration() }
+            valuesBeingSaved.remove(.pool)
+            if valuesBeingSaved.contains(.xcode) { await saveXcodeSelection() }
+            valuesBeingSaved.remove(.xcode)
+            if valuesBeingSaved.contains(.storage) { await saveStorageDirectory() }
+            valuesBeingSaved.remove(.storage)
         }
     }
 

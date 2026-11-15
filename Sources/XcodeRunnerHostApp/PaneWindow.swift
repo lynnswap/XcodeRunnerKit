@@ -96,6 +96,9 @@ class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSMenuI
     private var shownPane: AnyHashable??
     /// What the toolbar's Save button saves: the shown pane's values, when it has any.
     private var saving: (any PaneSaving)?
+    /// The view controllers of panes that were left while they saved. A pane that is shown again before its save
+    /// ended is the same one, so that the values still to save take no edits.
+    private var panesLeftSaving: [AnyHashable?: NSViewController] = [:]
     private let saveItem = NSToolbarItem(itemIdentifier: NSToolbarItem.Identifier("save"))
     private let saveButton = NSHostingView(rootView: SaveToolbarButton(saving: nil))
 
@@ -127,8 +130,12 @@ class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSMenuI
         }
         self.title = title
         guard pane != shownPane else { return }
+        if let shown = shownPane, let left = detail.children.first, saving?.isSaving == true {
+            panesLeftSaving[shown] = left
+        }
+        panesLeftSaving = panesLeftSaving.filter { ($0.value as? any SavingPaneViewController)?.saving.isSaving == true }
         shownPane = pane
-        let controller = makePaneViewController()
+        let controller = panesLeftSaving.removeValue(forKey: pane) ?? makePaneViewController()
         detail.show(controller)
         saving = (controller as? any SavingPaneViewController)?.saving
         saveButton.rootView = SaveToolbarButton(saving: saving)
