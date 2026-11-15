@@ -706,7 +706,7 @@ final class HostSettingsModel: HostSettingsDisplay {
     }
 
     /// Takes a paired Mac's request to restart. From here on this Mac takes no other change, so that none starts
-    /// between the reply and the restart, which the caller performs with `performAcceptedRestart()`.
+    /// between the reply and the restart, which `finish(_:answeredWith:registersRunners:)` starts.
     private func acceptRestart() throws(HostSettingsError) {
         guard restartHost != nil else {
             throw HostSettingsError("\(HostPane.macName) cannot restart XcodeHomeRunner by itself. Restart it on that Mac.")
@@ -719,7 +719,21 @@ final class HostSettingsModel: HostSettingsDisplay {
     }
 
     /// Restarts the host once the paired Mac that asked has the reply.
-    func performAcceptedRestart() { restartHost?() }
+    /// Does what follows a settings request that this Mac answered, once the reply is delivered or its connection is
+    /// gone. The change is saved by then, so none of this depends on the reply arriving.
+    ///
+    /// - Parameter registersRunners: Whether this Mac registers its runners for a changed job limit or changed
+    ///   labels, as it does after its own change. A managing host registers them itself.
+    func finish(_ request: HostSettingsRequest, answeredWith answer: HostLinkReply, registersRunners: Bool) async {
+        guard case .settings = answer else { return }
+        let registrationsChanged = switch request {
+        case .configurePool(let changes): changes.maximumConcurrentJobs != nil
+        case .saveRunnerLabels: true
+        default: false
+        }
+        if registersRunners, registrationsChanged { await github.synchronize() }
+        if case .restart = request { restartHost?() }
+    }
 
     // With this guard's `throw` inline in `answer(_:)`, the Xcode 27.1 optimizer crashes while compiling it for Release.
     private func savePairedMacStorage(_ directory: String) async throws(HostSettingsError) {

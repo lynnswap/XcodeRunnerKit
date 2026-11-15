@@ -116,16 +116,7 @@ final class HostManagement {
                         do { delivery = .success(try await reply(answer)) } catch { delivery = .failure(error) }
                         // A managing host updates this Mac's runners for a changed job limit or changed labels itself.
                         // After a dashboard's change this Mac does, as it does after its own.
-                        let registrationsChanged = switch request {
-                        case .configurePool(let changes): changes.maximumConcurrentJobs != nil
-                        case .saveRunnerLabels: true
-                        default: false
-                        }
-                        if role == .dashboard, case .settings = answer, registrationsChanged {
-                            await settings.github.synchronize()
-                        }
-                        // The paired Mac has the reply, or its connection is gone.
-                        if case .restart = request, case .settings = answer { await settings.performAcceptedRestart() }
+                        await settings.finish(request, answeredWith: answer, registersRunners: role == .dashboard)
                         try delivery.get()
                     case .github(let request):
                         // A managing host registers this Mac's runners from its own sign-in and selection.

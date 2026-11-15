@@ -69,13 +69,22 @@ package struct HostGitHubRepositorySettings: Codable, Sendable, Equatable {
 package enum HostSettingsBridgeRequest: Codable, Sendable {
     case getRepositories
     case updateRepositories([Int])
+    /// A request that a dashboard sends a host, encoded as the app encodes it for a paired Mac. The host answers it
+    /// as it answers a dashboard, and the answer is in `reply`.
+    case link(Data)
 }
 
 package struct HostSettingsBridgeResponse: Codable, Sendable {
     package let settings: HostGitHubRepositorySettings?
     package let error: String?
     package let synchronizationError: String?
-    package init(settings: HostGitHubRepositorySettings? = nil, error: String? = nil, synchronizationError: String? = nil) {
+    /// The host's answer to a `link` request, encoded as the app encodes it for a paired Mac.
+    package let reply: Data?
+    package init(
+        settings: HostGitHubRepositorySettings? = nil, error: String? = nil, synchronizationError: String? = nil,
+        reply: Data? = nil
+    ) {
         self.settings = settings; self.error = error; self.synchronizationError = synchronizationError
+        self.reply = reply
     }
 }
