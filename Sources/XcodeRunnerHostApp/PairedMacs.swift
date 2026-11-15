@@ -767,7 +767,7 @@ final class PairedMacs: MacList {
         settings.selectedRepositoryIDs = saved.savedRepositoryIDs
     }
 
-    /// Opens the page that installs the host's GitHub App on repositories, in this Mac's browser.
+    /// Opens the page that chooses the repositories of the host's GitHub App, in this Mac's browser.
     func addRepositories(to id: HostPairing.ID) {
         guard let settings = settings[id], let url = settings.github?.installationURL else { return }
         settings.githubError = openURL(url) ? nil : "Could not open your browser."

@@ -43,7 +43,7 @@ struct GitHubClientTests {
 
     @Test func repositoriesFollowEveryInstallationPageAndDeduplicate() async throws {
         let transport = GitHubTestTransport([
-            .init(path: "/user/installations", body: #"{"installations":[{"id":10}]}"#,
+            .init(path: "/user/installations", body: #"{"installations":[{"id":10,"account":{"id":1},"html_url":"https://github.com/settings/installations/10"}]}"#,
                   headers: ["Link": #"<https://api.github.com/user/installations?page=2>; rel="next""#]),
             .init(path: "/user/installations", body: #"{"installations":[{"id":20}]}"#),
             .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Zebra"}]}"#,
@@ -52,8 +52,14 @@ struct GitHubClientTests {
             .init(path: "/user/installations/20/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Zebra"}]}"#),
         ])
         let client = await transport.client
-        let repositories = try await client.listRepositories(accessToken: "user-token")
-        #expect(repositories.map(\.fullName) == ["owner/Apple", "owner/Zebra"])
+        let access = try await client.listInstallations(accessToken: "user-token")
+        #expect(access.repositories.map(\.fullName) == ["owner/Apple", "owner/Zebra"])
+        #expect(access.installations == [
+            GitHubInstallation(
+                id: 10, account: .init(id: 1), settingsPage: URL(string: "https://github.com/settings/installations/10")
+            ),
+            GitHubInstallation(id: 20, account: nil, settingsPage: nil),
+        ])
         let requests = await transport.requests
         #expect(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer user-token" })
         #expect(requests.allSatisfy { $0.url?.host == "api.github.com" })
