@@ -27,20 +27,13 @@ struct OverviewView: View {
             }
             if let report = model.report, let github = model.github {
                 Section(model.mac.name ?? HostPane.macName) { HostStatusRows(settings: report) }
-                if let manager = github.managerName {
-                    // A runner's host signs in and selects the repositories, so this Mac shows neither.
-                    Section("GitHub") {
-                        Text("\(manager) registers runners on \(model.mac.object) for the repositories selected there.")
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    Group {
-                        account(github)
-                        if github.accountLogin != nil { repositories(github) }
-                    }
-                    .disabled(model.isWaitingForGitHub)
-                    managedMacs
+                // The host of a managed Mac selects the repositories and manages the other Macs.
+                Group {
+                    account(github)
+                    if github.accountLogin != nil, github.managerName == nil { repositories(github) }
                 }
+                .disabled(model.isWaitingForGitHub)
+                if github.managerName == nil { managedMacs }
                 if let management = model.management {
                     HostDashboardsSection(management: management)
                 }
@@ -53,8 +46,14 @@ struct OverviewView: View {
         .task { await model.watch() }
     }
 
+    /// The Mac's sign-in. A managed Mac needs none, so it is offered none, and it can end the one that it has from
+    /// before, which stays in its Keychain.
     private func account(_ github: GitHubReport) -> some View {
         Section {
+            if let manager = github.managerName {
+                Text("\(manager) registers runners on \(model.mac.object) for the repositories selected there.")
+                    .foregroundStyle(.secondary)
+            }
             if let login = github.accountLogin {
                 LabeledContent("Connected account") {
                     HStack {
@@ -75,15 +74,15 @@ struct OverviewView: View {
                     ProgressView("Contacting GitHub…")
                 }
                 Button("Cancel") { model.cancelSignIn() }
-            } else if github.hasRestored {
+            } else if github.hasRestored, github.managerName == nil {
                 Text("Connect GitHub to register runners for your repositories. The sign-in is saved in \(model.mac.possessive) Keychain.")
                     .foregroundStyle(.secondary)
                 Button("Connect GitHub…") { model.signIn() }
                     .disabled(github.isBusy)
                     .accessibilityIdentifier("github-sign-in")
             }
-            // Without an account the repositories' section, which shows this otherwise, is hidden.
-            if github.accountLogin == nil, let error = github.errorMessage { ErrorText(error) }
+            // Without an account, and on a managed Mac, the repositories' section, which shows this otherwise, is hidden.
+            if github.accountLogin == nil || github.managerName != nil, let error = github.errorMessage { ErrorText(error) }
         } header: {
             Text("GitHub")
         } footer: {
