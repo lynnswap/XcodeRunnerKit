@@ -91,6 +91,9 @@ plist.write_bytes(plistlib.dumps({
     "AssociatedBundleIdentifiers": [identifier],
     "RunAtLoad": True,
     "KeepAlive": {"SuccessfulExit": False},
+    # launchd limits the CPU and I/O of a job that names no type, and of what the job starts: the runners and their
+    # builds. Jobs are this Mac's work, so they run with an app's limits.
+    "ProcessType": "Interactive",
     "ThrottleInterval": 5,
     "ExitTimeOut": 60,
     "StandardOutPath": str(root/"logs/runner-host.stdout.log"),

@@ -46,8 +46,10 @@ LaunchAgent, and settings service, so a build with another bundle identifier
 must change all of them.
 
 The installer places the app in `~/Applications` and starts it through a user
-LaunchAgent. An ad-hoc signature (`-`) is not accepted. Use the same team for
-updates so macOS can retain the app's access permissions.
+LaunchAgent. The LaunchAgent's process type is `Interactive`, so macOS applies
+no CPU or I/O limit to the host, its runners, or their builds, as it does to a
+job that names no type. An ad-hoc signature (`-`) is not accepted. Use the same
+team for updates so macOS can retain the app's access permissions.
 
 Opening the app on a Mac where the installer set up a host starts that host. On
 a Mac without a host, the app opens as a [dashboard](#show-a-host-on-another-mac)
