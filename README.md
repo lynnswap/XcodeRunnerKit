@@ -386,8 +386,10 @@ only starts the package's `XcodeRunnerHostApp` target, which holds the host code
 and its tests. Its `xcode-runner` target only starts the package's
 `XcodeRunnerCLI` target, and the app embeds that tool in `Contents/Helpers`. Both
 products exist for the app and are not supported library APIs.
-To sign builds from Xcode, set `DEVELOPMENT_TEAM` in
-`App/Configurations/Signing.local.xcconfig`, which Git ignores.
+Builds from Xcode are signed for the team in
+`App/Configurations/Signing.xcconfig`. To sign for your own team, set
+`DEVELOPMENT_TEAM` in `App/Configurations/Signing.local.xcconfig`, which Git
+ignores.
 
 The `Scripts/check-*.py` scripts cover process cancellation, shared pools,
 compilation caching, Simulators, and host setup. Checks that take an executable
