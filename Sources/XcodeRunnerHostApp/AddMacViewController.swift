@@ -115,7 +115,7 @@ struct AddMacView: View {
 }
 #Preview("Add Mac Code", traits: .sizeThatFitsLayout) {
     let macs = PairedMacs(store: PreviewSecretStore(), name: HostPane.macName, role: .manager, browses: false)
-    HostPreview.requestPairing(from: macs, with: HostManagement(store: PreviewSecretStore(), name: "m1pro", advertises: false))
+    HostPreview.requestPairing(from: macs, with: HostManagement(store: PreviewSecretStore(), name: "MacBook Air", advertises: false))
     return AddMacViewController(model: AddMacModel(macs: macs))
 }
 #Preview("Dashboard Add Mac", traits: .sizeThatFitsLayout) {

@@ -131,10 +131,10 @@ func makeHostWindowController(settings: HostSettingsModel) -> NSWindowController
     HostPreview.hostWindow(pane: .mac, isSignedIn: true, pairing: .waitingToPair)
 }
 #Preview("Pairing Request") {
-    HostPreview.hostWindow(pane: .mac, isSignedIn: true, pairing: .asked(by: "m6mini"))
+    HostPreview.hostWindow(pane: .mac, isSignedIn: true, pairing: .asked(by: "Mac mini"))
 }
 #Preview("Managed by Another Mac") {
-    HostPreview.hostWindow(pane: .mac, isSignedIn: true, pairing: .managed(by: "m6mini"))
+    HostPreview.hostWindow(pane: .mac, isSignedIn: true, pairing: .managed(by: "Mac mini"))
 }
 #Preview("Shown on Dashboards") {
     HostPreview.hostWindow(pane: .mac, isSignedIn: true, pairing: .shown(on: ["MacBook Pro", "Mac Studio"]))
@@ -143,7 +143,7 @@ func makeHostWindowController(settings: HostSettingsModel) -> NSWindowController
     HostPreview.hostWindow(pane: .mac, isSignedIn: true, pairing: .askedToShow(by: "MacBook Pro"))
 }
 #Preview("Overview Managed by Another Mac") {
-    HostPreview.hostWindow(pane: .overview, isSignedIn: true, pairing: .managed(by: "m6mini"))
+    HostPreview.hostWindow(pane: .overview, isSignedIn: true, pairing: .managed(by: "Mac mini"))
 }
 #Preview("Managed Mac") {
     HostPreview.hostWindow(

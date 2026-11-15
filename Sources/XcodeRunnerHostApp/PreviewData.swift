@@ -20,7 +20,7 @@ final class PreviewSecretStore: SecretStore {
 @MainActor
 enum HostPreview {
     /// The Macs that previews list under Runners.
-    static let managedMacs = ["m1pro", "Mac Studio"].enumerated().map { index, name in
+    static let managedMacs = ["MacBook Air", "Mac Studio"].enumerated().map { index, name in
         PairedMac(
             pairing: HostPairing(id: UUID(uuidString: "6F1C0B7E-2D7A-4C55-9E0B-3E0D2B7C1A0\(index)")!, name: name, key: Data(count: 32)),
             hostID: UUID()
@@ -111,8 +111,8 @@ enum HostPreview {
         if isPaused { settings.setPaused(true) }
         if isSignedIn {
             settings.runners = [
-                RunnerSettingsRow(directory: installation.runnersRoot.appending(path: "1"), name: "m6mini-XcodeRunnerKit-1", state: isPaused ? .finishing : .running, configurationError: nil),
-                RunnerSettingsRow(directory: installation.runnersRoot.appending(path: "2"), name: "m6mini-tweetpd-1", state: isPaused ? .paused : .starting, configurationError: nil),
+                RunnerSettingsRow(directory: installation.runnersRoot.appending(path: "1"), name: "Mac-mini-XcodeRunnerKit-1", state: isPaused ? .finishing : .running, configurationError: nil),
+                RunnerSettingsRow(directory: installation.runnersRoot.appending(path: "2"), name: "Mac-mini-App-1", state: isPaused ? .paused : .starting, configurationError: nil),
             ]
         }
         Task {
@@ -125,11 +125,11 @@ enum HostPreview {
 
     /// GitHub settings that are answered in memory, with two selected repositories when signed in.
     static func gitHubSettings(installation: HostInstallation, isSignedIn: Bool) -> GitHubHostSettings {
-        let repositories = #"{"repositories":[{"id":1,"full_name":"lynnswap/XcodeRunnerKit"},{"id":2,"full_name":"lynnswap/tweetpd"},{"id":3,"full_name":"lynnswap/pd-site"}]}"#
+        let repositories = #"{"repositories":[{"id":1,"full_name":"lynnswap/XcodeRunnerKit"},{"id":2,"full_name":"example/App"},{"id":3,"full_name":"example/Website"}]}"#
         let store = PreviewSecretStore()
         if isSignedIn {
             try? GitHubHostConfiguration(repositories: [
-                GitHubRepository(id: 1, fullName: "lynnswap/XcodeRunnerKit"), GitHubRepository(id: 2, fullName: "lynnswap/tweetpd"),
+                GitHubRepository(id: 1, fullName: "lynnswap/XcodeRunnerKit"), GitHubRepository(id: 2, fullName: "example/App"),
             ]).save(to: installation.hostRoot.appending(path: "github-host.json"))
             try? store.write(JSONEncoder().encode(GitHubCredentials(
                 clientID: GitHubApp.xcodeHomeRunner.clientID, account: GitHubAccount(id: 1, login: "lynnswap"), accessToken: "preview",
@@ -211,14 +211,14 @@ enum HostPreview {
     }
 
     /// The Mac that the dashboard's host manages.
-    static let hostManagedMac = PairedMac(pairing: HostPairing(id: UUID(), name: "m1pro", key: Data(count: 32)), hostID: UUID())
+    static let hostManagedMac = PairedMac(pairing: HostPairing(id: UUID(), name: "MacBook Air", key: Data(count: 32)), hostID: UUID())
 
     /// A dashboard window's content. Its host answers over the loopback interface unless it is `notFound`.
     static func dashboard(
         hasHost: Bool, notFound: Bool = false, pane: (HostPairing.ID) -> DashboardPane = { .overview($0) }
     ) -> DashboardSplitViewController {
         let store = PreviewSecretStore()
-        let host = PairedMac(pairing: HostPairing(id: UUID(), name: "m6mini", key: Data(count: 32)), hostID: UUID())
+        let host = PairedMac(pairing: HostPairing(id: UUID(), name: "Mac mini", key: Data(count: 32)), hostID: UUID())
         if hasHost { try? store.write(JSONEncoder().encode([host])) }
         let hosts = PairedMacs(store: store, name: HostPane.macName, role: .dashboard, browses: false)
         if hasHost, !notFound { connect(host, to: hosts, stopsAnswering: false, managing: hostManagedMac) }
