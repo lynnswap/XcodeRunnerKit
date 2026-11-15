@@ -35,6 +35,8 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
     init(settings: HostSettingsModel) { self.settings = settings }
 
     nonisolated func perform(_ request: Data, withReply reply: @escaping @Sendable (Data) -> Void) {
+        // The connection that delivers the reply, which this method has only while it is called.
+        nonisolated(unsafe) let connection = NSXPCConnection.current()
         Task { @MainActor in
             let request = Result { try JSONDecoder().decode(HostSettingsBridgeRequest.self, from: request) }
             let response: HostSettingsBridgeResponse
@@ -54,8 +56,13 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
             }
             do { reply(try JSONEncoder().encode(response)) }
             catch { reply(Data(#"{"error":"Could not encode the host settings response."}"#.utf8)) }
-            // The command has the answer, as a dashboard has before this Mac registers runners or restarts.
-            if let answered { await settings.finish(answered.request, answeredWith: answered.reply, registersRunners: true) }
+            guard let answered else { return }
+            // The command has the answer before this Mac registers runners or restarts, as a dashboard has: a host
+            // that stops right away would otherwise end the connection with the reply still unsent.
+            if let connection {
+                await withCheckedContinuation { sent in connection.scheduleSendBarrierBlock { sent.resume() } }
+            }
+            await settings.finish(answered.request, answeredWith: answered.reply, registersRunners: true)
         }
     }
 
