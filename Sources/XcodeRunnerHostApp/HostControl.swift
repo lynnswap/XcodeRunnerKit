@@ -22,7 +22,10 @@ struct HostControl: AsyncParsableCommand {
     struct Configure: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             abstract: "Change the job limit, Simulator retention, Xcode, storage folder, or repository selection.",
-            discussion: "Each option is one change, applied in the order above, and prints the host's answer as JSON."
+            discussion: """
+                Each option is one change, applied in the order above, and prints the host's answer as JSON. The \
+                repository selection is a command of its own.
+                """
         )
 
         @Option(help: "How many Xcode jobs run at once.")
@@ -52,6 +55,10 @@ struct HostControl: AsyncParsableCommand {
             }
             guard selection == nil || mac.mac == nil else {
                 throw ValidationError("A managed Mac's runners are registered by its host. Select repositories without --mac.")
+            }
+            // The host registers runners after a changed limit, and takes no selection while it does.
+            guard selection == nil || settingsRequests.isEmpty else {
+                throw ValidationError("Select repositories in a command of their own, after the host applied the other settings.")
             }
         }
 

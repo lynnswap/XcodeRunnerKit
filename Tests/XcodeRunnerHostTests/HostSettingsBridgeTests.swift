@@ -73,6 +73,7 @@ struct HostSettingsBridgeTests {
         for request in configure.settingsRequests { _ = try await perform(.settings(request)) }
         #expect(try settings.pool.configuration() == .init(maximumConcurrentJobs: 2, simulatorRetention: .forever))
         #expect(throws: (any Error).self) { try HostControl.Configure.parse(["--repositories", "1", "--mac", "Second Mac"]) }
+        #expect(throws: (any Error).self) { try HostControl.Configure.parse(["--repositories", "1", "--maximum-jobs", "2"]) }
 
         // `xcode-runner host settings` changes the labels and the pause through the host as well, and gets its refusal.
         #expect(try await request(.setPaused(false), over: connection).error == nil)

@@ -349,6 +349,9 @@ xcode-runner host configure --storage /path/to/JobData
 xcode-runner host configure --repositories 101 102   # IDs from github status; --no-repositories selects none
 ```
 
+The repository selection is a command of its own: the host registers runners
+after a changed limit, and takes no selection while it does.
+
 On this Mac, `xcode-runner host settings` changes the same settings and lists
 their types and choices; see
 [Settings from CLI and MCP](#settings-from-cli-and-mcp). `configure` also
