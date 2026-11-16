@@ -267,6 +267,8 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
     /// `nil` in the report of a Mac that runs a version without the setting.
     private let buildServiceIsMissing: Bool?
     var savedBuildServiceIsMissing: Bool { buildServiceIsMissing ?? false }
+    /// Whether the Mac reports its build service. One that runs a version without the setting can have one saved.
+    var reportsBuildService: Bool { buildServiceIsMissing != nil }
     let buildServiceError: String?
     let canApplyPoolConfiguration: Bool
     let canEditStorage: Bool

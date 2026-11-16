@@ -165,20 +165,23 @@ private struct XcodeSection: View {
             if let problem = model.savedXcodeProblem { ErrorText(problem) }
             if let error = report.xcodeError { ErrorText(error) }
             if let error = model.xcodeSaveError { ErrorText(error) }
-            TextField("Build service", text: $model.buildServiceInput, prompt: Text("None"))
-                .disabled(model.isSavingBuildService)
-                .accessibilityIdentifier("build-service")
-            if model.canChooseFiles {
-                HStack {
-                    Spacer()
-                    Button("Choose…") { model.chooseBuildService() }
-                        .disabled(model.isSavingBuildService)
-                        .accessibilityIdentifier("choose-build-service")
+            // A Mac that runs a version without the setting reports none.
+            if model.showsBuildService {
+                TextField("Build service", text: $model.buildServiceInput, prompt: Text("None"))
+                    .disabled(model.isSavingBuildService)
+                    .accessibilityIdentifier("build-service")
+                if model.canChooseFiles {
+                    HStack {
+                        Spacer()
+                        Button("Choose…") { model.chooseBuildService() }
+                            .disabled(model.isSavingBuildService)
+                            .accessibilityIdentifier("choose-build-service")
+                    }
                 }
+                if let problem = model.savedBuildServiceProblem { ErrorText(problem) }
+                if let error = report.buildServiceError { ErrorText(error) }
+                if let error = model.buildServiceSaveError { ErrorText(error) }
             }
-            if let problem = model.savedBuildServiceProblem { ErrorText(problem) }
-            if let error = report.buildServiceError { ErrorText(error) }
-            if let error = model.buildServiceSaveError { ErrorText(error) }
         } header: {
             Text("Xcode")
         } footer: {
