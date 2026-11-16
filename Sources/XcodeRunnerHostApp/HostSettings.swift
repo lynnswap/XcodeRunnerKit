@@ -656,7 +656,8 @@ final class HostSettingsModel: HostSettingsDisplay {
             buildServiceError = nil
             if buildServiceInput == previousInput { buildServiceInput = savedBuildService?.path(percentEncoded: false) ?? "" }
         } catch {
-            buildServiceError = "Could not read the saved build service: \(error.localizedDescription)"
+            // The unread path is not shown, so only saving another one replaces it.
+            buildServiceError = "Could not read the saved build service: \(error.localizedDescription) Save a path to replace it."
         }
         savedBuildServiceIsMissing = savedBuildService.map {
             !FileManager.default.fileExists(atPath: $0.path(percentEncoded: false))
