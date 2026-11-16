@@ -111,7 +111,10 @@ final class HostSplitViewController: PaneSplitViewController {
             var showHost: (@MainActor () -> Void)?
             if model.shownHosts != nil { showHost = { [weak self] in self?.showHost() } }
             return OverviewViewController(
-                model: OverviewModel(settings: settings, addMac: { [weak self] in self?.addMac() }, showHost: showHost)
+                model: OverviewModel(
+                    settings: settings, addMac: { [weak self] in self?.addMac() }, shownHosts: model.shownHosts,
+                    showHost: showHost
+                )
             )
         case .mac: return MacViewController(model: MacPaneModel(settings: settings))
         case .managedMac(let id):

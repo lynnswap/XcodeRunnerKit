@@ -203,6 +203,7 @@ struct OverviewView: View {
                 Button("Show a Mac…") { showHost() }
                     .accessibilityIdentifier("show-host")
             }
+            if let message = model.shownHostsMessage { ErrorText(message) }
         } header: {
             Text("Hosts on Other Macs")
         } footer: {
