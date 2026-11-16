@@ -48,6 +48,8 @@ protocol MacList: AnyObject, Observable {
     func saveStorageDirectory(of id: HostPairing.ID) async
     /// Saves the Xcode selected for a Mac's jobs.
     func saveXcodeSelection(of id: HostPairing.ID) async
+    /// Saves the build service entered for a Mac's jobs.
+    func saveBuildService(of id: HostPairing.ID) async
     /// Saves the labels edited for a Mac's runners.
     ///
     /// - Returns: Whether the Mac saved a different list.

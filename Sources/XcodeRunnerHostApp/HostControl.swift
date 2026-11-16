@@ -21,7 +21,7 @@ struct HostControl: AsyncParsableCommand {
     /// `xcode-runner host settings` changes the same settings on this Mac, with a catalog of their types.
     struct Configure: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Change the job limit, Simulator retention, Xcode, storage folder, or repository selection.",
+            abstract: "Change the job limit, Simulator retention, Xcode, build service, storage folder, or repository selection.",
             discussion: """
                 Each option is one change, applied in the order above, and prints the host's answer as JSON. The \
                 repository selection is a command of its own.
@@ -34,6 +34,8 @@ struct HostControl: AsyncParsableCommand {
         var simulatorRetention: String?
         @Option(help: "The Xcode for jobs that name none: an Xcode's Contents/Developer path, or `system` for the system's selection.")
         var xcode: String?
+        @Option(help: "The build service for jobs that name none: the path of its executable, or `none` to save no path.")
+        var buildService: String?
         @Option(help: "The folder for checkouts, build output, and the compiler cache. It applies when the host restarts.")
         var storage: String?
         @Option(parsing: .upToNextOption, help: "The IDs of the repositories whose runners the host registers, as `github status` lists them. They replace the selection.")
@@ -72,6 +74,7 @@ struct HostControl: AsyncParsableCommand {
                 requests.append(.configurePool(.init(maximumConcurrentJobs: maximumJobs, simulatorRetention: retention)))
             }
             if let xcode { requests.append(.saveXcode(developerDirectory: xcode == "system" ? nil : xcode)) }
+            if let buildService { requests.append(.saveBuildService(path: buildService == "none" ? nil : buildService)) }
             if let storage { requests.append(.saveStorage(directory: storage)) }
             return requests
         }
@@ -574,6 +577,7 @@ struct HostControl: AsyncParsableCommand {
             case .configurePool(let changes): .configurePool(changes, mac: id)
             case .saveStorage(let directory): .saveStorage(directory: directory, mac: id)
             case .saveXcode(let developerDirectory): .saveXcode(developerDirectory: developerDirectory, mac: id)
+            case .saveBuildService(let path): .saveBuildService(path: path, mac: id)
             case .saveRunnerLabels(let labels): .saveRunnerLabels(labels, mac: id)
             case .setPaused(let isPaused): .setPaused(isPaused, mac: id)
             case .restart: .restart(mac: id)

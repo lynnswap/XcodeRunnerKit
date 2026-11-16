@@ -184,6 +184,22 @@ struct HostPairingTests {
         #expect(settings.report?.savedXcodeIsMissing == true)
         #expect(settings.xcodeSelectionInput == "/Applications/Removed.app/Contents/Developer")
 
+        // The Mac saves the build service that its jobs use when they name none, and reports one that is not there.
+        settings.buildServiceInput = "BuildService"
+        await macs.saveBuildService(of: mac.id)
+        #expect(settings.buildServiceSaveError == "Enter an absolute path to a build service's executable.")
+        let buildService = root.appending(path: "BuildService")
+        settings.buildServiceInput = buildService.path(percentEncoded: false)
+        await macs.saveBuildService(of: mac.id)
+        #expect(settings.buildServiceSaveError == nil)
+        #expect(try managed.installation.buildServiceExecutableURL() == buildService)
+        #expect(settings.report?.savedBuildServiceIsMissing == true)
+        #expect(managed.buildServiceInput == settings.buildServiceInput)
+        settings.buildServiceInput = ""
+        await macs.saveBuildService(of: mac.id)
+        #expect(try managed.installation.buildServiceExecutableURL() == nil)
+        #expect(settings.report?.savedBuildServiceIsMissing == false)
+
         // The Mac keeps the labels of its runners, and its managing host reads them with its runner folders and
         // records those that it put on the runners.
         settings.runnerLabelsInput = "Fast, xcode-27"

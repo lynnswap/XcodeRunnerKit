@@ -91,6 +91,13 @@ final class RelayedMacs: MacList {
         }
     }
 
+    func saveBuildService(of id: HostPairing.ID) async {
+        guard let settings = settings[id], let mac = listedMacs.first(where: { $0.id == id }) else { return }
+        await settings.saveBuildService(on: mac.name) { path in
+            try await self.change(.saveBuildService(path: path, mac: id), of: id)
+        }
+    }
+
     @discardableResult
     func saveRunnerLabels(of id: HostPairing.ID) async -> Bool {
         guard let settings = settings[id], let mac = listedMacs.first(where: { $0.id == id }) else { return false }

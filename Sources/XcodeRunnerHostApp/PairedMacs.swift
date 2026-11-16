@@ -30,6 +30,10 @@ final class PairedMacSettings {
     var xcodeSelectionInput = ""
     private(set) var isSavingXcode = false
     private(set) var xcodeSaveError: String?
+    /// The path of the build service's executable, or an empty string to save none.
+    var buildServiceInput = ""
+    private(set) var isSavingBuildService = false
+    private(set) var buildServiceSaveError: String?
     /// The labels being edited for the Mac's runners, separated by commas.
     var runnerLabelsInput = ""
     private(set) var isSavingRunnerLabels = false
@@ -54,7 +58,7 @@ final class PairedMacSettings {
     var canApplyPoolConfiguration: Bool { report?.canApplyPoolConfiguration == true && !isSaving }
 
     var isChanging: Bool {
-        isSaving || isSavingStorage || isSavingXcode || isSavingRunnerLabels || isChangingPause || isRestarting
+        isSaving || isSavingStorage || isSavingXcode || isSavingBuildService || isSavingRunnerLabels || isChangingPause || isRestarting
             || isChangingGitHub
     }
 
@@ -74,6 +78,9 @@ final class PairedMacSettings {
         }
         if xcodeSelectionInput == self.report?.savedDeveloperDirectory?.path(percentEncoded: false) ?? "" {
             xcodeSelectionInput = report.savedDeveloperDirectory?.path(percentEncoded: false) ?? ""
+        }
+        if buildServiceInput == self.report?.savedBuildService?.path(percentEncoded: false) ?? "" {
+            buildServiceInput = report.savedBuildService?.path(percentEncoded: false) ?? ""
         }
         if runnerLabelsInput == RunnerLabels.text(self.report?.runnerLabels ?? []) {
             runnerLabelsInput = RunnerLabels.text(report.runnerLabels)
@@ -160,6 +167,28 @@ final class PairedMacSettings {
             xcodeSelectionInput = report.savedDeveloperDirectory?.path(percentEncoded: false) ?? ""
         } catch {
             xcodeSaveError = Self.changeFailure(error, on: macName)
+        }
+    }
+
+    /// Saves the entered build service for the Mac's jobs.
+    ///
+    /// - Parameter send: Sends the path of the service's executable to the Mac named `macName`, or `nil` to save
+    ///   none, and returns the settings it answers with.
+    func saveBuildService(on macName: String, send: (String?) async throws -> HostSettingsReport) async {
+        guard report != nil, !isSavingBuildService else { return }
+        isSavingBuildService = true
+        beginChange()
+        defer {
+            isSavingBuildService = false
+            endChange()
+        }
+        do {
+            let report = try await send(buildServiceInput.isEmpty ? nil : buildServiceInput)
+            buildServiceSaveError = nil
+            show(report)
+            buildServiceInput = report.savedBuildService?.path(percentEncoded: false) ?? ""
+        } catch {
+            buildServiceSaveError = Self.changeFailure(error, on: macName)
         }
     }
 
@@ -756,6 +785,13 @@ final class PairedMacs: MacList {
         }
     }
 
+    func saveBuildService(of id: HostPairing.ID) async {
+        guard let mac = mac(id), let settings = settings[id] else { return }
+        await settings.saveBuildService(on: mac.name) { path in
+            try await self.requestSettings(.saveBuildService(path: path), from: mac)
+        }
+    }
+
     @discardableResult
     func saveRunnerLabels(of id: HostPairing.ID) async -> Bool {
         guard let mac = mac(id), let settings = settings[id] else { return false }
@@ -1036,7 +1072,8 @@ extension HostLinkRequest {
             switch request {
             case .read(refreshing: nil), .discover, .pair, .confirmCode, .cancelPairing: HostLink.requestTimeout
             case .read: HostLink.requestTimeout * 3
-            case .configurePool, .saveStorage, .saveXcode, .saveRunnerLabels, .setPaused, .restart, .remove:
+            case .configurePool, .saveStorage, .saveXcode, .saveBuildService, .saveRunnerLabels, .setPaused, .restart,
+                 .remove:
                 PairedMacs.changeTimeout
             }
         case .runners(let request):

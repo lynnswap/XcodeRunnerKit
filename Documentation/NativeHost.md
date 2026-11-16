@@ -364,6 +364,7 @@ xcode-runner host restart         # stop the host and start it again
 ```sh
 xcode-runner host configure --maximum-jobs 2 --simulator-retention 20   # minutes, or forever
 xcode-runner host configure --xcode /Applications/Xcode.app/Contents/Developer   # or system
+xcode-runner host configure --build-service /path/to/SWBBuildServiceBundle   # or none
 xcode-runner host configure --storage /path/to/JobData
 xcode-runner host configure --repositories 101 102   # IDs from github status; --no-repositories selects none
 ```
@@ -597,13 +598,26 @@ operation instead of sharing an unscoped cache. An explicit `--compilation-cache
 uses that directory as given, so choose a repository-specific path when overriding
 the default.
 
-To select a custom build service for hosted jobs, save its executable path:
+To select a custom build service for a Mac's jobs, enter its executable's path
+in **Build service** under **Xcode** in the Mac's pane and choose **Save** in
+the toolbar. With an empty field, jobs use the build service that
+their environment names, or the one in their Xcode. The pane says so when no
+file is at the saved path. From the CLI:
 
 ```sh
 "$HOME/Library/Application Support/XcodeRunnerKit/bin/xcode-runner" \
   host build-service configure \
   --path /path/to/SWBBuildServiceBundle
 ```
+
+The next job reads the saved path directly. No host restart or login-time
+environment setup is needed, and the saved path comes before a build service
+that the login session's environment names. A workflow can override it with
+`--build-service-path /path/to/SWBBuildServiceBundle`. Run
+`host build-service status --json` to inspect the saved selection, or
+`host build-service configure` without `--path` to clear the override.
+For the Homebrew package, the executable is
+`$(brew --prefix custom-xcode-build-service)/libexec/libexec/swift-build/SWBBuildService.bundle/SWBBuildServiceBundle`.
 
 To choose the Xcode for a Mac's jobs, select it under **Xcode** in the Mac's
 pane and choose **Save** in the toolbar. The pane lists the Xcode apps installed on that Mac,
@@ -617,14 +631,6 @@ Xcode fail until another one is saved. From the CLI or MCP:
 xcode-runner host settings update \
   '{"scope":"xcode","developerDirectory":"/Applications/Xcode.app/Contents/Developer"}'
 ```
-
-The next job reads the saved path directly. No host restart or login-time
-environment setup is needed. A workflow can override it with
-`--build-service-path /path/to/SWBBuildServiceBundle`. Run
-`host build-service status --json` to inspect the saved selection, or
-`host build-service configure` without `--path` to clear the override.
-For the Homebrew package, the executable is
-`$(brew --prefix custom-xcode-build-service)/libexec/libexec/swift-build/SWBBuildService.bundle/SWBBuildServiceBundle`.
 
 ### Private SwiftPM dependencies
 

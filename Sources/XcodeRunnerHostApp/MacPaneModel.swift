@@ -255,6 +255,46 @@ final class MacPaneModel: PaneSaving {
         }
     }
 
+    // MARK: Build service
+
+    /// The path of the build service's executable, or an empty string to save none.
+    var buildServiceInput: String {
+        get { thisMac?.buildServiceInput ?? paired?.buildServiceInput ?? "" }
+        set {
+            thisMac?.buildServiceInput = newValue
+            paired?.buildServiceInput = newValue
+        }
+    }
+
+    /// The saved build service, as its input shows it.
+    private var savedBuildService: String { report?.savedBuildService?.path(percentEncoded: false) ?? "" }
+
+    var isSavingBuildService: Bool {
+        valuesBeingSaved.contains(.buildService) || thisMac?.isSavingBuildService ?? paired?.isSavingBuildService ?? false
+    }
+    /// Whether the Mac reports its build service, so that the pane can show and save it.
+    var showsBuildService: Bool { report?.reportsBuildService == true }
+    /// A path that could not be read is not the one shown, so only an edit replaces it.
+    var canSaveBuildService: Bool { showsBuildService && !isSavingBuildService && buildServiceInput != savedBuildService }
+    /// Why the jobs that use the saved build service fail: no file is at its path on the Mac.
+    var savedBuildServiceProblem: String? {
+        guard report?.savedBuildServiceIsMissing == true else { return nil }
+        return "No file is at \(savedBuildService) on \(mac.object). Jobs that name no build service fail until another one is saved."
+    }
+    var buildServiceSaveError: String? { thisMac?.buildServiceSaveError ?? paired?.buildServiceSaveError }
+
+    func chooseBuildService() {
+        guard let thisMac else { return }
+        Task { await thisMac.chooseBuildService() }
+    }
+
+    private func saveBuildService() async {
+        switch source {
+        case .thisMac(let settings): await settings.saveBuildServiceSelection()
+        case .listed(let macs, let id): await macs.saveBuildService(of: id)
+        }
+    }
+
     // MARK: Storage
 
     var storageDirectoryInput: String {
@@ -275,8 +315,9 @@ final class MacPaneModel: PaneSaving {
             || report.storageError != nil || storageSaveError != nil
     }
     var storageSaveError: String? { thisMac?.storageSaveError ?? paired?.storageSaveError }
-    /// Whether a folder panel can choose the folder. Another Mac's folders are not shown in a panel on this Mac.
-    var canChooseStorageDirectory: Bool { thisMac != nil }
+    /// Whether a panel can choose the storage folder and the build service. Another Mac's files are not shown in a
+    /// panel on this Mac.
+    var canChooseFiles: Bool { thisMac != nil }
     var isRestarting: Bool { thisMac.map { $0.hostState == .stopping } ?? paired?.isRestarting ?? false }
     /// Why the Mac refused to restart for a paired Mac, or why it did not confirm that it restarts.
     var restartError: String? { paired?.restartError }
@@ -307,7 +348,7 @@ final class MacPaneModel: PaneSaving {
     enum SavedValue: Hashable {
         /// The job limit and the Simulator retention, which the Mac applies together.
         case pool
-        case runnerLabels, xcode, storage
+        case runnerLabels, xcode, buildService, storage
     }
 
     /// The values that a save from this pane has still to save. Their inputs take no edits until then, so that the
@@ -326,13 +367,14 @@ final class MacPaneModel: PaneSaving {
     var canSave: Bool {
         guard let report, !isSaving else { return false }
         if report.isNewPool || poolDraft.isEdited, !canApplyPoolConfiguration { return false }
-        return canSaveRunnerLabels || canApplyPoolConfiguration || canSaveXcodeSelection || canSaveStorageDirectory
+        return canSaveRunnerLabels || canApplyPoolConfiguration || canSaveXcodeSelection || canSaveBuildService
+            || canSaveStorageDirectory
     }
 
     var hasEdits: Bool {
         guard let report else { return false }
         return RunnerLabels.parse(runnerLabelsInput) != report.runnerLabels || poolDraft.isEdited
-            || selectedXcode != savedXcode
+            || selectedXcode != savedXcode || showsBuildService && buildServiceInput != savedBuildService
             || storageDirectoryInput != report.savedStorageDirectory?.path(percentEncoded: false) ?? ""
     }
 
@@ -341,6 +383,7 @@ final class MacPaneModel: PaneSaving {
         runnerLabelsInput = RunnerLabels.text(report.runnerLabels)
         poolDraft.revert()
         selectedXcode = savedXcode
+        buildServiceInput = savedBuildService
         storageDirectoryInput = report.savedStorageDirectory?.path(percentEncoded: false) ?? ""
     }
 
@@ -351,6 +394,7 @@ final class MacPaneModel: PaneSaving {
         if canSaveRunnerLabels { valuesBeingSaved.insert(.runnerLabels) }
         if canApplyPoolConfiguration { valuesBeingSaved.insert(.pool) }
         if canSaveXcodeSelection { valuesBeingSaved.insert(.xcode) }
+        if canSaveBuildService { valuesBeingSaved.insert(.buildService) }
         if canSaveStorageDirectory { valuesBeingSaved.insert(.storage) }
         savedValueCount = valuesBeingSaved.count
         Task {
@@ -361,6 +405,8 @@ final class MacPaneModel: PaneSaving {
             valuesBeingSaved.remove(.runnerLabels)
             if valuesBeingSaved.contains(.xcode) { await saveXcodeSelection() }
             valuesBeingSaved.remove(.xcode)
+            if valuesBeingSaved.contains(.buildService) { await saveBuildService() }
+            valuesBeingSaved.remove(.buildService)
             if valuesBeingSaved.contains(.storage) { await saveStorageDirectory() }
             valuesBeingSaved.remove(.storage)
         }

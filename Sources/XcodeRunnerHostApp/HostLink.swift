@@ -42,6 +42,9 @@ enum HostSettingsRequest: Codable, Sendable {
     /// Saves the Xcode that the Mac's jobs use when they name none, as its `Contents/Developer` directory, or `nil`
     /// for the Xcode that `xcode-select` names.
     case saveXcode(developerDirectory: String?)
+    /// Saves the build service that the Mac's jobs use when they name none, as the path of its executable, or `nil`
+    /// to save none.
+    case saveBuildService(path: String?)
     /// Saves the labels that the Mac's runners get besides `xcode-runnerkit`. Whoever registers the Mac's runners
     /// puts them on the runners afterwards.
     case saveRunnerLabels([String])
@@ -304,7 +307,7 @@ enum HostLink {
     /// - A new value in a reply or a report is optional.
     /// - A state that a report names is a type that keeps a raw value it does not know, as `HostState` does. Enums
     ///   that reports carry gain no cases.
-    static let version = 7
+    static let version = 8
     /// The oldest version whose messages this version reads. A Mac that runs an earlier one is shown as running
     /// another version, and the Macs do not pair. Versions before 7 answered only their own version.
     ///
