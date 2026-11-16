@@ -307,9 +307,11 @@ final class DashboardWindowModel: PaneWindowModel {
 
     /// A host's settings are those of everything that it manages, and the Macs that run its jobs follow under
     /// Runners, the host among them, as in the host's own window. Several hosts are told apart by their names.
-    var sidebarGroups: [SidebarGroup] {
-        let namesHosts = hosts.macs.count > 1
-        return hosts.macs.flatMap { host in
+    var sidebarGroups: [SidebarGroup] { Self.sidebarGroups(of: hosts, namingHosts: hosts.macs.count > 1) }
+
+    /// - Parameter namesHosts: Whether the headings name each host, which tells its panes from another Mac's.
+    static func sidebarGroups(of hosts: PairedMacs, namingHosts namesHosts: Bool) -> [SidebarGroup] {
+        hosts.macs.flatMap { host in
             // What the host last answered names its state, and its connection does while it does not answer.
             let answer = hosts.answer(of: host.id)
             let connection = hosts.status(of: host.id)
@@ -347,8 +349,11 @@ final class DashboardWindowModel: PaneWindowModel {
     }
 
     /// The name of the shown pane, or of the window while no host is shown.
-    var title: String {
-        guard let pane = shownPane, let host = hosts.mac(pane.host) else { return "Dashboard" }
+    var title: String { shownPane.flatMap { Self.title(of: $0, in: hosts) } ?? "Dashboard" }
+
+    /// The name of a pane, or `nil` for a pane whose host left the list.
+    static func title(of pane: DashboardPane, in hosts: PairedMacs) -> String? {
+        guard let host = hosts.mac(pane.host) else { return nil }
         return switch pane {
         case .overview: "Settings"
         case .mac: host.name
@@ -374,23 +379,10 @@ final class DashboardSplitViewController: PaneSplitViewController {
         guard let pane = model.shownPane, let host = hosts.mac(pane.host) else {
             return NoMacsViewController(hosts: hosts) { [weak self] in self?.showMacOnDashboard(nil) }
         }
-        switch pane {
-        case .overview:
-            return OverviewViewController(model: OverviewModel(hosts: hosts, host: host) { [weak self] in
-                self?.addMac(managedBy: host.id)
-            })
-        case .mac:
-            // The host registers runners for a changed limit itself.
-            return MacViewController(model: MacPaneModel(macs: hosts, id: host.id) { [hosts, model] in
-                model.pane = hosts.macs.first.map { .overview($0.id) }
-            })
-        case .managedMac(let id, _):
-            // The host registers the Mac's runners, so it applies a changed limit to them.
-            return MacViewController(model: MacPaneModel(
-                macs: hosts.macsManaged(by: host.id), id: id, relay: (hosts, host.id),
-                removed: { [model] in model.pane = .overview(host.id) }
-            ))
-        }
+        return makeDashboardPaneViewController(
+            pane, of: host, in: hosts, addMac: { [weak self] in self?.addMac(managedBy: host.id) },
+            show: { [model] in model.pane = $0 }
+        )
     }
 
     /// Shows a pane of a host that the dashboard lists.
@@ -408,6 +400,32 @@ final class DashboardSplitViewController: PaneSplitViewController {
     func addMac(managedBy host: HostPairing.ID) {
         guard !isAddingMac else { return }
         presentAddMacSheet(for: hosts.macsManaged(by: host)) { [model] mac in model.pane = .managedMac(mac.id, host: host) }
+    }
+}
+
+/// Creates a pane of a host that a window shows as a dashboard.
+///
+/// - Parameters:
+///   - addMac: Pairs the host with a Mac for it to manage.
+///   - show: Shows another of the hosts' panes after the pane's Mac was removed, or `nil` when no host is left.
+@MainActor
+func makeDashboardPaneViewController(
+    _ pane: DashboardPane, of host: PairedMac, in hosts: PairedMacs, addMac: @escaping @MainActor () -> Void,
+    show: @escaping @MainActor (DashboardPane?) -> Void
+) -> NSViewController {
+    switch pane {
+    case .overview:
+        OverviewViewController(model: OverviewModel(hosts: hosts, host: host, addMac: addMac))
+    case .mac:
+        // The host registers runners for a changed limit itself.
+        MacViewController(model: MacPaneModel(macs: hosts, id: host.id) { [hosts] in
+            show(hosts.macs.first.map { .overview($0.id) })
+        })
+    case .managedMac(let id, _):
+        // The host registers the Mac's runners, so it applies a changed limit to them.
+        MacViewController(model: MacPaneModel(
+            macs: hosts.macsManaged(by: host.id), id: id, relay: (hosts, host.id), removed: { show(.overview(host.id)) }
+        ))
     }
 }
 
