@@ -29,16 +29,29 @@ enum HostPane: Hashable {
     static let macName = Host.current().localizedName ?? "This Mac"
 }
 
-/// What the host window shows: this Mac's panes and the Macs that it manages in the sidebar, and the selected pane.
+/// What the host window shows: this Mac's panes and the Macs that it manages in the sidebar, the hosts on other Macs
+/// that this Mac shows as a dashboard after them, and the selected pane.
 @MainActor @Observable
 final class HostWindowModel: PaneWindowModel {
     let settings: HostSettingsModel
-    /// The pane that is selected in the sidebar. A pane always stays selected.
-    var pane: HostPane
+    /// The hosts on other Macs that this Mac paired with as a dashboard.
+    let shownHosts: PairedMacs?
+    /// The pane of this Mac that is selected in the sidebar, unless one of another host is. Selecting it leaves the
+    /// other host's pane.
+    var pane: HostPane { didSet { shownHostPane = nil } }
+    /// The pane of a host on another Mac that the person selected in place of `pane`.
+    var shownHostPane: DashboardPane?
 
-    init(settings: HostSettingsModel, pane: HostPane = .overview) {
+    init(settings: HostSettingsModel, shownHosts: PairedMacs? = nil, pane: HostPane = .overview) {
         self.settings = settings
+        self.shownHosts = shownHosts
         self.pane = pane
+    }
+
+    /// The selected pane of another host, while this Mac still shows that host. A pane leaves with its host.
+    var shownPane: (pane: DashboardPane, hosts: PairedMacs, host: PairedMac)? {
+        guard let shownHosts, let shownHostPane, let host = shownHosts.mac(shownHostPane.host) else { return nil }
+        return (shownHostPane, shownHosts, host)
     }
 
     var sidebarGroups: [SidebarGroup] {
@@ -54,16 +67,22 @@ final class HostWindowModel: PaneWindowModel {
                 let status = settings.managedMacs.status(of: $0.id)
                 return row(.managedMac($0.id), subtitle: status.title, status: .init(symbol: status.systemImage, color: status.tint))
             }),
-        ]
+        ] + (shownHosts.map { DashboardWindowModel.sidebarGroups(of: $0, namingHosts: true) } ?? [])
     }
 
-    var selectedPane: AnyHashable? { pane }
+    var selectedPane: AnyHashable? { shownPane.map { AnyHashable($0.pane) } ?? AnyHashable(pane) }
 
     func select(_ pane: AnyHashable) {
-        if let pane = pane.base as? HostPane { self.pane = pane }
+        if let pane = pane.base as? HostPane {
+            self.pane = pane
+        } else if let pane = pane.base as? DashboardPane {
+            shownHostPane = pane
+        }
     }
 
-    var title: String { pane.title(in: settings) }
+    var title: String {
+        shownPane.flatMap { DashboardWindowModel.title(of: $0.pane, in: $0.hosts) } ?? pane.title(in: settings)
+    }
 }
 
 /// The host window's content: this Mac's panes and the Macs that it manages in a sidebar beside the selected pane.
@@ -80,12 +99,26 @@ final class HostSplitViewController: PaneSplitViewController {
     required init?(coder: NSCoder) { nil }
 
     override func makePaneViewController() -> NSViewController {
+        if let shown = model.shownPane {
+            let host = shown.host.id
+            return makeDashboardPaneViewController(
+                shown.pane, of: shown.host, in: shown.hosts, addMac: { [weak self] in self?.addMac(managedBy: host) },
+                show: { [model] in model.shownHostPane = $0 }
+            )
+        }
         switch model.pane {
         case .overview:
-            OverviewViewController(model: OverviewModel(settings: settings) { [weak self] in self?.addMac() })
-        case .mac: MacViewController(model: MacPaneModel(settings: settings))
+            var showHost: (@MainActor () -> Void)?
+            if model.shownHosts != nil { showHost = { [weak self] in self?.showHost() } }
+            return OverviewViewController(
+                model: OverviewModel(
+                    settings: settings, addMac: { [weak self] in self?.addMac() }, shownHosts: model.shownHosts,
+                    showHost: showHost
+                )
+            )
+        case .mac: return MacViewController(model: MacPaneModel(settings: settings))
         case .managedMac(let id):
-            MacViewController(model: MacPaneModel(
+            return MacViewController(model: MacPaneModel(
                 macs: settings.managedMacs, id: id,
                 // This Mac registers the Mac's runners, so a changed limit or label is applied to them here.
                 registrationsChanged: { [settings] in await settings.github.synchronize() },
@@ -99,13 +132,30 @@ final class HostSplitViewController: PaneSplitViewController {
         guard !isAddingMac, settings.canAddMacs else { return }
         presentAddMacSheet(for: settings.managedMacs) { [model] mac in model.pane = .managedMac(mac.id) }
     }
+
+    /// Pairs this Mac as a dashboard with a host on another Mac, and shows that host.
+    private func showHost() {
+        guard !isAddingMac, let hosts = model.shownHosts else { return }
+        presentAddMacSheet(for: hosts) { [model] host in model.shownHostPane = .overview(host.id) }
+    }
+
+    /// Pairs a host that this Mac shows with a Mac for it to manage, and shows that Mac.
+    private func addMac(managedBy host: HostPairing.ID) {
+        guard !isAddingMac, let hosts = model.shownHosts else { return }
+        presentAddMacSheet(for: hosts.macsManaged(by: host)) { [model] mac in
+            model.shownHostPane = .managedMac(mac.id, host: host)
+        }
+    }
 }
 
 /// Creates the host window.
+///
+/// - Parameter shownHosts: The hosts on other Macs that this Mac paired with as a dashboard.
 @MainActor
-func makeHostWindowController(settings: HostSettingsModel) -> NSWindowController {
+func makeHostWindowController(settings: HostSettingsModel, shownHosts: PairedMacs) -> NSWindowController {
     makePaneWindowController(
-        content: HostSplitViewController(model: HostWindowModel(settings: settings)), autosaveName: "XcodeHomeRunnerSettings"
+        content: HostSplitViewController(model: HostWindowModel(settings: settings, shownHosts: shownHosts)),
+        autosaveName: "XcodeHomeRunnerSettings"
     )
 }
 

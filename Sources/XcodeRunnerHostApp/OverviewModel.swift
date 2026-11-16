@@ -12,11 +12,25 @@ final class OverviewModel: PaneSaving {
 
     private let source: Source
     private let pairManagedMac: @MainActor () -> Void
+    /// Pairs this Mac as a dashboard with a host on another Mac. `nil` where the window shows no such hosts.
+    let showHost: (@MainActor () -> Void)?
+    private let shownHosts: PairedMacs?
+    /// What the list of those hosts has to tell: a host that was removed but could not be told, or pairings that
+    /// could not be read.
+    var shownHostsMessage: String? { shownHosts?.message }
 
-    /// - Parameter addMac: Pairs this Mac with a Mac for it to manage.
-    init(settings: HostSettingsModel, addMac: @escaping @MainActor () -> Void) {
+    /// - Parameters:
+    ///   - addMac: Pairs this Mac with a Mac for it to manage.
+    ///   - shownHosts: The hosts on other Macs that the window shows after this Mac.
+    ///   - showHost: Pairs this Mac as a dashboard with another of them.
+    init(
+        settings: HostSettingsModel, addMac: @escaping @MainActor () -> Void, shownHosts: PairedMacs? = nil,
+        showHost: (@MainActor () -> Void)? = nil
+    ) {
         source = .thisMac(settings)
         pairManagedMac = addMac
+        self.shownHosts = shownHosts
+        self.showHost = showHost
     }
 
     /// - Parameters:
@@ -25,6 +39,8 @@ final class OverviewModel: PaneSaving {
     init(hosts: PairedMacs, host: PairedMac, addMac: @escaping @MainActor () -> Void) {
         source = .host(hosts, host)
         pairManagedMac = addMac
+        shownHosts = nil
+        showHost = nil
     }
 
     var mac: MacReference {
