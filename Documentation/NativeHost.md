@@ -364,7 +364,7 @@ xcode-runner host restart         # stop the host and start it again
 ```sh
 xcode-runner host configure --maximum-jobs 2 --simulator-retention 20   # minutes, or forever
 xcode-runner host configure --xcode /Applications/Xcode.app/Contents/Developer   # or system
-xcode-runner host configure --build-service /path/to/SWBBuildServiceBundle   # or xcode
+xcode-runner host configure --build-service /path/to/SWBBuildServiceBundle   # or none
 xcode-runner host configure --storage /path/to/JobData
 xcode-runner host configure --repositories 101 102   # IDs from github status; --no-repositories selects none
 ```
@@ -600,8 +600,9 @@ the default.
 
 To select a custom build service for a Mac's jobs, enter its executable's path
 in **Build service** under **Xcode** in the Mac's pane and choose **Save** in
-the toolbar. An empty field selects the build service in the jobs' Xcode. The
-pane says so when no file is at the saved path. From the CLI:
+the toolbar. With an empty field, jobs use the build service that
+their environment names, or the one in their Xcode. The pane says so when no
+file is at the saved path. From the CLI:
 
 ```sh
 "$HOME/Library/Application Support/XcodeRunnerKit/bin/xcode-runner" \

@@ -187,7 +187,8 @@ protocol HostSettingsDisplay {
     /// Whether the saved Xcode's folder no longer exists on the Mac, so that jobs that name no Xcode fail.
     var savedXcodeIsMissing: Bool { get }
     var xcodeError: String? { get }
-    /// The build service that the Mac's jobs use when they name none, or `nil` for the one in their Xcode.
+    /// The build service that the Mac's jobs use when they name none. With `nil`, they use the one that their
+    /// environment names, or the one in their Xcode.
     var savedBuildService: URL? { get }
     /// Whether no file is at the saved build service's path on the Mac, so that the jobs that use it fail.
     var savedBuildServiceIsMissing: Bool { get }
@@ -351,7 +352,7 @@ final class HostSettingsModel: HostSettingsDisplay {
     private(set) var buildServiceError: String?
     private(set) var buildServiceSaveError: String?
     private(set) var isSavingBuildService = false
-    /// The path of the build service's executable, or an empty string for the one in the jobs' Xcode.
+    /// The path of the build service's executable, or an empty string to save none.
     var buildServiceInput = ""
     /// The installed Xcodes are listed again after this long, because listing them reads every Xcode's version.
     private static let xcodeListLifetime = Duration.seconds(30)
@@ -662,6 +663,8 @@ final class HostSettingsModel: HostSettingsDisplay {
         guard !isSavingBuildService else { return }
         do {
             try saveBuildService(buildServiceInput.isEmpty ? nil : buildServiceInput)
+            // The saved path is the entered one without its `.` and `..` components.
+            buildServiceInput = savedBuildService?.path(percentEncoded: false) ?? ""
             buildServiceSaveError = nil
         } catch {
             buildServiceSaveError = error.localizedDescription

@@ -30,7 +30,7 @@ final class PairedMacSettings {
     var xcodeSelectionInput = ""
     private(set) var isSavingXcode = false
     private(set) var xcodeSaveError: String?
-    /// The path of the build service's executable, or an empty string for the one in the jobs' Xcode.
+    /// The path of the build service's executable, or an empty string to save none.
     var buildServiceInput = ""
     private(set) var isSavingBuildService = false
     private(set) var buildServiceSaveError: String?
@@ -172,8 +172,8 @@ final class PairedMacSettings {
 
     /// Saves the entered build service for the Mac's jobs.
     ///
-    /// - Parameter send: Sends the path of the service's executable to the Mac named `macName`, or `nil` for the
-    ///   service in the jobs' Xcode, and returns the settings it answers with.
+    /// - Parameter send: Sends the path of the service's executable to the Mac named `macName`, or `nil` to save
+    ///   none, and returns the settings it answers with.
     func saveBuildService(on macName: String, send: (String?) async throws -> HostSettingsReport) async {
         guard report != nil, !isSavingBuildService else { return }
         isSavingBuildService = true

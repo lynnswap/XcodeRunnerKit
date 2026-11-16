@@ -257,7 +257,7 @@ final class MacPaneModel: PaneSaving {
 
     // MARK: Build service
 
-    /// The path of the build service's executable, or an empty string for the one in the jobs' Xcode.
+    /// The path of the build service's executable, or an empty string to save none.
     var buildServiceInput: String {
         get { thisMac?.buildServiceInput ?? paired?.buildServiceInput ?? "" }
         set {

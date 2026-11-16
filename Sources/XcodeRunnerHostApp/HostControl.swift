@@ -34,7 +34,7 @@ struct HostControl: AsyncParsableCommand {
         var simulatorRetention: String?
         @Option(help: "The Xcode for jobs that name none: an Xcode's Contents/Developer path, or `system` for the system's selection.")
         var xcode: String?
-        @Option(help: "The build service for jobs that name none: the path of its executable, or `xcode` for the one in the jobs' Xcode.")
+        @Option(help: "The build service for jobs that name none: the path of its executable, or `none` to save no path.")
         var buildService: String?
         @Option(help: "The folder for checkouts, build output, and the compiler cache. It applies when the host restarts.")
         var storage: String?
@@ -74,7 +74,7 @@ struct HostControl: AsyncParsableCommand {
                 requests.append(.configurePool(.init(maximumConcurrentJobs: maximumJobs, simulatorRetention: retention)))
             }
             if let xcode { requests.append(.saveXcode(developerDirectory: xcode == "system" ? nil : xcode)) }
-            if let buildService { requests.append(.saveBuildService(path: buildService == "xcode" ? nil : buildService)) }
+            if let buildService { requests.append(.saveBuildService(path: buildService == "none" ? nil : buildService)) }
             if let storage { requests.append(.saveStorage(directory: storage)) }
             return requests
         }

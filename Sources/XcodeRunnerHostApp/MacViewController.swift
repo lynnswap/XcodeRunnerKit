@@ -165,7 +165,7 @@ private struct XcodeSection: View {
             if let problem = model.savedXcodeProblem { ErrorText(problem) }
             if let error = report.xcodeError { ErrorText(error) }
             if let error = model.xcodeSaveError { ErrorText(error) }
-            TextField("Build service", text: $model.buildServiceInput, prompt: Text("Xcode's own"))
+            TextField("Build service", text: $model.buildServiceInput, prompt: Text("None"))
                 .disabled(model.isSavingBuildService)
                 .accessibilityIdentifier("build-service")
             if model.canChooseFiles {
@@ -182,7 +182,7 @@ private struct XcodeSection: View {
         } header: {
             Text("Xcode")
         } footer: {
-            Text("Jobs on \(model.mac.object) use this Xcode unless their workflow passes --developer-directory or DEVELOPER_DIR. With System selection, they use the Xcode that xcode-select names. A build service is the path of an executable that builds in place of the one in Xcode, for the jobs whose workflow passes no --build-service-path, from the next job on.")
+            Text("Jobs on \(model.mac.object) use this Xcode unless their workflow passes --developer-directory or DEVELOPER_DIR. With System selection, they use the Xcode that xcode-select names. A build service is the path of an executable that builds in place of the one in Xcode, from the next job on, unless a workflow passes --build-service-path. With no path, jobs use the build service that their environment names, or the one in Xcode.")
         }
     }
 }
