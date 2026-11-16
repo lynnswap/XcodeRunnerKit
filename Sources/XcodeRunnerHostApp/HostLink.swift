@@ -42,6 +42,9 @@ enum HostSettingsRequest: Codable, Sendable {
     /// Saves the Xcode that the Mac's jobs use when they name none, as its `Contents/Developer` directory, or `nil`
     /// for the Xcode that `xcode-select` names.
     case saveXcode(developerDirectory: String?)
+    /// Saves the build service that the Mac's jobs use when they name none, as the path of its executable, or `nil`
+    /// for the one in their Xcode.
+    case saveBuildService(path: String?)
     /// Saves the labels that the Mac's runners get besides `xcode-runnerkit`. Whoever registers the Mac's runners
     /// puts them on the runners afterwards.
     case saveRunnerLabels([String])

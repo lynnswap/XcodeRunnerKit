@@ -165,10 +165,24 @@ private struct XcodeSection: View {
             if let problem = model.savedXcodeProblem { ErrorText(problem) }
             if let error = report.xcodeError { ErrorText(error) }
             if let error = model.xcodeSaveError { ErrorText(error) }
+            TextField("Build service", text: $model.buildServiceInput, prompt: Text("Xcode's own"))
+                .disabled(model.isSavingBuildService)
+                .accessibilityIdentifier("build-service")
+            if model.canChooseFiles {
+                HStack {
+                    Spacer()
+                    Button("Choose…") { model.chooseBuildService() }
+                        .disabled(model.isSavingBuildService)
+                        .accessibilityIdentifier("choose-build-service")
+                }
+            }
+            if let problem = model.savedBuildServiceProblem { ErrorText(problem) }
+            if let error = report.buildServiceError { ErrorText(error) }
+            if let error = model.buildServiceSaveError { ErrorText(error) }
         } header: {
             Text("Xcode")
         } footer: {
-            Text("Jobs on \(model.mac.object) use this Xcode unless their workflow passes --developer-directory or DEVELOPER_DIR. With System selection, they use the Xcode that xcode-select names.")
+            Text("Jobs on \(model.mac.object) use this Xcode unless their workflow passes --developer-directory or DEVELOPER_DIR. With System selection, they use the Xcode that xcode-select names. A build service is the path of an executable that builds in place of the one in Xcode, for the jobs whose workflow passes no --build-service-path, from the next job on.")
         }
     }
 }
@@ -190,7 +204,7 @@ private struct StorageSection: View {
                 .accessibilityIdentifier("storage-folder")
                 .disabled(!canEdit)
             // A panel on this Mac cannot choose a folder of another Mac.
-            if model.canChooseStorageDirectory {
+            if model.canChooseFiles {
                 HStack {
                     Spacer()
                     Button("Choose…") { model.chooseStorageDirectory() }

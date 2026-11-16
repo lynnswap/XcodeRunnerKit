@@ -187,6 +187,11 @@ protocol HostSettingsDisplay {
     /// Whether the saved Xcode's folder no longer exists on the Mac, so that jobs that name no Xcode fail.
     var savedXcodeIsMissing: Bool { get }
     var xcodeError: String? { get }
+    /// The build service that the Mac's jobs use when they name none, or `nil` for the one in their Xcode.
+    var savedBuildService: URL? { get }
+    /// Whether no file is at the saved build service's path on the Mac, so that the jobs that use it fail.
+    var savedBuildServiceIsMissing: Bool { get }
+    var buildServiceError: String? { get }
     var canApplyPoolConfiguration: Bool { get }
     var canEditStorage: Bool { get }
     /// Whether the host can restart itself. A host that launchd did not start cannot.
@@ -257,6 +262,9 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
     let installedXcodes: [InstalledXcode]
     let savedXcodeIsMissing: Bool
     let xcodeError: String?
+    let savedBuildService: URL?
+    let savedBuildServiceIsMissing: Bool
+    let buildServiceError: String?
     let canApplyPoolConfiguration: Bool
     let canEditStorage: Bool
     let canRestart: Bool
@@ -279,6 +287,9 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
         installedXcodes = settings.installedXcodes
         savedXcodeIsMissing = settings.savedXcodeIsMissing
         xcodeError = settings.xcodeError
+        savedBuildService = settings.savedBuildService
+        savedBuildServiceIsMissing = settings.savedBuildServiceIsMissing
+        buildServiceError = settings.buildServiceError
         canApplyPoolConfiguration = settings.canApplyPoolConfiguration
         canEditStorage = settings.canEditStorage
         canRestart = settings.canRestart
@@ -335,6 +346,13 @@ final class HostSettingsModel: HostSettingsDisplay {
     private(set) var isSavingXcode = false
     /// The selected Xcode's `Contents/Developer` directory, or an empty string for the system selection.
     var xcodeSelectionInput = ""
+    private(set) var savedBuildService: URL?
+    private(set) var savedBuildServiceIsMissing = false
+    private(set) var buildServiceError: String?
+    private(set) var buildServiceSaveError: String?
+    private(set) var isSavingBuildService = false
+    /// The path of the build service's executable, or an empty string for the one in the jobs' Xcode.
+    var buildServiceInput = ""
     /// The installed Xcodes are listed again after this long, because listing them reads every Xcode's version.
     private static let xcodeListLifetime = Duration.seconds(30)
     private var xcodesListedAt: ContinuousClock.Instant?
@@ -374,6 +392,7 @@ final class HostSettingsModel: HostSettingsDisplay {
             storageSaveError = "Could not read the saved storage folder: \(error.localizedDescription)"
         }
         refreshXcodes()
+        refreshBuildService()
         do {
             runnerLabels = try installation.runnerLabels()
             runnerLabelsInput = RunnerLabels.text(runnerLabels)
@@ -531,6 +550,24 @@ final class HostSettingsModel: HostSettingsDisplay {
         }
     }
 
+    func chooseBuildService() async {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Build Service"
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        // The executable is inside a bundle.
+        panel.treatsFilePackagesAsDirectories = true
+        let response: NSApplication.ModalResponse
+        if let window = NSApplication.shared.keyWindow {
+            response = await panel.beginSheetModal(for: window)
+        } else {
+            response = await panel.begin()
+        }
+        if response == .OK, let executable = panel.url {
+            buildServiceInput = executable.path(percentEncoded: false)
+        }
+    }
+
     /// A Mac either manages other Macs or is managed by one, so that one host registers each Mac's runners.
     var canAllowManagement: Bool { managedMacs.macs.isEmpty }
     var canAddMacs: Bool { management.manager == nil && management.pairingWindow?.role != .manager }
@@ -606,9 +643,50 @@ final class HostSettingsModel: HostSettingsDisplay {
         }
     }
 
+    /// Reads the saved build service, which the CLI and MCP can change.
+    private func refreshBuildService() {
+        let previousInput = savedBuildService?.path(percentEncoded: false) ?? ""
+        do {
+            savedBuildService = try installation.buildServiceExecutableURL()
+            buildServiceError = nil
+            if buildServiceInput == previousInput { buildServiceInput = savedBuildService?.path(percentEncoded: false) ?? "" }
+        } catch {
+            buildServiceError = "Could not read the saved build service: \(error.localizedDescription)"
+        }
+        savedBuildServiceIsMissing = savedBuildService.map {
+            !FileManager.default.fileExists(atPath: $0.path(percentEncoded: false))
+        } ?? false
+    }
+
+    func saveBuildServiceSelection() async {
+        guard !isSavingBuildService else { return }
+        do {
+            try saveBuildService(buildServiceInput.isEmpty ? nil : buildServiceInput)
+            buildServiceSaveError = nil
+        } catch {
+            buildServiceSaveError = error.localizedDescription
+        }
+    }
+
+    /// Saves the build service for this Mac's jobs from this Mac's window or from a Mac paired with it.
+    private func saveBuildService(_ path: String?) throws(HostSettingsError) {
+        if let path, !path.hasPrefix("/") { throw HostSettingsError("Enter an absolute path to a build service's executable.") }
+        let previous = savedBuildService?.path(percentEncoded: false) ?? ""
+        isSavingBuildService = true
+        defer { isSavingBuildService = false }
+        do {
+            savedBuildService = try settingsService.saveBuildServiceExecutableURL(path.map { URL(filePath: $0) })
+            if buildServiceInput == previous { buildServiceInput = savedBuildService?.path(percentEncoded: false) ?? "" }
+            refreshBuildService()
+        } catch {
+            throw HostSettingsError("Could not save the build service: \(error.localizedDescription)")
+        }
+    }
+
     func refreshPoolStatus() async {
         refreshStorageSelection()
         refreshXcodes()
+        refreshBuildService()
         do {
             let status = try await pool.status()
             poolStatus = status
@@ -682,6 +760,7 @@ final class HostSettingsModel: HostSettingsDisplay {
             case .configurePool(let changes): try await applyPairedMacChanges(changes)
             case .saveStorage(let directory): try await savePairedMacStorage(directory)
             case .saveXcode(let developerDirectory): try saveDeveloperDirectory(developerDirectory)
+            case .saveBuildService(let path): try saveBuildService(path)
             case .setPaused(let isPaused): try savePaused(isPaused)
             case .saveRunnerLabels(let labels): try saveRunnerLabels(labels)
             case .restart: try acceptRestart()
