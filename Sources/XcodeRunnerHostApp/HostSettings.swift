@@ -264,7 +264,9 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
     let savedXcodeIsMissing: Bool
     let xcodeError: String?
     let savedBuildService: URL?
-    let savedBuildServiceIsMissing: Bool
+    /// `nil` in the report of a Mac that runs a version without the setting.
+    private let buildServiceIsMissing: Bool?
+    var savedBuildServiceIsMissing: Bool { buildServiceIsMissing ?? false }
     let buildServiceError: String?
     let canApplyPoolConfiguration: Bool
     let canEditStorage: Bool
@@ -289,7 +291,7 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
         savedXcodeIsMissing = settings.savedXcodeIsMissing
         xcodeError = settings.xcodeError
         savedBuildService = settings.savedBuildService
-        savedBuildServiceIsMissing = settings.savedBuildServiceIsMissing
+        buildServiceIsMissing = settings.savedBuildServiceIsMissing
         buildServiceError = settings.buildServiceError
         canApplyPoolConfiguration = settings.canApplyPoolConfiguration
         canEditStorage = settings.canEditStorage

@@ -272,9 +272,9 @@ final class MacPaneModel: PaneSaving {
     var isSavingBuildService: Bool {
         valuesBeingSaved.contains(.buildService) || thisMac?.isSavingBuildService ?? paired?.isSavingBuildService ?? false
     }
+    /// A path that could not be read is not the one shown, so only an edit replaces it.
     var canSaveBuildService: Bool {
-        !isSavingBuildService
-            && (buildServiceInput != savedBuildService || report?.buildServiceError != nil || buildServiceSaveError != nil)
+        !isSavingBuildService && (buildServiceInput != savedBuildService || buildServiceSaveError != nil)
     }
     /// Why the jobs that use the saved build service fail: no file is at its path on the Mac.
     var savedBuildServiceProblem: String? {
