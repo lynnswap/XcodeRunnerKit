@@ -172,13 +172,17 @@ struct GitHubClient: Sendable {
                 let run_workflows_from_fork_pull_requests: Bool
                 let require_approval_for_fork_pr_workflows: Bool?
             }
-            let policy: Policy = try await api(path: path + "/fork-pr-workflows-private-repos", accessToken: accessToken)
+            let policy: Policy = try await api(
+                path: path + "/fork-pr-workflows-private-repos", accessToken: accessToken, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData
+            )
             guard !policy.run_workflows_from_fork_pull_requests || policy.require_approval_for_fork_pr_workflows == true else {
                 throw ProvisioningError("In GitHub Settings > Actions > General, disable workflows from fork pull requests or require approval for them.")
             }
         } else {
             struct Policy: Decodable { let approval_policy: String }
-            let policy: Policy = try await api(path: path + "/fork-pr-contributor-approval", accessToken: accessToken)
+            let policy: Policy = try await api(
+                path: path + "/fork-pr-contributor-approval", accessToken: accessToken, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData
+            )
             guard policy.approval_policy == "all_external_contributors" else {
                 throw ProvisioningError("In GitHub Settings > Actions > General, choose Require approval for all external contributors.")
             }
@@ -278,9 +282,12 @@ struct GitHubClient: Sendable {
         }
     }
 
-    private func api<Result: Decodable>(path: String, method: String = "GET", accessToken: String?) async throws -> Result {
+    private func api<Result: Decodable>(
+        path: String, method: String = "GET", accessToken: String?, cachePolicy: URLRequest.CachePolicy = .useProtocolCachePolicy
+    ) async throws -> Result {
         var request = apiRequest(url: URL(string: "https://api.github.com/")!.appending(path: path), accessToken: accessToken)
         request.httpMethod = method
+        request.cachePolicy = cachePolicy
         return try JSONDecoder().decode(Result.self, from: await self.request(request).0)
     }
 

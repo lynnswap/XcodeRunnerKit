@@ -98,6 +98,7 @@ struct GitHubClientTests {
         try await client.requireForkApproval(for: privateRepo, accessToken: "user")
         try await client.requireForkApproval(for: privateRepo, accessToken: "user")
         await #expect(throws: ProvisioningError.self) { try await client.requireForkApproval(for: privateRepo, accessToken: "user") }
+        #expect(await transport.requests.allSatisfy { $0.cachePolicy == .reloadIgnoringLocalAndRemoteCacheData })
     }
 
     @Test func runnerArchiveComesFromTheOfficialReleaseWithItsDigest() async throws {
