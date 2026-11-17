@@ -339,6 +339,8 @@ actor RunnerProvisioner {
                         archive = archiveResult
                     }
                     let prepared = try archiveResult.get()
+                    // The paired Mac may have spent several minutes downloading the runner since the first check.
+                    try await client.requireForkApproval(for: repository, accessToken: token)
                     let registrationToken = try await client.registrationToken(repository: repository, accessToken: token)
                     var nextSlot = 1
                     do {

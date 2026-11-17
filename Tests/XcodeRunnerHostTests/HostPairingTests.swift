@@ -312,6 +312,7 @@ struct HostPairingTests {
             runners([(1, "existing")]),
             .init(path: "/repos/owner/Project/actions/permissions/fork-pr-contributor-approval", body: #"{"approval_policy":"all_external_contributors"}"#),
             .init(path: "/repos/actions/runner/releases/latest", body: #"{"assets":[{"name":"actions-runner-osx-arm64-2.338.0.tar.gz","browser_download_url":"https://example.invalid/runner.tar.gz","digest":"sha256:\#(String(repeating: "a", count: 64))"}]}"#),
+            .init(path: "/repos/owner/Project/actions/permissions/fork-pr-contributor-approval", body: #"{"approval_policy":"all_external_contributors"}"#),
             .init(path: "/repos/owner/Project/actions/runners/registration-token", body: #"{"token":"registration-token"}"#),
             bothRunners,
         ] + listing + [
@@ -371,7 +372,7 @@ struct HostPairingTests {
         #expect(try RunnerDirectory(url: newRunnerFolder).isRemoved())
         #expect(manager.github.runnerStatuses.isEmpty)
         #expect(try GitHubHostConfiguration.load(from: record).unlinkedRepositories.isEmpty)
-        #expect(await transport.requests.count == 23)
+        #expect(await transport.requests.count == 24)
 
         await managed.management.shutDown()
         await macs.shutDown()
@@ -593,6 +594,7 @@ struct HostPairingTests {
             noRunners,
             .init(path: "/repos/owner/Project/actions/permissions/fork-pr-contributor-approval", body: #"{"approval_policy":"all_external_contributors"}"#),
             .init(path: "/repos/actions/runner/releases/latest", body: #"{"assets":[{"name":"actions-runner-osx-arm64-2.338.0.tar.gz","browser_download_url":"https://example.invalid/runner.tar.gz","digest":"sha256:\#(String(repeating: "a", count: 64))"}]}"#),
+            .init(path: "/repos/owner/Project/actions/permissions/fork-pr-contributor-approval", body: #"{"approval_policy":"all_external_contributors"}"#),
             .init(path: "/repos/owner/Project/actions/runners/registration-token", body: #"{"token":"registration-token"}"#),
             noRunners,
         ])
@@ -636,7 +638,7 @@ struct HostPairingTests {
         try await waitUntil { await installs.requests.count == 2 }
         try await waitUntil { !host.github.isSynchronizing }
         #expect(await installs.requests.allSatisfy { $0.registrationToken == "registration-token" })
-        #expect(await transport.requests.count == 9)
+        #expect(await transport.requests.count == 10)
         await #expect(throws: HostLinkError.refused("Managed changes its runners only for its managing Mac.")) {
             _ = try await dashboard.requestRunners(.inventory, from: shown.id)
         }
