@@ -828,6 +828,9 @@ struct HostPairingTests {
         mkdir -p "$output/Job/Results.xcresult"
         echo "the log of $PWD" > "$output/Job/xcodebuild.log"
         echo "the results" > "$output/Job/Results.xcresult/Info.plist"
+        if [ -f "plain-result-file" ]; then
+            touch "$output/Job/Incomplete.xcresult"
+        fi
         echo "arguments: $*"
         echo "directory: $PWD"
         echo "folder: $(basename "$(dirname "$PWD")")"
@@ -926,6 +929,20 @@ struct HostPairingTests {
         // The host keeps the compiler cache and nothing else.
         try await waitUntil { remoteFolders(in: storage).isEmpty }
 
+        await host.management.shutDown()
+    }
+
+    @Test func aDashboardReportsAnInvalidResultBundle() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (host, _, shown, endpoint, directory) = try await hostAndCheckout(at: root)
+        try Data().write(to: directory.appending(path: "plain-result-file"))
+        let checkout = try await Checkout.containing(directory)
+        await #expect(throws: HostLinkError.refused("Unexpected file type in the build results: Incomplete.xcresult.")) {
+            try await RemoteOperationClient.run(
+                "build", arguments: [], in: checkout, on: shown, at: endpoint, outputDirectory: root.appending(path: "Output")
+            ) { _ in }
+        }
         await host.management.shutDown()
     }
 
