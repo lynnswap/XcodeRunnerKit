@@ -95,7 +95,8 @@ settings permit automatic external fork runs or GitHub cannot confirm them, it
 reports the problem and skips new registrations for that repository. Existing
 runners continue taking jobs. For an existing installation, set the policy on
 GitHub before starting the host or registering additional runners. GitHub
-enforces this policy even when the app is signed out.
+enforces this policy even when the app is signed out. When updating a group of
+Macs, update the managing host before asking it to register new runners.
 
 Hosts sign in through the shared
 [XcodeHomeRunner GitHub App](https://github.com/apps/xcodehomerunner), so you
@@ -763,7 +764,7 @@ For manual registration, download the official
 and run from the checkout on the CI Mac with `gh` authenticated:
 
 ```sh
-gh api -X POST repos/OWNER/REPO/actions/runners/registration-token --jq .token |
+gh api --hostname github.com -X POST repos/OWNER/REPO/actions/runners/registration-token --jq .token |
   bash Scripts/install-github-runner.sh OWNER/REPO runner-name /path/to/runner.tar.gz
 ```
 

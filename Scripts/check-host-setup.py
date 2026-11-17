@@ -450,6 +450,7 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit-runner-") as temporary:
     tools.mkdir()
     gh = tools / "gh"
     gh.write_text("""#!/bin/sh
+[ "$3" = --hostname ] && [ "$4" = github.com ] || exit 1
 case "$2" in
     repos/OWNER/REPO) echo false ;;
     repos/OWNER/REPO/actions/permissions/fork-pr-contributor-approval) echo "${XRK_FIXTURE_FORK_APPROVAL:-true}" ;;

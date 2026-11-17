@@ -439,6 +439,12 @@ enum HostLink {
                         try await connection.send(Versioned(HostLinkReply.unsupported, version: version))
                         continue
                     }
+                    // An earlier manager can still administer this Mac but did not check GitHub before issuing a token.
+                    if message.version < 9, case .runners(.install) = request {
+                        let refusal = HostLinkReply.refused("Update the managing Mac to verify fork workflow approval before registering runners.")
+                        try await connection.send(Versioned(refusal, version: version))
+                        continue
+                    }
                     try await handle(request, { try await connection.send(Versioned($0, version: version)) }) {
                         guard let request = try await connection.receive().content.payload else {
                             try await connection.send(Versioned(HostLinkReply.unsupported, version: version))

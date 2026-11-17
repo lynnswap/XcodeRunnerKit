@@ -1001,6 +1001,18 @@ struct HostPairingTests {
         try await waitUntil { management.managementPort != nil }
         let endpoint = try local(management.managementPort)
 
+        let installation = RunnerProvisioner.InstallationRequest(
+            repository: GitHubRepository(id: 1, fullName: "owner/Project"), runnerName: "runner", archive: root,
+            sha256Checksum: "", registrationToken: "test-token", labels: [], replaceRegistration: false
+        )
+        let answer = try await HostLink.send(
+            .runners(.install(installation)), to: endpoint, key: mac.pairing.symmetricKey, identity: mac.id.uuidString, version: 8
+        )
+        guard case .refused(let reason) = answer, reason.contains("Update the managing Mac") else {
+            Issue.record("Expected the Mac to ask for a manager that checks fork workflow approval.")
+            return
+        }
+
         // The managing host is updated first, and still reads and changes the Mac.
         let updated = PairedMacs(
             store: managerStore, name: "Manager", role: .manager, browses: false, version: HostLink.version + 1

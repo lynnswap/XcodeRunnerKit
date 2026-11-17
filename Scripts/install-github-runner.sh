@@ -56,14 +56,14 @@ install_github_runner() {
         exit 1
     else
         # The managing app checks before issuing a token. Manual setup uses the operator's gh session.
-        private_repository=$(gh api "repos/$repository" --jq .private)
+        private_repository=$(gh api "repos/$repository" --hostname github.com --jq .private)
         case "$private_repository" in
             true)
-                approved=$(gh api "repos/$repository/actions/permissions/fork-pr-workflows-private-repos" \
+                approved=$(gh api "repos/$repository/actions/permissions/fork-pr-workflows-private-repos" --hostname github.com \
                     --jq '.run_workflows_from_fork_pull_requests == false or (.run_workflows_from_fork_pull_requests == true and .require_approval_for_fork_pr_workflows == true)')
                 ;;
             false)
-                approved=$(gh api "repos/$repository/actions/permissions/fork-pr-contributor-approval" \
+                approved=$(gh api "repos/$repository/actions/permissions/fork-pr-contributor-approval" --hostname github.com \
                     --jq '.approval_policy == "all_external_contributors"')
                 ;;
             *) echo "GitHub did not report the visibility of $repository." >&2; exit 1;;
