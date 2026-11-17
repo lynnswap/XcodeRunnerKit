@@ -943,7 +943,12 @@ struct HostPairingTests {
                 "build", arguments: [], in: checkout, on: shown, at: endpoint, outputDirectory: root.appending(path: "Output")
             ) { _ in }
         }
-        #expect(failure?.message == "Unexpected file type in the result bundle: InfoAlias.")
+        let output = root.appending(path: "Output")
+        let saved = try #require(FileManager.default.contentsOfDirectory(at: output, includingPropertiesForKeys: nil).first)
+        let message = try #require(failure?.message)
+        #expect(message.contains("Unexpected file type in the result bundle: InfoAlias."))
+        #expect(message.contains("\(saved.lastPathComponent)/results.tar"))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: saved.path(percentEncoded: false)) == ["results.tar"])
         await host.management.shutDown()
     }
 

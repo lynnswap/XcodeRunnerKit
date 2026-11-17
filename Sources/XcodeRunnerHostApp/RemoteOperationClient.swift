@@ -341,12 +341,12 @@ enum RemoteOperationClient {
                 }
             }
         } catch {
-            // Keep the archive so the caller can inspect the rejected results.
+            let reason = "\(error.localizedDescription) The received archive is at \(archive.path(percentEncoded: false))."
             do { try FileManager.default.removeItem(at: payload) }
             catch let cleanup {
-                throw RemoteOperationFailure("\(error.localizedDescription) Could not remove \(payload.path): \(cleanup.localizedDescription)")
+                throw RemoteOperationFailure("\(reason) Could not remove \(payload.path): \(cleanup.localizedDescription)")
             }
-            throw error
+            throw RemoteOperationFailure(reason)
         }
         try FileManager.default.removeItem(at: archive)
         for log in logs {
@@ -366,7 +366,7 @@ enum RemoteOperationClient {
         )
         guard unpacking.terminationStatus.isSuccess else {
             throw RemoteOperationFailure(
-                "Could not unpack the log and result bundle. They are in \(archive.path(percentEncoded: false)): \(unpacking.standardError)"
+                "Could not unpack the log and result bundle: \(unpacking.standardError)"
             )
         }
     }
