@@ -5,7 +5,10 @@ runners and manages their Xcode job limit.
 
 Use an Apple silicon Mac with macOS 26 or later and Xcode 27.1 or later.
 Run the setup as the macOS user that will run CI, and keep that user logged in.
-Jobs share this user's files and credentials.
+Jobs can read or change this user's files and host settings. Run only code the
+owner has reviewed, including build scripts, tests and workflow changes. Use a
+GitHub-hosted runner for unreviewed contributions. The same trust requirement
+applies when a dashboard sends a checkout directly to the Mac.
 
 ## Install
 
@@ -78,6 +81,21 @@ Metal download output and both build attempts also remain in the job log. A
 failed download stops the job.
 
 ## Connect GitHub
+
+Before registering a runner, open the repository's **Settings > Actions >
+General** on GitHub. For a public repository, choose **Require approval for all
+external contributors**. For a private repository, disable **Run workflows from
+fork pull requests**, or require approval for fork pull request workflows.
+Keep fork runs pending if the code has not been reviewed. Check workflows that
+use events such as `pull_request_target` separately. Those workflows run in the
+base repository's context and must only build code the owner trusts.
+
+The managing host reads these settings at each runner synchronization. If the
+settings permit automatic external fork runs or GitHub cannot confirm them, it
+reports the problem and skips new registrations for that repository. Existing
+runners continue taking jobs. For an existing installation, set the policy on
+GitHub before starting the host or registering additional runners. GitHub
+enforces this policy even when the app is signed out.
 
 Hosts sign in through the shared
 [XcodeHomeRunner GitHub App](https://github.com/apps/xcodehomerunner), so you

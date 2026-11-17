@@ -54,6 +54,24 @@ install_github_runner() {
     elif [[ -f "$directory/.runner" ]]; then
         echo "Runner already configured at $directory; use its service commands or remove its registration before reinstalling." >&2
         exit 1
+    else
+        # The managing app checks before issuing a token. Manual setup uses the operator's gh session.
+        private_repository=$(gh api "repos/$repository" --jq .private)
+        case "$private_repository" in
+            true)
+                approved=$(gh api "repos/$repository/actions/permissions/fork-pr-workflows-private-repos" \
+                    --jq '.run_workflows_from_fork_pull_requests == false or (.run_workflows_from_fork_pull_requests == true and .require_approval_for_fork_pr_workflows == true)')
+                ;;
+            false)
+                approved=$(gh api "repos/$repository/actions/permissions/fork-pr-contributor-approval" \
+                    --jq '.approval_policy == "all_external_contributors"')
+                ;;
+            *) echo "GitHub did not report the visibility of $repository." >&2; exit 1;;
+        esac
+        if [[ "$approved" != true ]]; then
+            echo "In GitHub Settings > Actions > General, require approval for all external fork workflows or disable fork workflows for a private repository." >&2
+            exit 1
+        fi
     fi
     configuration_arguments=(--unattended)
     if [[ "${XCODE_RUNNER_REPLACE_REGISTRATION:-0}" == "1" ]]; then

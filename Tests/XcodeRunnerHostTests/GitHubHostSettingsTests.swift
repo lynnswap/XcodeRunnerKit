@@ -98,7 +98,7 @@ struct GitHubHostSettingsTests {
             refreshToken: nil, expiresAt: nil, refreshExpiresAt: nil
         )))
         let accessible = isStillAccessible
-            ? #"{"repositories":[{"id":1,"full_name":"owner/Renamed"},{"id":2,"full_name":"owner/Previous"}]}"#
+            ? #"{"repositories":[{"id":1,"full_name":"owner/Renamed","private":false},{"id":2,"full_name":"owner/Previous"}]}"#
             : #"{"repositories":[{"id":2,"full_name":"owner/Previous"}]}"#
         let listing: [GitHubTestTransport.Reply] = [
             .init(path: "/user/installations", body: #"{"installations":[{"id":10}]}"#),
@@ -106,6 +106,7 @@ struct GitHubHostSettingsTests {
         ]
         let transport = GitHubTestTransport(listing + listing + (isStillAccessible ? [
             .init(path: "/repos/owner/Renamed/actions/runners", body: #"{"runners":[{"id":1,"name":"existing","status":"online","busy":false,"labels":[]}]}"#),
+            .init(path: "/repos/owner/Renamed/actions/permissions/fork-pr-contributor-approval", body: #"{"approval_policy":"all_external_contributors"}"#),
         ] : []))
         let client = await transport.client
         let pool = HostExecutionPool(directory: installation.poolDirectory)
@@ -144,14 +145,15 @@ struct GitHubHostSettingsTests {
         )))
         let transport = GitHubTestTransport([
             .init(path: "/user/installations", body: #"{"installations":[{"id":10}]}"#),
-            .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Project"}]}"#),
+            .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Project","private":false}]}"#),
             .init(path: "/user/installations", body: #"{"installations":[{"id":10}]}"#),
-            .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Project"}]}"#),
+            .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Project","private":false}]}"#),
             .init(path: "/repos/owner/Project/actions/runners", body: #"{"message":"Bad credentials"}"#, status: 401),
             .init(path: "/login/oauth/access_token", body: #"{"access_token":"fresh","refresh_token":"new-refresh","expires_in":28800,"refresh_token_expires_in":3600}"#),
             .init(path: "/user/installations", body: #"{"installations":[{"id":10}]}"#),
-            .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Project"}]}"#),
+            .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Project","private":false}]}"#),
             .init(path: "/repos/owner/Project/actions/runners", body: #"{"runners":[{"id":1,"name":"existing","status":"online","busy":false,"labels":[]}]}"#),
+            .init(path: "/repos/owner/Project/actions/permissions/fork-pr-contributor-approval", body: #"{"approval_policy":"all_external_contributors"}"#),
         ])
         let client = await transport.client
         let pool = HostExecutionPool(directory: installation.poolDirectory)
@@ -192,7 +194,7 @@ struct GitHubHostSettingsTests {
                 body = #"{"installations":[{"id":10}]}"#
                 status = 200
             case "/user/installations/10/repositories":
-                body = #"{"repositories":[{"id":1,"full_name":"owner/Project"}]}"#
+                body = #"{"repositories":[{"id":1,"full_name":"owner/Project","private":false}]}"#
                 status = 200
             default:
                 body = #"{"message":"Bad credentials"}"#

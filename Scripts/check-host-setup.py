@@ -448,6 +448,15 @@ with tempfile.TemporaryDirectory(prefix="XcodeRunnerKit-runner-") as temporary:
     root = Path(temporary)
     tools = root / "tools"
     tools.mkdir()
+    gh = tools / "gh"
+    gh.write_text("""#!/bin/sh
+case "$2" in
+    repos/OWNER/REPO) echo false ;;
+    repos/OWNER/REPO/actions/permissions/fork-pr-contributor-approval) echo "${XRK_FIXTURE_FORK_APPROVAL:-true}" ;;
+    *) exit 1 ;;
+esac
+""")
+    gh.chmod(0o755)
     checksum = tools / "shasum"
     checksum.write_text("#!/bin/bash\necho ${XRK_FIXTURE_ARCHIVE_SHA256:-df4cebda25c86a886ed204e49fee63f5c2e7cec5f447b5c98440a826bbdf9df2} fixture\n")
     checksum.chmod(0o755)
@@ -498,6 +507,9 @@ Path('.credentials').write_text('registered credentials')
     install_cli(root)
     work = physical_work / "Work" / "fixture"
     installer = ["bash", str(scripts / "install-github-runner.sh"), "OWNER/REPO", "fixture", str(archive), "xcode-runnerkit,custom-host"]
+    denied = subprocess.run(installer, input="fixture-token\n", text=True, capture_output=True,
+                            env={**environment, "XRK_FIXTURE_FORK_APPROVAL": "false"})
+    assert denied.returncode != 0 and "require approval" in denied.stderr
     subprocess.run(installer, input="fixture-token\n", text=True, env=environment, check=True, capture_output=True)
     installation = installation_root / "fixture"
     received = json.loads((installation / ".runner").read_text(encoding="utf-8-sig"))

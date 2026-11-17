@@ -261,7 +261,7 @@ struct HostPairingTests {
     @Test func theManagingHostRegistersAndRemovesRunnersOnAPairedMac() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let repository = GitHubRepository(id: 1, fullName: "owner/Project")
+        let repository = GitHubRepository(id: 1, fullName: "owner/Project", isPrivate: false)
         let installs = Installs()
         // The managed Mac has no GitHub sign-in, so any GitHub request from it fails the test.
         let client = await GitHubTestTransport([]).client
@@ -297,7 +297,7 @@ struct HostPairingTests {
         )))
         let listing: [GitHubTestTransport.Reply] = [
             .init(path: "/user/installations", body: #"{"installations":[{"id":10}]}"#),
-            .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Project"}]}"#),
+            .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Project","private":false}]}"#),
         ]
         func runners(_ runners: [(id: Int, name: String)]) -> GitHubTestTransport.Reply {
             let listed = runners.map { #"{"id":\#($0.id),"name":"\#($0.name)","status":"online","busy":false,"labels":[]}"# }
@@ -307,7 +307,10 @@ struct HostPairingTests {
         let transport = GitHubTestTransport(listing + [
             // Selecting the repository leaves this Mac's runner and registers one on the managed Mac.
         ] + listing + [
-            runners([(1, "existing")]), runners([(1, "existing")]),
+            runners([(1, "existing")]),
+            .init(path: "/repos/owner/Project/actions/permissions/fork-pr-contributor-approval", body: #"{"approval_policy":"all_external_contributors"}"#),
+            runners([(1, "existing")]),
+            .init(path: "/repos/owner/Project/actions/permissions/fork-pr-contributor-approval", body: #"{"approval_policy":"all_external_contributors"}"#),
             .init(path: "/repos/actions/runner/releases/latest", body: #"{"assets":[{"name":"actions-runner-osx-arm64-2.338.0.tar.gz","browser_download_url":"https://example.invalid/runner.tar.gz","digest":"sha256:\#(String(repeating: "a", count: 64))"}]}"#),
             .init(path: "/repos/owner/Project/actions/runners/registration-token", body: #"{"token":"registration-token"}"#),
             bothRunners,
@@ -368,7 +371,7 @@ struct HostPairingTests {
         #expect(try RunnerDirectory(url: newRunnerFolder).isRemoved())
         #expect(manager.github.runnerStatuses.isEmpty)
         #expect(try GitHubHostConfiguration.load(from: record).unlinkedRepositories.isEmpty)
-        #expect(await transport.requests.count == 21)
+        #expect(await transport.requests.count == 23)
 
         await managed.management.shutDown()
         await macs.shutDown()
@@ -582,12 +585,13 @@ struct HostPairingTests {
         let installs = Installs()
         let listing: [GitHubTestTransport.Reply] = [
             .init(path: "/user/installations", body: #"{"installations":[{"id":10}]}"#),
-            .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Project"}]}"#),
+            .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Project","private":false}]}"#),
         ]
         let noRunners = GitHubTestTransport.Reply(path: "/repos/owner/Project/actions/runners", body: #"{"runners":[]}"#)
         // Restoring the sign-in lists the repositories, and the limit change synchronizes once.
         let transport = GitHubTestTransport(listing + listing + [
             noRunners,
+            .init(path: "/repos/owner/Project/actions/permissions/fork-pr-contributor-approval", body: #"{"approval_policy":"all_external_contributors"}"#),
             .init(path: "/repos/actions/runner/releases/latest", body: #"{"assets":[{"name":"actions-runner-osx-arm64-2.338.0.tar.gz","browser_download_url":"https://example.invalid/runner.tar.gz","digest":"sha256:\#(String(repeating: "a", count: 64))"}]}"#),
             .init(path: "/repos/owner/Project/actions/runners/registration-token", body: #"{"token":"registration-token"}"#),
             noRunners,
@@ -632,7 +636,7 @@ struct HostPairingTests {
         try await waitUntil { await installs.requests.count == 2 }
         try await waitUntil { !host.github.isSynchronizing }
         #expect(await installs.requests.allSatisfy { $0.registrationToken == "registration-token" })
-        #expect(await transport.requests.count == 8)
+        #expect(await transport.requests.count == 9)
         await #expect(throws: HostLinkError.refused("Managed changes its runners only for its managing Mac.")) {
             _ = try await dashboard.requestRunners(.inventory, from: shown.id)
         }
