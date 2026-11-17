@@ -828,8 +828,8 @@ struct HostPairingTests {
         mkdir -p "$output/Job/Results.xcresult"
         echo "the log of $PWD" > "$output/Job/xcodebuild.log"
         echo "the results" > "$output/Job/Results.xcresult/Info.plist"
-        if [ -f "plain-result-file" ]; then
-            touch "$output/Job/Incomplete.xcresult"
+        if [ -f "bundle-with-alias" ]; then
+            ln -s Info.plist "$output/Job/Results.xcresult/InfoAlias"
         fi
         echo "arguments: $*"
         echo "directory: $PWD"
@@ -936,13 +936,14 @@ struct HostPairingTests {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let (host, _, shown, endpoint, directory) = try await hostAndCheckout(at: root)
-        try Data().write(to: directory.appending(path: "plain-result-file"))
+        try Data().write(to: directory.appending(path: "bundle-with-alias"))
         let checkout = try await Checkout.containing(directory)
-        await #expect(throws: HostLinkError.refused("Unexpected file type in the build results: Incomplete.xcresult.")) {
+        let failure = await #expect(throws: RemoteOperationFailure.self) {
             try await RemoteOperationClient.run(
                 "build", arguments: [], in: checkout, on: shown, at: endpoint, outputDirectory: root.appending(path: "Output")
             ) { _ in }
         }
+        #expect(failure?.message == "Unexpected file type in the result bundle: InfoAlias.")
         await host.management.shutDown()
     }
 

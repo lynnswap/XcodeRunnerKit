@@ -318,20 +318,47 @@ enum RemoteOperationClient {
         // Only this directory receives archive entries. The archive and the rewritten log belong to the receiver.
         let payload = folder.appending(path: "payload")
         try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: false)
+        let jobs: [URL]
+        var logs: [URL] = []
         do {
-            try await importResults(from: archive, in: payload, into: directory, rewriter: rewriter)
+            try await extractResults(from: archive, into: payload)
+            jobs = try FileManager.default.contentsOfDirectory(atPath: payload.path(percentEncoded: false)).map {
+                payload.appending(component: $0, directoryHint: .notDirectory)
+            }
+            for job in jobs {
+                try RemoteOperation.requireResultType(.typeDirectory, at: job)
+                for name in try FileManager.default.contentsOfDirectory(atPath: job.path(percentEncoded: false)) {
+                    let item = job.appending(component: name, directoryHint: .notDirectory)
+                    if name.hasSuffix(".xcresult") {
+                        try RemoteOperation.requireResultType(.typeDirectory, at: item)
+                        try validateResultBundle(at: item)
+                    } else if name == "xcodebuild.log" {
+                        try RemoteOperation.requireResultType(.typeRegular, at: item)
+                        logs.append(item)
+                    } else {
+                        throw RemoteOperationFailure("Unexpected file in the build results: \(name).")
+                    }
+                }
+            }
         } catch {
-            // Keep the received archive for diagnosis, as for a failed extraction.
+            // Keep the archive so the caller can inspect the rejected results.
             do { try FileManager.default.removeItem(at: payload) }
             catch let cleanup {
                 throw RemoteOperationFailure("\(error.localizedDescription) Could not remove \(payload.path): \(cleanup.localizedDescription)")
             }
             throw error
         }
+        try FileManager.default.removeItem(at: archive)
+        for log in logs {
+            try rewrite(log, with: rewriter, temporaryFile: folder.appending(path: "rewritten.log"))
+        }
+        for job in jobs {
+            try FileManager.default.moveItem(at: job, to: directory.appending(component: job.lastPathComponent))
+        }
         try FileManager.default.removeItem(at: folder)
     }
 
-    private static func importResults(from archive: URL, in payload: URL, into directory: URL, rewriter: PathRewriter) async throws {
+    private static func extractResults(from archive: URL, into payload: URL) async throws {
         let unpacking = try await Subprocess.run(
             .path("/usr/bin/tar"),
             arguments: ["-xf", archive.path(percentEncoded: false), "--no-mac-metadata", "--no-xattrs", "-C", payload.path(percentEncoded: false)],
@@ -342,42 +369,22 @@ enum RemoteOperationClient {
                 "Could not unpack the log and result bundle. They are in \(archive.path(percentEncoded: false)): \(unpacking.standardError)"
             )
         }
-        let jobs = try FileManager.default.contentsOfDirectory(atPath: payload.path(percentEncoded: false)).map {
-            payload.appending(component: $0, directoryHint: .notDirectory)
+    }
+
+    private static func rewrite(_ log: URL, with rewriter: PathRewriter, temporaryFile rewritten: URL) throws {
+        var rewriter = rewriter
+        guard FileManager.default.createFile(atPath: rewritten.path(percentEncoded: false), contents: nil) else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSURLErrorKey: rewritten])
         }
-        for job in jobs {
-            try RemoteOperation.requireResultType(.typeDirectory, at: job)
-            for name in try FileManager.default.contentsOfDirectory(atPath: job.path(percentEncoded: false)) {
-                let item = job.appending(component: name, directoryHint: .notDirectory)
-                if name.hasSuffix(".xcresult") {
-                    try RemoteOperation.requireResultType(.typeDirectory, at: item)
-                    try validateResultBundle(at: item)
-                    continue
-                }
-                guard name == "xcodebuild.log" else {
-                    throw RemoteOperationFailure("Unexpected file in the build results: \(name).")
-                }
-                let log = item
-                try RemoteOperation.requireResultType(.typeRegular, at: log)
-                var rewriter = rewriter
-                let rewritten = archive.deletingLastPathComponent().appending(path: "rewritten.log")
-                guard FileManager.default.createFile(atPath: rewritten.path(percentEncoded: false), contents: nil) else {
-                    throw CocoaError(.fileWriteUnknown, userInfo: [NSURLErrorKey: rewritten])
-                }
-                let reading = try FileHandle(forReadingFrom: log)
-                let writing = try FileHandle(forWritingTo: rewritten)
-                while let piece = try reading.read(upToCount: 1 << 20), !piece.isEmpty {
-                    try writing.write(contentsOf: rewriter.rewrite(piece))
-                }
-                try writing.write(contentsOf: rewriter.finish())
-                try reading.close()
-                try writing.close()
-                _ = try FileManager.default.replaceItemAt(log, withItemAt: rewritten)
-            }
+        let reading = try FileHandle(forReadingFrom: log)
+        let writing = try FileHandle(forWritingTo: rewritten)
+        while let piece = try reading.read(upToCount: 1 << 20), !piece.isEmpty {
+            try writing.write(contentsOf: rewriter.rewrite(piece))
         }
-        for job in jobs {
-            try FileManager.default.moveItem(at: job, to: directory.appending(component: job.lastPathComponent))
-        }
+        try writing.write(contentsOf: rewriter.finish())
+        try reading.close()
+        try writing.close()
+        _ = try FileManager.default.replaceItemAt(log, withItemAt: rewritten)
     }
 
     private static func validateResultBundle(at bundle: URL) throws {
