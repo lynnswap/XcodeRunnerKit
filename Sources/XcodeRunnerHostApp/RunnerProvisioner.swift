@@ -344,8 +344,11 @@ actor RunnerProvisioner {
                     let registrationToken = try await client.registrationToken(repository: repository, accessToken: token)
                     var nextSlot = 1
                     do {
-                        for _ in 0..<missing {
+                        for index in 0..<missing {
                             try Task.checkCancellation()
+                            if index > 0 {
+                                try await client.requireForkApproval(for: repository, accessToken: token)
+                            }
                             let name: String
                             var replaceRegistration = false
                             while true {
