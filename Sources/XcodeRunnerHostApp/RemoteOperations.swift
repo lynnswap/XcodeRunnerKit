@@ -251,13 +251,22 @@ final class RemoteOperations {
         }
         try await reply(.operation(.exited(status)))
         // The tool keeps each operation's log and result bundles in a folder that it names, beside its build products.
-        let results = try FileManager.default.contentsOfDirectory(at: output, includingPropertiesForKeys: nil).flatMap { job in
-            try FileManager.default.contentsOfDirectory(atPath: job.path(percentEncoded: false))
-                .filter { $0 == "xcodebuild.log" || $0.hasSuffix(".xcresult") }.map { job.lastPathComponent + "/" + $0 }
+        var results: [String] = []
+        for job in try FileManager.default.contentsOfDirectory(atPath: output.path(percentEncoded: false)) {
+            let directory = output.appending(component: job, directoryHint: .notDirectory)
+            try RemoteOperation.requireResultType(.typeDirectory, at: directory)
+            for name in try FileManager.default.contentsOfDirectory(atPath: directory.path(percentEncoded: false)) {
+                let type: FileAttributeType
+                if name == "xcodebuild.log" { type = .typeRegular }
+                else if name.hasSuffix(".xcresult") { type = .typeDirectory }
+                else { continue }
+                try RemoteOperation.requireResultType(type, at: directory.appending(component: name, directoryHint: .notDirectory))
+                results.append("./" + job + "/" + name)
+            }
         }
         guard !results.isEmpty else { return }
         let archive = try await Subprocess.run(
-            .path("/usr/bin/tar"), arguments: .init(["-cf", "-", "-C", output.path(percentEncoded: false)] + results),
+            .path("/usr/bin/tar"), arguments: .init(["-cf", "-", "--no-mac-metadata", "--no-xattrs", "-C", output.path(percentEncoded: false)] + results),
             input: .none, output: .sequence, error: .discarded
         ) { execution in
             for try await buffer in execution.standardOutput {
@@ -290,5 +299,15 @@ final class RemoteOperations {
             do { try await remove(folder) } catch { failures.append(error.localizedDescription) }
         }
         return failures
+    }
+}
+
+extension RemoteOperation {
+    /// Inspects the directory entry itself before opening a build log or enumerating a job folder.
+    static func requireResultType(_ type: FileAttributeType, at url: URL) throws {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path(percentEncoded: false))
+        guard attributes[.type] as? FileAttributeType == type else {
+            throw RemoteOperationFailure("Unexpected file type in the build results: \(url.lastPathComponent).")
+        }
     }
 }

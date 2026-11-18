@@ -315,38 +315,91 @@ enum RemoteOperationClient {
     /// operation's folder into `directory`.
     private static func unpackResults(in folder: URL, into directory: URL, rewriter: PathRewriter) async throws {
         let archive = folder.appending(path: resultsArchiveName)
+        // Only this directory receives archive entries. The archive and the rewritten log belong to the receiver.
+        let payload = folder.appending(path: "payload")
+        try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: false)
+        let jobs: [URL]
+        var logs: [URL] = []
+        do {
+            try await extractResults(from: archive, into: payload)
+            jobs = try FileManager.default.contentsOfDirectory(atPath: payload.path(percentEncoded: false)).map {
+                payload.appending(component: $0, directoryHint: .notDirectory)
+            }
+            for job in jobs {
+                try RemoteOperation.requireResultType(.typeDirectory, at: job)
+                for name in try FileManager.default.contentsOfDirectory(atPath: job.path(percentEncoded: false)) {
+                    let item = job.appending(component: name, directoryHint: .notDirectory)
+                    if name.hasSuffix(".xcresult") {
+                        try RemoteOperation.requireResultType(.typeDirectory, at: item)
+                        try validateResultBundle(at: item)
+                    } else if name == "xcodebuild.log" {
+                        try RemoteOperation.requireResultType(.typeRegular, at: item)
+                        logs.append(item)
+                    } else {
+                        throw RemoteOperationFailure("Unexpected file in the build results: \(name).")
+                    }
+                }
+            }
+        } catch {
+            let reason = "\(error.localizedDescription) The received archive is at \(archive.path(percentEncoded: false))."
+            do { try FileManager.default.removeItem(at: payload) }
+            catch let cleanup {
+                throw RemoteOperationFailure("\(reason) Could not remove \(payload.path): \(cleanup.localizedDescription)")
+            }
+            throw RemoteOperationFailure(reason)
+        }
+        try FileManager.default.removeItem(at: archive)
+        for log in logs {
+            try rewrite(log, with: rewriter, temporaryFile: folder.appending(path: "rewritten.log"))
+        }
+        for job in jobs {
+            try FileManager.default.moveItem(at: job, to: directory.appending(component: job.lastPathComponent))
+        }
+        try FileManager.default.removeItem(at: folder)
+    }
+
+    private static func extractResults(from archive: URL, into payload: URL) async throws {
         let unpacking = try await Subprocess.run(
             .path("/usr/bin/tar"),
-            arguments: ["-xf", archive.path(percentEncoded: false), "-C", folder.path(percentEncoded: false)],
+            arguments: ["-xf", archive.path(percentEncoded: false), "--no-mac-metadata", "--no-xattrs", "-C", payload.path(percentEncoded: false)],
             output: .discarded, error: .string(limit: 4096)
         )
         guard unpacking.terminationStatus.isSuccess else {
             throw RemoteOperationFailure(
-                "Could not unpack the log and result bundle. They are in \(archive.path(percentEncoded: false)): \(unpacking.standardError)"
+                "Could not unpack the log and result bundle: \(unpacking.standardError)"
             )
         }
-        try FileManager.default.removeItem(at: archive)
-        for job in try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) {
-            let log = job.appending(path: "xcodebuild.log")
-            if FileManager.default.fileExists(atPath: log.path(percentEncoded: false)) {
-                var rewriter = rewriter
-                let rewritten = job.appending(path: "xcodebuild.log.rewritten")
-                guard FileManager.default.createFile(atPath: rewritten.path(percentEncoded: false), contents: nil) else {
-                    throw CocoaError(.fileWriteUnknown, userInfo: [NSURLErrorKey: rewritten])
-                }
-                let reading = try FileHandle(forReadingFrom: log)
-                let writing = try FileHandle(forWritingTo: rewritten)
-                while let piece = try reading.read(upToCount: 1 << 20), !piece.isEmpty {
-                    try writing.write(contentsOf: rewriter.rewrite(piece))
-                }
-                try writing.write(contentsOf: rewriter.finish())
-                try reading.close()
-                try writing.close()
-                _ = try FileManager.default.replaceItemAt(log, withItemAt: rewritten)
-            }
-            try FileManager.default.moveItem(at: job, to: directory.appending(path: job.lastPathComponent))
+    }
+
+    private static func rewrite(_ log: URL, with rewriter: PathRewriter, temporaryFile rewritten: URL) throws {
+        var rewriter = rewriter
+        guard FileManager.default.createFile(atPath: rewritten.path(percentEncoded: false), contents: nil) else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSURLErrorKey: rewritten])
         }
-        try FileManager.default.removeItem(at: folder)
+        let reading = try FileHandle(forReadingFrom: log)
+        let writing = try FileHandle(forWritingTo: rewritten)
+        while let piece = try reading.read(upToCount: 1 << 20), !piece.isEmpty {
+            try writing.write(contentsOf: rewriter.rewrite(piece))
+        }
+        try writing.write(contentsOf: rewriter.finish())
+        try reading.close()
+        try writing.close()
+        _ = try FileManager.default.replaceItemAt(log, withItemAt: rewritten)
+    }
+
+    private static func validateResultBundle(at bundle: URL) throws {
+        var directories = [bundle]
+        while let directory = directories.popLast() {
+            for name in try FileManager.default.contentsOfDirectory(atPath: directory.path(percentEncoded: false)) {
+                let item = directory.appending(component: name, directoryHint: .notDirectory)
+                let attributes = try FileManager.default.attributesOfItem(atPath: item.path(percentEncoded: false))
+                switch attributes[.type] as? FileAttributeType {
+                case .typeDirectory: directories.append(item)
+                case .typeRegular: break
+                default: throw RemoteOperationFailure("Unexpected file type in the result bundle: \(name).")
+                }
+            }
+        }
     }
 
     private static func unexpected(_ reply: HostLinkReply) -> HostLinkError {
