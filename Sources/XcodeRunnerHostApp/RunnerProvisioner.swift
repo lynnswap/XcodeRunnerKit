@@ -82,6 +82,7 @@ struct RunnerProvisioningAuthenticationFailure: Error {
 }
 
 protocol RunnerProvisioningClient: Sendable {
+    func requireForkApproval(for repository: GitHubRepository, accessToken: String) async throws
     func repository(fullName: String, accessToken: String) async throws -> GitHubRepository
     func listRunners(repository: GitHubRepository, accessToken: String) async throws -> [GitHubRunner]
     func registrationToken(repository: GitHubRepository, accessToken: String) async throws -> String
@@ -321,6 +322,8 @@ actor RunnerProvisioner {
                     problems.append(.unhostedRegistrations(count: unhosted.count))
                 }
 
+                // Report a change of policy even when every runner is already registered.
+                try await client.requireForkApproval(for: repository, accessToken: token)
                 let missing = max(0, capacity - knownRunners.count)
                 if missing > 0 {
                     let archiveResult: Result<PreparedArchive, any Error>
@@ -336,11 +339,16 @@ actor RunnerProvisioner {
                         archive = archiveResult
                     }
                     let prepared = try archiveResult.get()
+                    // The paired Mac may have spent several minutes downloading the runner since the first check.
+                    try await client.requireForkApproval(for: repository, accessToken: token)
                     let registrationToken = try await client.registrationToken(repository: repository, accessToken: token)
                     var nextSlot = 1
                     do {
-                        for _ in 0..<missing {
+                        for index in 0..<missing {
                             try Task.checkCancellation()
+                            if index > 0 {
+                                try await client.requireForkApproval(for: repository, accessToken: token)
+                            }
                             let name: String
                             var replaceRegistration = false
                             while true {

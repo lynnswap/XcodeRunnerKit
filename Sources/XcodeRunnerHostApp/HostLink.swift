@@ -307,7 +307,7 @@ enum HostLink {
     /// - A new value in a reply or a report is optional.
     /// - A state that a report names is a type that keeps a raw value it does not know, as `HostState` does. Enums
     ///   that reports carry gain no cases.
-    static let version = 8
+    static let version = 9
     /// The oldest version whose messages this version reads. A Mac that runs an earlier one is shown as running
     /// another version, and the Macs do not pair. Versions before 7 answered only their own version.
     ///
@@ -437,6 +437,12 @@ enum HostLink {
                     await connected(message.version)
                     guard message.version >= oldestVersion, let request = message.payload else {
                         try await connection.send(Versioned(HostLinkReply.unsupported, version: version))
+                        continue
+                    }
+                    // An earlier manager can still administer this Mac but did not check GitHub before issuing a token.
+                    if message.version < 9, case .runners(.install) = request {
+                        let refusal = HostLinkReply.refused("Update the managing Mac to verify fork workflow approval before registering runners.")
+                        try await connection.send(Versioned(refusal, version: version))
                         continue
                     }
                     try await handle(request, { try await connection.send(Versioned($0, version: version)) }) {

@@ -83,6 +83,24 @@ struct GitHubClientTests {
         #expect(requests.map(\.httpMethod) == ["GET", "POST"])
     }
 
+    @Test func forkApprovalUsesTheRepositorysActionsSettings() async throws {
+        let prefix = "/repos/owner/project/actions/permissions/"
+        let transport = GitHubTestTransport([
+            .init(path: prefix + "fork-pr-contributor-approval", body: #"{"approval_policy":"first_time_contributors"}"#),
+            .init(path: prefix + "fork-pr-workflows-private-repos", body: #"{"run_workflows_from_fork_pull_requests":false}"#),
+            .init(path: prefix + "fork-pr-workflows-private-repos", body: #"{"run_workflows_from_fork_pull_requests":true,"require_approval_for_fork_pr_workflows":true}"#),
+            .init(path: prefix + "fork-pr-workflows-private-repos", body: #"{"run_workflows_from_fork_pull_requests":true,"require_approval_for_fork_pr_workflows":false}"#),
+        ])
+        let client = await transport.client
+        let publicRepo = GitHubRepository(id: 1, fullName: "owner/project", isPrivate: false)
+        let privateRepo = GitHubRepository(id: 2, fullName: "owner/project", isPrivate: true)
+        await #expect(throws: ProvisioningError.self) { try await client.requireForkApproval(for: publicRepo, accessToken: "user") }
+        try await client.requireForkApproval(for: privateRepo, accessToken: "user")
+        try await client.requireForkApproval(for: privateRepo, accessToken: "user")
+        await #expect(throws: ProvisioningError.self) { try await client.requireForkApproval(for: privateRepo, accessToken: "user") }
+        #expect(await transport.requests.allSatisfy { $0.cachePolicy == .reloadIgnoringLocalAndRemoteCacheData })
+    }
+
     @Test func runnerArchiveComesFromTheOfficialReleaseWithItsDigest() async throws {
         let checksum = String(repeating: "a", count: 64)
         let transport = GitHubTestTransport([

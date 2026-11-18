@@ -3,10 +3,13 @@ import Foundation
 struct GitHubRepository: Codable, Equatable, Identifiable, Sendable {
     let id: Int
     let fullName: String
+    // Saved selections and reports from earlier hosts omit GitHub's visibility flag.
+    var isPrivate: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case id
         case fullName = "full_name"
+        case isPrivate = "private"
     }
 }
 
@@ -158,6 +161,34 @@ struct GitHubClient: Sendable {
         try await api(path: "repos/\(fullName)", accessToken: accessToken)
     }
 
+    /// Reads the repository settings GitHub uses before it assigns a fork workflow to a runner.
+    func requireForkApproval(for repository: GitHubRepository, accessToken: String) async throws {
+        guard let isPrivate = repository.isPrivate else {
+            throw ProvisioningError("GitHub did not report the visibility of \(repository.fullName). Cannot verify fork workflow settings.")
+        }
+        let path = "repos/\(repository.fullName)/actions/permissions"
+        if isPrivate {
+            struct Policy: Decodable {
+                let run_workflows_from_fork_pull_requests: Bool
+                let require_approval_for_fork_pr_workflows: Bool?
+            }
+            let policy: Policy = try await api(
+                path: path + "/fork-pr-workflows-private-repos", accessToken: accessToken, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData
+            )
+            guard !policy.run_workflows_from_fork_pull_requests || policy.require_approval_for_fork_pr_workflows == true else {
+                throw ProvisioningError("In GitHub Settings > Actions > General, disable workflows from fork pull requests or require approval for them.")
+            }
+        } else {
+            struct Policy: Decodable { let approval_policy: String }
+            let policy: Policy = try await api(
+                path: path + "/fork-pr-contributor-approval", accessToken: accessToken, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData
+            )
+            guard policy.approval_policy == "all_external_contributors" else {
+                throw ProvisioningError("In GitHub Settings > Actions > General, choose Require approval for all external contributors.")
+            }
+        }
+    }
+
     func registrationToken(repository: GitHubRepository, accessToken: String) async throws -> String {
         struct Token: Decodable { let token: String }
         let result: Token = try await api(
@@ -251,9 +282,12 @@ struct GitHubClient: Sendable {
         }
     }
 
-    private func api<Result: Decodable>(path: String, method: String = "GET", accessToken: String?) async throws -> Result {
+    private func api<Result: Decodable>(
+        path: String, method: String = "GET", accessToken: String?, cachePolicy: URLRequest.CachePolicy = .useProtocolCachePolicy
+    ) async throws -> Result {
         var request = apiRequest(url: URL(string: "https://api.github.com/")!.appending(path: path), accessToken: accessToken)
         request.httpMethod = method
+        request.cachePolicy = cachePolicy
         return try JSONDecoder().decode(Result.self, from: await self.request(request).0)
     }
 

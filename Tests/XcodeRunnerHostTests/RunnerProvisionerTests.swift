@@ -63,6 +63,12 @@ struct RunnerProvisionerTests {
             failBeforeLocalSettings = beforeLocalSettings
         }
 
+        var forkPolicyAllowsRegistration = true
+        func allowForkRegistration(_ allowed: Bool) { forkPolicyAllowsRegistration = allowed }
+        func requireForkApproval(for repository: GitHubRepository, accessToken: String) throws {
+            if !forkPolicyAllowsRegistration { throw TestFailure("Fork workflows require approval.") }
+        }
+
         func listRunners(repository: GitHubRepository, accessToken: String) throws -> [GitHubRunner] {
             runnerListRequests.append(repository.id)
             if failedRepository == repository.id { throw TestFailure("Repository access denied.") }
@@ -371,6 +377,18 @@ struct RunnerProvisionerTests {
         let changes = await client.labelChanges
         _ = try await provisioner.reconcile(repositories: [firstRepository], capacity: 2, token: "access-token")
         #expect(await client.labelChanges == changes)
+    }
+
+    @Test func missingForkApprovalKeepsExistingRunnersAndStopsNewRegistrations() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await client.addRunner(repository: firstRepository, identifier: 1, name: "existing")
+        await client.allowForkRegistration(false)
+        let statuses = try await provisioner.reconcile(repositories: [firstRepository], capacity: 2, token: "access-token")
+        let status = try #require(statuses.first)
+        #expect(status.registeredCount == 1)
+        #expect(status.errorMessage == "Fork workflows require approval.")
+        #expect(await client.installations.isEmpty)
     }
 
     @Test func decreasingCapacityPreservesBusyAndIdleListeners() async throws {

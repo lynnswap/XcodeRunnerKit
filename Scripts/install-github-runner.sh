@@ -54,6 +54,32 @@ install_github_runner() {
     elif [[ -f "$directory/.runner" ]]; then
         echo "Runner already configured at $directory; use its service commands or remove its registration before reinstalling." >&2
         exit 1
+    else
+        # The managing app checks before issuing a token. Manual setup uses the operator's gh session.
+        python3 - "$repository" <<'POLICY'
+import json
+import subprocess
+import sys
+
+repository = "repos/" + sys.argv[1]
+def read(path):
+    try:
+        data = subprocess.check_output(["gh", "api", repository + path, "--hostname", "github.com"], timeout=30)
+    except subprocess.TimeoutExpired:
+        raise SystemExit("Timed out reading fork workflow settings on github.com.")
+    return json.loads(data)
+
+if read("")["private"]:
+    policy = read("/actions/permissions/fork-pr-workflows-private-repos")
+    approved = (policy["run_workflows_from_fork_pull_requests"] is False
+                or policy["require_approval_for_fork_pr_workflows"] is True)
+else:
+    policy = read("/actions/permissions/fork-pr-contributor-approval")
+    approved = policy["approval_policy"] == "all_external_contributors"
+if not approved:
+    raise SystemExit("In GitHub Settings > Actions > General, require approval for all external fork workflows "
+                     "or disable fork workflows for a private repository.")
+POLICY
     fi
     configuration_arguments=(--unattended)
     if [[ "${XCODE_RUNNER_REPLACE_REGISTRATION:-0}" == "1" ]]; then
