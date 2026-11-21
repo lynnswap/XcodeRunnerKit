@@ -717,13 +717,14 @@ final class HostSettingsModel: HostSettingsDisplay {
 
     /// Read live capacity for an explicit inventory request without holding up ordinary settings reads.
     func readRunnerSlots() async -> RunnerSlots {
-        async let storageError = readRunnerStorageError()
+        runnerStorageError = await readRunnerStorageError()
+        if runnerStorageError != nil { return runnerSlots }
         let pool = pool
         do {
             let status = try await HostLink.within(HostLink.requestTimeout / 2) { try await pool.status() }
-            return await RunnerSlots(self, pool: status, poolError: nil, storageError: storageError)
+            return RunnerSlots(self, pool: status, poolError: nil, storageError: runnerStorageError)
         } catch {
-            return await RunnerSlots(self, pool: nil, poolError: error.localizedDescription, storageError: storageError)
+            return RunnerSlots(self, pool: nil, poolError: error.localizedDescription, storageError: runnerStorageError)
         }
     }
 

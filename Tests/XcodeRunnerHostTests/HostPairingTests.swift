@@ -1080,6 +1080,7 @@ struct HostPairingTests {
         let slots = await host.readRunnerSlots()
         #expect(slots.state == "unavailable")
         #expect(slots.reason?.contains(storage.directory.path(percentEncoded: false)) == true)
+        #expect(HostSettingsReport(host).runnerSlots == slots)
         try await host.pool.configure(maximumConcurrentJobs: 1)
         try await host.pool.withSlot {
             let failure = await #expect(throws: HostAvailability.self) {
