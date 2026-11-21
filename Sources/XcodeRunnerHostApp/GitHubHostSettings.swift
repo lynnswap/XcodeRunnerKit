@@ -276,7 +276,10 @@ final class GitHubHostSettings {
             case .cancelSignIn:
                 cancelConnection()
                 await connectionTask?.value
-            case .signOut(let confirmedLogin):
+            case .signOut:
+                guard canDisconnect else { throw Self.busy }
+                await signOut(confirmedLogin: nil)
+            case .disconnectAccount(let confirmedLogin):
                 guard canDisconnect else { throw Self.busy }
                 await signOut(confirmedLogin: confirmedLogin)
             case .reloadRepositories:

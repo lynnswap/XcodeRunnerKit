@@ -64,7 +64,8 @@ enum GitHubRequest: Codable, Sendable {
     /// Starts the device flow on the host. A later read carries the code for the person to enter on GitHub's page.
     case signIn
     case cancelSignIn
-    case signOut(confirmedLogin: String? = nil)
+    case signOut
+    case disconnectAccount(String)
     case reloadRepositories
     /// Saves the selection. The host then registers and removes runners, which later reads report.
     case applySelection(Set<Int>)
@@ -344,7 +345,7 @@ enum HostLink {
     /// - A new value in a reply or a report is optional.
     /// - A state that a report names is a type that keeps a raw value it does not know, as `HostState` does. Enums
     ///   that reports carry gain no cases.
-    static let version = 12
+    static let version = 13
     /// The oldest version whose messages this version reads. A Mac that runs an earlier one is shown as running
     /// another version, and the Macs do not pair. Versions before 7 answered only their own version.
     ///

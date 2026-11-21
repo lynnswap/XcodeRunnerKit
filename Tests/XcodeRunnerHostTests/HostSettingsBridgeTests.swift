@@ -149,7 +149,7 @@ struct HostSettingsBridgeTests {
         authorized.continuation.yield()
         try await waitUntil { github.account != nil && !github.isConnecting }
         #expect(try await perform(.read).accountLogin == "owner")
-        #expect(try await perform(.signOut()).accountLogin == nil)
+        #expect(try await perform(.signOut).accountLogin == nil)
 
         // Reloading without a sign-in fails on the host, which says so in its answer for the command to fail with.
         #expect(try await perform(.reloadRepositories).errorMessage != nil)

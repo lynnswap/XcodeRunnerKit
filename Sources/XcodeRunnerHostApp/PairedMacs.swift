@@ -885,7 +885,7 @@ final class PairedMacs: MacList {
 
     func cancelSignIn(to id: HostPairing.ID) async { await changeGitHub(.cancelSignIn, of: id) }
     func signOut(of id: HostPairing.ID, confirmedLogin: String) async {
-        await changeGitHub(.signOut(confirmedLogin: confirmedLogin), of: id)
+        await changeGitHub(.disconnectAccount(confirmedLogin), of: id)
     }
     func reloadRepositories(of id: HostPairing.ID) async { await changeGitHub(.reloadRepositories, of: id) }
 
