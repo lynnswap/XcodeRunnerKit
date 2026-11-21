@@ -453,21 +453,25 @@ extension RemoteOperation {
         func value(_ key: String) -> String? {
             options.last { $0.hasPrefix(key) }.map { String($0.dropFirst(key.count)) }
         }
-        let developer = value("--developer-directory=") ?? value("--environment=DEVELOPER_DIR=")
+        let explicitDirectory = value("--developer-directory=")
+        let runtime = value("--simulator-runtime=")
+        let developer = explicitDirectory ?? value("--environment=DEVELOPER_DIR=")
             ?? ProcessInfo.processInfo.environment["DEVELOPER_DIR"] ?? savedXcode?.path(percentEncoded: false)
         let environment: Subprocess.Environment = developer.map { .inherit.updating(["DEVELOPER_DIR": $0]) } ?? .inherit
         func xcrun(_ arguments: [String]) async throws -> Data {
             let result = try await Subprocess.run(
                 .path("/usr/bin/xcrun"), arguments: .init(arguments), environment: environment,
-                output: .string(limit: 16 << 20), error: .string(limit: 4096)
+                output: .bytes(limit: .max), error: .string(limit: .max)
             )
             guard result.terminationStatus.isSuccess else { throw RemoteOperationFailure(result.standardError) }
-            return Data(result.standardOutput.utf8)
+            return Data(result.standardOutput)
         }
-        // A checkout-relative Xcode (including a symlink) only resolves after the files arrive.
-        if let developer, !developer.isEmpty, !developer.hasPrefix("/") { return }
+        // The CLI resolves an explicit path against its checkout, as does a managed Simulator's
+        // DEVELOPER_DIR. For other destinations xcrun interprets an empty environment value itself.
+        if let developer, !developer.hasPrefix("/"),
+           explicitDirectory != nil || runtime != nil || !developer.isEmpty { return }
         _ = try await xcrun(["--find", "xcodebuild"])
-        if let runtime = value("--simulator-runtime="), let type = value("--simulator-device-type=") {
+        if let runtime, let type = value("--simulator-device-type=") {
             struct DeviceType: Decodable { let identifier: String }
             struct Runtime: Decodable {
                 let identifier: String
