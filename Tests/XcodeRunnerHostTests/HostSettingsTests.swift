@@ -376,7 +376,7 @@ struct HostSettingsTests {
         #expect(settings.savedStorageDirectory == (try installation.requestedStorageDirectory()))
         #expect(settings.savedStorageDirectory == physicalNext)
         #expect(settings.storageDirectoryInput == physicalNext.path(percentEncoded: false))
-        #expect(settings.storageMessage == "Saved for the next host launch. Running jobs continue using their current storage.")
+        #expect(settings.storageMessage == "Saved for the next host launch. Finish work using runner storage before restarting to apply the saved folder.")
         #expect(settings.hostState == .running)
     }
 
@@ -442,6 +442,7 @@ struct HostSettingsTests {
         #expect(settings.storageSaveError == nil)
         #expect(settings.storageError != nil)
         #expect(settings.activeStorageDirectory == nil)
+        #expect(settings.storageMessage.contains("Finish work using runner storage before restarting"))
         #expect(settings.hostState == .needsAttention)
     }
 }

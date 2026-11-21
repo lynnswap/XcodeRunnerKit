@@ -53,7 +53,7 @@ private struct OverviewSection: View {
     @Bindable var model: MacPaneModel
 
     var body: some View {
-        Section {
+        Section("Overview") {
             if let connection = model.connection { MacConnectionRows(connection: connection) }
             if let report = model.report {
                 HostStatusRows(settings: report)
@@ -73,14 +73,9 @@ private struct OverviewSection: View {
                 TextField("Runner labels", text: $model.runnerLabelsInput, prompt: Text("None"))
                     .disabled(model.isSavingRunnerLabels)
                     .accessibilityIdentifier("runner-labels")
+                    .help("Separate multiple labels with commas.")
                 if let error = model.runnerLabelsError { ErrorText(error) }
                 runners(report)
-            }
-        } header: {
-            Text("Overview")
-        } footer: {
-            if model.report != nil {
-                Text("All repositories share the job limit, and each registers that many runners. Running jobs finish before a lower limit applies. Runners on \(model.mac.object) get the labels besides xcode-runnerkit, separated by commas, and a workflow chooses \(model.mac.object) with one of them in runs-on.")
             }
         }
     }
@@ -158,7 +153,7 @@ private struct XcodeSection: View {
     let report: HostSettingsReport
 
     var body: some View {
-        Section {
+        Section("Xcode") {
             Picker("Xcode for jobs", selection: $model.selectedXcode) {
                 Text("System selection").tag(MacPaneModel.XcodeChoice.ID?.none)
                 ForEach(model.xcodeChoices) { xcode in Text(xcode.title).tag(Optional(xcode.id)) }
@@ -185,10 +180,6 @@ private struct XcodeSection: View {
                 if let error = report.buildServiceError { ErrorText(error) }
                 if let error = model.buildServiceSaveError { ErrorText(error) }
             }
-        } header: {
-            Text("Xcode")
-        } footer: {
-            Text("Jobs on \(model.mac.object) use this Xcode unless their workflow passes --developer-directory or DEVELOPER_DIR. With System selection, they use the Xcode that xcode-select names. A build service is the path of an executable that builds in place of the one in Xcode, from the next job on, unless a workflow passes --build-service-path. With no path, jobs use the build service that their environment names, or the one in Xcode.")
         }
     }
 }
@@ -205,7 +196,7 @@ private struct StorageSection: View {
         let isSaving = model.isSaving
         let isRestarting = model.isRestarting
         let canEdit = model.canEditStorageDirectory
-        Section {
+        Section("Storage") {
             TextField("Storage folder", text: $model.storageDirectoryInput, prompt: Text("Not chosen"))
                 .accessibilityIdentifier("storage-folder")
                 .disabled(!canEdit)
@@ -231,15 +222,11 @@ private struct StorageSection: View {
             if let error = report.storageError { ErrorText(error) }
             if let error = model.storageSaveError { ErrorText(error) }
             if let error = model.restartError { ErrorText(error) }
-        } header: {
-            Text("Storage")
-        } footer: {
-            Text("A saved folder is applied before runners start on the next launch. Existing data is copied and its original files are kept. Stop other tools that use these files before restarting the host.")
         }
         .confirmationDialog("Restart XcodeHomeRunner on \(model.mac.object)?", isPresented: $isConfirmingRestart) {
             Button("Restart", role: .destructive) { model.restart() }
         } message: {
-            Text("\(runningJobs) Restarting stops \(model.mac.possessive) runner services until the host has started again, with the jobs that they run, and the saved storage folder is applied then.")
+            Text("\(runningJobs) Restarting stops \(model.mac.possessive) runner services and their jobs, then applies the saved folder.")
         }
     }
 

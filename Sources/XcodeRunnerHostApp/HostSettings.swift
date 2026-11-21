@@ -233,11 +233,10 @@ extension HostSettingsDisplay {
 
     var storageMessage: String {
         if hostState == .waitingForStorage {
-            return "Runner services start when storage becomes available. Folder changes saved now apply on the next host launch."
+            return "Runner services start when storage becomes available. Folder changes apply on the next host launch. Finish work using runner storage before restarting."
         }
-        if let savedStorageDirectory, savedStorageDirectory != activeStorageDirectory {
-            if activeStorageDirectory == nil { return "Saved for the next host launch." }
-            return "Saved for the next host launch. Running jobs continue using their current storage."
+        if storageChangeIsPending {
+            return "Saved for the next host launch. Finish work using runner storage before restarting to apply the saved folder."
         }
         if activeStorageDirectory != nil { return "Runner checkouts, build results, and the shared compiler cache use this folder." }
         return "Choose one folder for runner checkouts, build results, and the shared compiler cache."
