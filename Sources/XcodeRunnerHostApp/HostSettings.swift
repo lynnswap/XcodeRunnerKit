@@ -703,7 +703,8 @@ final class HostSettingsModel: HostSettingsDisplay {
             do {
                 status = try await pool.status(waitForLock: false)
             } catch let error as POSIXError where error.code == .EWOULDBLOCK {
-                sampledSlots = .contended
+                // The settings response waits for the lock; the inventory can still sample storage and report contention.
+                startRunnerSlotSample()
                 status = try await pool.status()
             }
             poolStatus = status
@@ -724,7 +725,7 @@ final class HostSettingsModel: HostSettingsDisplay {
     /// the waiting read above and never consume a partial or contended inventory sample.
     private var sampledSlots = RunnerSlots(state: "unknown", available: nil, reason: "No runner slot report.")
     @ObservationIgnored private var slotRead: Task<Void, Never>?
-    @ObservationIgnored private var slotReaders: [UUID: AsyncStream<Void>.Continuation] = [:]
+    @ObservationIgnored private var slotReaders: [UUID: AsyncStream<RunnerSlots>.Continuation] = [:]
 
     var runnerSlots: RunnerSlots { sampledSlots.forHost(self) }
 
@@ -739,18 +740,20 @@ final class HostSettingsModel: HostSettingsDisplay {
     /// A live reader can leave a stalled volume probe without changing anyone else's observation.
     func readRunnerSlots() async -> RunnerSlots {
         let id = UUID()
-        let (events, continuation) = AsyncStream<Void>.makeStream()
+        let (events, continuation) = AsyncStream<RunnerSlots>.makeStream()
         slotReaders[id] = continuation
         defer { slotReaders[id] = nil }
         startRunnerSlotSample()
         do {
-            try await HostLink.within(HostLink.requestTimeout + HostLink.requestTimeout / 2) {
-                for await _ in events {}
+            let sample = try await HostLink.within(HostLink.requestTimeout + HostLink.requestTimeout / 2) {
+                var iterator = events.makeAsyncIterator()
+                guard let sample = await iterator.next() else { throw CancellationError() }
+                return sample
             }
+            return sample.forHost(self)
         } catch {
             return RunnerSlots(state: "unknown", available: nil, reason: error.localizedDescription).forHost(self)
         }
-        return runnerSlots
     }
 
     private func startRunnerSlotSample() {
@@ -765,7 +768,10 @@ final class HostSettingsModel: HostSettingsDisplay {
                 sampledSlots = RunnerSlots(pool: nil, poolError: reason, storageError: storageError)
             }
             slotRead = nil
-            for reader in slotReaders.values { reader.finish() }
+            for reader in slotReaders.values {
+                reader.yield(sampledSlots)
+                reader.finish()
+            }
         }
     }
 
