@@ -718,7 +718,10 @@ struct HostPairingTests {
         await dashboard.checkStatus(of: shown.id, at: endpoint)
         #expect(settings.github?.errorMessage?.contains("pending until host storage is ready") == true)
 
-        await dashboard.signOut(of: shown.id)
+        await dashboard.signOut(of: shown.id, confirmedLogin: "previous-account")
+        #expect(settings.github?.accountLogin == "owner")
+        #expect(settings.github?.errorMessage?.contains("account changed") == true)
+        await dashboard.signOut(of: shown.id, confirmedLogin: "owner")
         #expect(settings.github?.accountLogin == nil)
         #expect(host.github.account == nil)
         #expect(await transport.requests.count == 5)

@@ -19,6 +19,7 @@ final class OverviewViewController: NSHostingController<OverviewView>, SavingPan
 @MainActor
 struct OverviewView: View {
     let model: OverviewModel
+    @State private var loginToDisconnect: String?
 
     var body: some View {
         Form {
@@ -70,8 +71,22 @@ struct OverviewView: View {
                 LabeledContent("Connected account") {
                     HStack {
                         Text(login)
-                        Button("Disconnect", role: .destructive) { model.signOut() }
+                        Button("Disconnect…", role: .destructive) { loginToDisconnect = login }
                             .disabled(!github.canDisconnect)
+                            .alert(
+                                "Disconnect GitHub from \(model.mac.object)?",
+                                isPresented: Binding(get: { loginToDisconnect != nil }, set: { if !$0 { loginToDisconnect = nil } }),
+                                presenting: loginToDisconnect
+                            ) { confirmedLogin in
+                                Button("Cancel", role: .cancel) {}
+                                Button("Disconnect", role: .destructive) { model.signOut(confirmedLogin: confirmedLogin) }
+                            } message: { confirmedLogin in
+                                if let manager = github.managerName {
+                                    Text("This signs out \(confirmedLogin). \(manager) will continue managing this Mac’s runners.")
+                                } else {
+                                    Text("This signs out \(confirmedLogin) and stops syncing runner registrations until you reconnect. Existing runners and jobs keep running.")
+                                }
+                            }
                     }
                 }
             } else if github.isConnecting {
@@ -97,10 +112,6 @@ struct OverviewView: View {
             if github.accountLogin == nil || github.managerName != nil, let error = github.errorMessage { ErrorText(error) }
         } header: {
             Text("GitHub")
-        } footer: {
-            if github.accountLogin != nil {
-                Text("Disconnecting removes \(model.mac.possessive) GitHub sign-in and pauses runner management. Existing runner services and jobs continue.")
-            }
         }
     }
 

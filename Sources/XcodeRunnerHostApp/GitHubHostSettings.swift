@@ -170,10 +170,13 @@ final class GitHubHostSettings {
         )
     }
 
-    func signOut() async {
-        guard canDisconnect else { return }
+    func signOut(confirmedLogin: String?) async {
+        guard canDisconnect else {
+            errorMessage = Self.busy.localizedDescription
+            return
+        }
         do {
-            try await authentication.signOut()
+            try await authentication.signOut(confirmedLogin: confirmedLogin)
             account = nil
             repositories = []
             installations = []
@@ -275,7 +278,10 @@ final class GitHubHostSettings {
                 await connectionTask?.value
             case .signOut:
                 guard canDisconnect else { throw Self.busy }
-                await signOut()
+                await signOut(confirmedLogin: nil)
+            case .disconnectAccount(let confirmedLogin):
+                guard canDisconnect else { throw Self.busy }
+                await signOut(confirmedLogin: confirmedLogin)
             case .reloadRepositories:
                 guard canReloadRepositories else { throw Self.busy }
                 await loadRepositories()
