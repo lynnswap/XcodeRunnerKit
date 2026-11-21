@@ -912,6 +912,70 @@ struct HostPairingTests {
         }
     }
 
+    @Test func aRepeatedRunSendsSourceButLeavesDownloadedResultsOnTheDashboard() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        let output = root.appending(path: "XcodeRunnerOutput")
+        let job = output.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: job, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try git("init", "--quiet", in: root)
+        for name in ["workflow.log", "tracked.txt"] { try Data().write(to: job.appending(path: name)) }
+        try git("add", "*.txt", in: root)
+        try Data().write(to: root.appending(path: "new.swift"))
+        let checkout = try await Checkout.containing(root)
+        let files = try await checkout.files(excludingResultsIn: output)
+        #expect(Set(files) == ["new.swift", "XcodeRunnerOutput/" + job.lastPathComponent + "/tracked.txt"])
+    }
+
+    @Test func compactWorkflowOutputKeepsTheFailedStepInALargeMatrix() throws {
+        let folder = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let successes = (1...20).map { WorkflowSummary.Job(name: "Build \($0)", status: "success") }
+        let failure = WorkflowSummary.Job(name: "Test", status: "failure", step: "Run tests", logLine: 50)
+        let full = WorkflowSummary(status: "failed", runner: "Runner", jobs: successes + [failure])
+        try JSONEncoder().encode(full).write(to: folder.appending(path: "summary.json"))
+        let json = try WorkflowSummary.report(in: folder, format: .json, exitCode: 1)
+        let report = try JSONDecoder().decode(WorkflowSummary.self, from: json)
+        #expect(report.jobCount == 21)
+        #expect(report.jobs.count == 12)
+        #expect(report.jobs.first?.step == "Run tests")
+        #expect(report.jobs.first?.logLine == 50)
+    }
+
+    @Test func workflowUsesTheDashboardRefAndRepositoryFromASubdirectory() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        let directory = root.appending(path: "Sources")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try git("init", "--quiet", "-b", "feature", in: root)
+        try git("commit", "--quiet", "--allow-empty", "-m", "Initial", in: root)
+        try git("remote", "add", "origin", "git@github.com:owner/project.git", in: root)
+        let workflows = root.appending(path: ".github/workflows")
+        try FileManager.default.createDirectory(at: workflows, withIntermediateDirectories: true)
+        let shared = "jobs: {test: {runs-on: fast, steps: []}}"
+        try Data(shared.utf8).write(to: workflows.appending(path: "shared.yml"))
+        try Data().write(to: workflows.appending(path: "unrelated.yml"))
+        let caller = #"""
+        env:
+          RELEASE_DATE: 2026-11-21
+          PATH_SUFFIX: :/opt/bin
+          LIMIT: !!float .inf
+        jobs: {test: {uses: "\x2e/.github/workflows/shared.yml"}}
+        """#
+        try Data(caller.utf8).write(to: root.appending(path: "ci.yml"))
+        let checkout = try await Checkout.containing(directory)
+        let workflow = try await checkout.workflow(file: "../ci.yml", event: "push")
+        #expect(workflow.file == "ci.yml")
+        #expect(workflow.repository == "owner/project")
+        #expect(workflow.ref == "refs/heads/feature")
+        #expect(workflow.localWorkflows == ["shared.yml": shared])
+        try Data("shared.yml\n".utf8).write(to: root.appending(path: ".gitignore"))
+        await #expect(throws: RemoteOperationFailure.self) {
+            try await checkout.workflow(file: "../ci.yml", event: "push")
+        }
+    }
+
     @Test func aDashboardRunsABuildOfItsCheckoutOnAHost() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

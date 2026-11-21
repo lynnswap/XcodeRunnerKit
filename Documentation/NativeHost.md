@@ -358,7 +358,7 @@ cancels a pending request or stops the running operation.
   directory, including uncommitted edits to tracked files and untracked files
   that Git does not ignore. The same rules apply inside submodules. The CLI
   reads the working tree when a runner accepts the job, so edits made while
-  waiting are included. Each transfer omits the Git history. The host runs the
+  waiting are included. Build and test transfers omit Git history. The host runs the
   operation in its copy of the current directory, so name the workspace,
   project, or package relative to that directory.
 - **Host settings.** The operation uses the host's storage, its saved Xcode, and
@@ -586,6 +586,47 @@ succeed even if subsequent Simulator cleanup or runner synchronization fails;
 the update then returns `state: "savedWithErrors"` and an `errors` list. Retrying
 cleanup does not require reverting the saved settings. Invalid input and failures
 before saving produce an error.
+
+## Run a workflow from a dashboard
+
+On each Mac that will run workflows, install the [act](https://github.com/nektos/act)
+engine from this checkout:
+
+```sh
+bash Scripts/install-workflow-engine.sh
+```
+
+On a paired dashboard, run the CLI inside XcodeHomeRunner.app from a Git checkout with an origin remote:
+
+```sh
+/Applications/XcodeHomeRunner.app/Contents/Helpers/xcode-runner workflow run .github/workflows/native-ci.yml
+```
+
+The default event is `workflow_dispatch`. Use `--event` to choose another event declared by the workflow.
+For a simulated pull request, `--base` selects the target branch and defaults to origin's default branch.
+The GitHub context uses the checkout's ref and HEAD. A GitHub-generated PR number or merge commit
+is available in a workflow dispatched by GitHub.
+The host reserves one free slot on a Mac with the engine installed. Its jobs run one at a time on that Mac
+using the same copy of the working tree, including tracked edits and unignored new files.
+The local Actions service supplies the checkout, evaluates job dependencies and runs the workflow steps.
+It evaluates the workflow on candidate Macs to match job conditions, matrix labels, and the selected ref
+before sending the checkout. Conditions that reference `needs` can depend on values produced at runtime.
+The host defers a job when its condition, matrix, or runner label contains the word `needs`
+(case-insensitive). This also matches literal labels such as `needs-xcode`.
+While choosing a Mac, it assumes that job can succeed and evaluates its dependents under that assumption.
+A deferred job can discover a missing label at execution time. A dependent can require a label during
+routing even if it is eventually skipped. Spell local reusable workflow references as literal
+`./.github/workflows/<file>` paths.
+Jobs receive a shallow Git repository with the submitted HEAD and index.
+Each invocation has its own runner and artifact store. GitHub's cross-run concurrency groups and repository secrets are unavailable.
+
+A native job can select the Mac by its configured runner labels, `macos-latest`, or the installed
+Xcode major version (for example, `xcode-27`). The workflow inherits the host's selected Xcode.
+The CLI reports job outcomes and the failed step, and returns the workflow exit status. Use `--json`
+for a compact result with local paths and the log line for each failed step. Both formats show up to twelve jobs, with failures first.
+`summary.json` contains every job, and `--verbose` streams the full transcript. The runner copies `workflow.log`
+and uploaded artifacts to `XcodeRunnerOutput/<run ID>/` on the dashboard. Use `--output-directory`
+to choose another folder. An artifact uploaded as a ZIP is kept in its original form.
 
 ## Configure a workflow
 

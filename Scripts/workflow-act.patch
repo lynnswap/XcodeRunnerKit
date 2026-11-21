@@ -1,0 +1,245 @@
+--- a/pkg/artifacts/artifacts_v4.go
++++ b/pkg/artifacts/artifacts_v4.go
+@@ -255 +255 @@
+-		"/" + endp + "?sig=" + base64.URLEncoding.EncodeToString(r.buildSignature(endp, expires, artifactName, taskID)) + "&expires=" + url.QueryEscape(expires) + "&artifactName=" + url.QueryEscape(artifactName) + "&taskID=" + fmt.Sprint(taskID)
++		"/" + endp + "?sig=" + base64.RawURLEncoding.EncodeToString(r.buildSignature(endp, expires, artifactName, taskID)) + "&expires=" + url.QueryEscape(expires) + "&artifactName=" + url.QueryEscape(artifactName) + "&taskID=" + fmt.Sprint(taskID)
+@@ -264 +264 @@
+-	dsig, _ := base64.URLEncoding.DecodeString(sig)
++	dsig, _ := base64.RawURLEncoding.DecodeString(strings.TrimRight(sig, "="))
+@@ -289 +289 @@
+-	err = protojson.Unmarshal(body, req)
++	err = (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(body, req)
+--- a/pkg/artifacts/server.go
++++ b/pkg/artifacts/server.go
+@@ -11,0 +12 @@
++	"net"
+@@ -592 +593 @@
+-func Serve(ctx context.Context, artifactPath string, addr string, port string, authKey []byte) context.CancelFunc {
++func Serve(ctx context.Context, artifactPath string, addr string, port string, authKey []byte) (context.CancelFunc, string, error) {
+@@ -597 +598 @@
+-		return cancel
++		return cancel, port, nil
+@@ -610,0 +612,6 @@
++	listener, err := net.Listen("tcp", net.JoinHostPort(addr, port))
++	if err != nil {
++		cancel()
++		return nil, "", err
++	}
++	port = strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+@@ -614 +621 @@
+-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
++		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+@@ -629,2 +636,2 @@
+-	return cancel
+-}
++	return cancel, port, nil
++}
+--- a/pkg/runner/run_context.go
++++ b/pkg/runner/run_context.go
+@@ -35,0 +36 @@
++	nativeOutcome string
+@@ -708 +709,6 @@
+-	rc.Run.Job().Result = result
++	rc.nativeOutcome = combinedOutcome(rc.nativeOutcome, result)
++	job := rc.Run.Job()
++	job.Result = combinedOutcome(job.Result, result)
++	if rc.caller != nil {
++		rc.caller.runContext.result(result)
++	}
+@@ -731,0 +738,3 @@
++		if err := rc.checkWorkflowRef(ctx); err != nil {
++			return err
++		}
+@@ -737 +746,27 @@
+-			return executor(ctx)
++			if os.Getenv("XCODE_RUNNER_PLAN") == "1" && jobType == model.JobTypeDefault {
++				rc.result("success")
++				return nil
++			}
++			if value := rc.Run.Job().TimeoutMinutes; value != "" {
++				minutes, err := strconv.Atoi(rc.ExprEval.Interpolate(ctx, value))
++				if err != nil || minutes <= 0 {
++					return fmt.Errorf("invalid job timeout-minutes: %s", value)
++				}
++				var cancel context.CancelFunc
++				ctx, cancel = context.WithTimeout(ctx, time.Duration(minutes)*time.Minute)
++				defer cancel()
++			}
++			err = executor(ctx)
++			if jobType != model.JobTypeDefault {
++				if os.Getenv("XCODE_RUNNER_PLAN") == "1" {
++					return err
++				}
++				if err != nil {
++					// A called workflow's result belongs to its job. Later stages still evaluate always() and failure().
++					rc.result("failure")
++					common.Logger(ctx).Error(err)
++				}
++				common.Logger(ctx).WithField("jobResult", rc.nativeOutcome).Infof("Called workflow %s", rc.nativeOutcome)
++				return nil
++			}
++			return err
+@@ -776 +811,3 @@
+-	if err := rc.ExprEval.EvaluateYamlNode(ctx, &job.RawRunsOn); err != nil {
++	entry := *job
++	entry.RawRunsOn = copyWorkflowNode(job.RawRunsOn)
++	if err := rc.ExprEval.EvaluateYamlNode(ctx, &entry.RawRunsOn); err != nil {
+@@ -781 +818 @@
+-	return job.RunsOn()
++	return entry.RunsOn()
+@@ -878 +915 @@
+-		l.WithField("jobResult", "skipped").Debugf("Skipping job '%s' due to '%s'", job.Name, job.If.Value)
++		l.WithField("jobResult", "skipped").Infof("Skipping job '%s' due to '%s'", job.Name, job.If.Value)
+@@ -886,6 +923,7 @@
+-	img := rc.platformImage(ctx)
+-	if img == "" {
+-		for _, platformName := range rc.runsOnPlatformNames(ctx) {
+-			l.Infof("\U0001F6A7  Skipping unsupported platform -- Try running with `-P %+v=...`", platformName)
+-		}
+-		return false, nil
++	for _, label := range rc.runsOnPlatformNames(ctx) {
++		if rc.Config.Platforms[strings.ToLower(label)] != "-self-hosted" {
++			return false, fmt.Errorf("no native runner for label %q", label)
++		}
++	}
++	if rc.containerImage(ctx) != "" || len(job.Services) > 0 {
++		return false, fmt.Errorf("container jobs require a container runner")
+--- a/cmd/root.go
++++ b/cmd/root.go
+@@ -682 +682,5 @@
+-		cancel := artifacts.Serve(ctx, input.artifactServerPath, artifactAddr, input.artifactServerPort, artifactServerAuthKey)
++		cancel, port, err := artifacts.Serve(ctx, input.artifactServerPath, artifactAddr, input.artifactServerPort, artifactServerAuthKey)
++		if err != nil {
++			return err
++		}
++		config.ArtifactServerPort = port
+--- a/pkg/runner/step_run.go
++++ b/pkg/runner/step_run.go
+@@ -143 +143,4 @@
+-	sr.cmd, err = shellquote.Split(sr.cmdline)
++	sr.cmd, err = shellquote.Split(scCmd)
++	for i, arg := range sr.cmd {
++		sr.cmd[i] = strings.ReplaceAll(arg, "{0}", scriptPath)
++	}
+--- a/pkg/runner/runner.go
++++ b/pkg/runner/runner.go
+@@ -125,0 +126,3 @@
++	if runner.caller != nil && len(plan.Stages) == 0 {
++		return common.NewErrorExecutor(fmt.Errorf("no workflow_call jobs in %s", runner.caller.runContext.Run.Job().Uses))
++	}
+@@ -160,0 +164,6 @@
++				if os.Getenv("XCODE_RUNNER_PLAN") == "1" && routingNeedsOutputs(job) {
++					// An output-dependent job may succeed. Keep its dependents eligible for routing.
++					rc := runner.newRunContext(ctx, run, nil)
++					rc.result("success")
++					continue
++				}
+@@ -188,0 +198 @@
++				maxParallel = min(maxParallel, runner.config.GetConcurrentJobs())
+@@ -210 +220 @@
+-						return executor(common.WithJobErrorContainer(WithJobLogger(ctx, rc.Run.JobID, jobName, rc.Config, &rc.Masks, matrix)))
++						return executor(common.WithJobErrorContainer(WithJobLogger(ctx, rc.workflowJobID(), jobName, rc.Config, &rc.Masks, matrix)))
+--- a/pkg/container/host_environment.go
++++ b/pkg/container/host_environment.go
+@@ -28,0 +29 @@
++	nativeGroups nativeStepGroups
+@@ -45,0 +47 @@
++		e.nativeGroups.stop()
+@@ -324,44 +326 @@
+-	var ppty *os.File
+-	var tty *os.File
+-	defer func() {
+-		if ppty != nil {
+-			ppty.Close()
+-		}
+-		if tty != nil {
+-			tty.Close()
+-		}
+-	}()
+-	if true /* allocate Terminal */ {
+-		var err error
+-		ppty, tty, err = setupPty(cmd, cmdline)
+-		if err != nil {
+-			common.Logger(ctx).Debugf("Failed to setup Pty %v\n", err.Error())
+-		}
+-	}
+-	writer := &ptyWriter{Out: e.StdOut}
+-	logctx, finishLog := context.WithCancel(context.Background())
+-	if ppty != nil {
+-		go copyPtyOutput(writer, ppty, finishLog)
+-	} else {
+-		finishLog()
+-	}
+-	if ppty != nil {
+-		go writeKeepAlive(ppty)
+-	}
+-	err = cmd.Run()
+-	if err != nil {
+-		return err
+-	}
+-	if tty != nil {
+-		writer.AutoStop = true
+-		if _, err := tty.Write([]byte("\x04")); err != nil {
+-			common.Logger(ctx).Debug("Failed to write EOT")
+-		}
+-	}
+-	<-logctx.Done()
+-
+-	if ppty != nil {
+-		ppty.Close()
+-		ppty = nil
+-	}
+-	return err
++	return e.nativeGroups.run(ctx, cmd)
+--- a/pkg/runner/job_executor.go
++++ b/pkg/runner/job_executor.go
+@@ -3,0 +4 @@
++	"github.com/nektos/act/pkg/exprparser"
+@@ -161,6 +162 @@
+-	// we have only one result for a whole matrix build, so we need
+-	// to keep an existing result state if we run a matrix
+-	if len(info.matrix()) > 0 && rc.Run.Job().Result != "" {
+-		jobResult = rc.Run.Job().Result
+-	}
+-
++	allowedFailure := false
+@@ -168 +164,10 @@
+-		jobResult = "failure"
++		if expr := rc.Run.Job().RawContinueOnError; expr != "" {
++			var err error
++			allowedFailure, err = EvalBool(ctx, rc.ExprEval, expr, exprparser.DefaultStatusCheckNone)
++			if err != nil {
++				logger.Errorf("invalid job continue-on-error: %v", err)
++			}
++		}
++		if !allowedFailure {
++			jobResult = "failure"
++		}
+@@ -172,5 +177,3 @@
+-	if rc.caller != nil {
+-		// set reusable workflow job result
+-		rc.caller.runContext.result(jobResult)
+-	}
+-
++
++
++	itemResult := "success"
+@@ -178 +181,2 @@
+-	if jobResult != "success" {
++	if !success {
++		itemResult = "failure"
+@@ -182 +186 @@
+-	logger.WithField("jobResult", jobResult).Infof("\U0001F3C1  Job %s", jobResultMessage)
++	logger.WithField("jobResult", itemResult).WithField("allowedFailure", allowedFailure).Infof("\U0001F3C1  Job %s", jobResultMessage)
+--- a/pkg/runner/step.go
++++ b/pkg/runner/step.go
+@@ -208 +208 @@
+-			logger.WithFields(logrus.Fields{"executionTime": executionTime, "stepResult": stepResult.Outcome}).Infof("  \u2705  Success - %s %s [%s]", stage, stepString, executionTime)
++			logger.WithFields(logrus.Fields{"executionTime": executionTime, "stepResult": stepResult.Outcome, "stepConclusion": stepResult.Conclusion}).Infof("  \u2705  Success - %s %s [%s]", stage, stepString, executionTime)
+@@ -226 +226 @@
+-			logger.WithFields(logrus.Fields{"executionTime": executionTime, "stepResult": stepResult.Outcome}).Infof("  \u274C  Failure - %s %s [%s]", stage, stepString, executionTime)
++			logger.WithFields(logrus.Fields{"executionTime": executionTime, "stepResult": stepResult.Outcome, "stepConclusion": stepResult.Conclusion}).Infof("  \u274C  Failure - %s %s [%s]", stage, stepString, executionTime)
+--- a/pkg/model/workflow.go
++++ b/pkg/model/workflow.go
+@@ -196,0 +197 @@
++	RawContinueOnError string `yaml:"continue-on-error"`
