@@ -1099,6 +1099,7 @@ struct HostPairingTests {
         let updating = await host.readRunnerSlots()
         #expect(updating.state == "unknown")
         #expect(updating.available == nil)
+        #expect(updating.reason == "The execution pool is being updated.")
         try coordinator.close()
         try await host.pool.withSlot {
             let recovered = await host.readRunnerSlots()
