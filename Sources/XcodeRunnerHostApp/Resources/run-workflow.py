@@ -161,7 +161,25 @@ def snapshot_git(source, destination, sha, ref, repository):
     # The host copies files into each job, so keep a ref even for a detached HEAD with no branches.
     git(destination, 'update-ref', 'refs/xcode-runner/snapshot', sha)
     git(destination, 'remote', 'add', 'origin', 'https://github.com/' + repository + '.git')
-    index = git(source, 'ls-files', '--stage', '-z', stdout=subprocess.PIPE).stdout
+    # Preserve intent-to-add and sparse/assume-unchanged bits. Expand a split index into a standalone file
+    # and remove machine-local filesystem monitor and untracked-cache extensions from this private copy.
+    index_file = git(source, 'rev-parse', '--path-format=absolute', '--git-path', 'index',
+                     stdout=subprocess.PIPE, text=True).stdout.strip()
+    standalone = Path(destination) / '.git/index'
+    if Path(index_file).is_file():
+        shutil.copyfile(index_file, standalone)
+        shared = subprocess.run(['git', '-C', source, 'rev-parse', '--shared-index-path'], check=True,
+                                env={**env, 'GIT_INDEX_FILE': str(standalone)}, stdout=subprocess.PIPE, text=True).stdout.strip()
+        if shared:
+            shared = Path(index_file).parent / Path(shared).name
+            shutil.copyfile(shared, standalone.parent / shared.name)
+        subprocess.run(['git', '-C', source, 'update-index', '--no-split-index', '--no-fsmonitor',
+                        '--no-untracked-cache', '--force-write-index'],
+                       env={**env, 'GIT_INDEX_FILE': str(standalone)}, check=True)
+        if shared:
+            (standalone.parent / shared.name).unlink(missing_ok=True)
+    index = subprocess.run(['git', '-C', source, 'ls-files', '--stage', '-z'], check=True,
+                           env={**env, 'GIT_INDEX_FILE': str(standalone)}, stdout=subprocess.PIPE).stdout
     blobs = {entry.split(b' ', 2)[1] for entry in index.split(b'\x00') if entry and not entry.startswith(b'160000 ')}
     checked = git(destination, 'cat-file', '--batch-check', input=b'\n'.join(blobs), stdout=subprocess.PIPE).stdout
     missing = [line.split()[0] for line in checked.splitlines() if line.endswith(b' missing')]
@@ -170,22 +188,6 @@ def snapshot_git(source, destination, sha, ref, repository):
             git(source, 'pack-objects', '--stdout', input=b'\n'.join(missing) + b'\n', stdout=pack)
             pack.seek(0)
             git(destination, 'index-pack', '--stdin', stdin=pack, stdout=subprocess.DEVNULL)
-    # Preserve intent-to-add and sparse/assume-unchanged bits. Expand a split index into a standalone file
-    # and remove machine-local filesystem monitor and untracked-cache extensions from this private copy.
-    index_file = git(source, 'rev-parse', '--path-format=absolute', '--git-path', 'index',
-                     stdout=subprocess.PIPE, text=True).stdout.strip()
-    standalone = Path(destination) / '.git/index'
-    if Path(index_file).is_file():
-        shutil.copyfile(index_file, standalone)
-        shared = git(source, 'rev-parse', '--shared-index-path', stdout=subprocess.PIPE, text=True).stdout.strip()
-        if shared:
-            shared = Path(source) / shared
-            shutil.copyfile(shared, standalone.parent / shared.name)
-        subprocess.run(['git', '-C', source, 'update-index', '--no-split-index', '--no-fsmonitor',
-                        '--no-untracked-cache', '--force-write-index'],
-                       env={**env, 'GIT_INDEX_FILE': str(standalone)}, check=True)
-        if shared:
-            (standalone.parent / shared.name).unlink(missing_ok=True)
     subprocess.run(['/usr/bin/tar', '-cf', str(Path(destination) / 'metadata.tar'), '--no-mac-metadata',
                     '--no-xattrs', '-C', destination, '.git'], check=True)
 

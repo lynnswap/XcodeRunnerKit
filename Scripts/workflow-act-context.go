@@ -109,3 +109,15 @@ func (rc *RunContext) workflowJobID() string {
 	}
 	return key + "/" + rc.Run.JobID
 }
+
+// Results propagate through a called workflow and its matrix. A later entry can add
+// a failure or turn an all-skipped group into a success, but cannot erase a failure.
+func combinedOutcome(previous, next string) string {
+	if previous == "failure" || next == "failure" {
+		return "failure"
+	}
+	if previous == "success" || next == "success" {
+		return "success"
+	}
+	return next
+}

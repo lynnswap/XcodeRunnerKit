@@ -956,7 +956,10 @@ struct HostPairingTests {
         let shared = "jobs: {test: {runs-on: fast, steps: []}}"
         try Data(shared.utf8).write(to: workflows.appending(path: "shared.yml"))
         try Data().write(to: workflows.appending(path: "unrelated.yml"))
-        let caller = "jobs: {test: {uses: ./.github/workflows/shared.yml}}"
+        let caller = #"""
+        env: {RELEASE_DATE: 2026-11-21}
+        jobs: {test: {uses: "\x2e/.github/workflows/shared.yml"}}
+        """#
         try Data(caller.utf8).write(to: root.appending(path: "ci.yml"))
         let checkout = try await Checkout.containing(directory)
         let workflow = try await checkout.workflow(file: "../ci.yml", event: "push")

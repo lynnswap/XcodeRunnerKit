@@ -16,7 +16,7 @@ case "$(uname -m)" in
     *) echo "Unsupported workflow engine architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 root="$HOME/Library/Application Support/XcodeRunnerKit/WorkflowEngine"
-target="$root/act-0.2.98-xrk5"
+target="$root/act-0.2.98-xrk6"
 if [[ -x "$target/xrk-act" && -x "$target/node" ]]; then exit 0; fi
 mkdir -p "$root"
 staging=$(mktemp -d "$root/.install.XXXXXX")

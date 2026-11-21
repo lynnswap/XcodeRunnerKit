@@ -125,39 +125,36 @@ struct Checkout: Equatable, Sendable {
             throw RemoteOperationFailure("Specify the pull request target with --base when origin has no default branch.")
         }
         let definition = try String(contentsOf: url, encoding: .utf8)
-        var localWorkflows: [String: String] = [:]
         let file = String(url.path(percentEncoded: false).dropFirst(prefix.count))
         let listed = try await Self.git(["--literal-pathspecs", "ls-files", "-z", "--cached", "--others",
                                          "--exclude-standard", "--", file, ".github/workflows"], in: root)
         let allowed = listed.split(separator: "\0").map(String.init)
         guard allowed.contains(file) else { throw RemoteOperationFailure("The selected workflow is excluded from the checkout.") }
-        if definition.contains("./.github/workflows/") {
-            // Reusable workflow references are literal job.uses strings. Ship only their transitive definitions.
-            let references = try await Subprocess.run(.path("/usr/bin/ruby"), arguments: .init(["-ryaml", "-rjson", "-e", #"""
-                root, entry = ARGV
-                allowed = JSON.parse(STDIN.read)
-                queue, seen, definitions = [entry], {}, {}
-                until queue.empty?
-                  file = queue.pop
-                  next if seen[file]
-                  seen[file] = true
-                  text = File.read(File.join(root, file))
-                  definitions[File.basename(file)] = text unless file == entry
-                  (YAML.safe_load(text, aliases: true).fetch("jobs", {}) || {}).each_value do |job|
-                    path = job["uses"].to_s.delete_prefix("./")
-                    next unless job["uses"].to_s.start_with?("./.github/workflows/")
-                    raise "Unavailable local workflow: #{path}" unless allowed.include?(path) &&
-                      File.realpath(File.join(root, path)).start_with?(File.realpath(root) + "/")
-                    queue << path
-                  end
-                end
-                print JSON.generate(definitions)
-                """#, root.path, file]),
-                input: .string(String(decoding: try JSONEncoder().encode(allowed), as: UTF8.self)),
-                output: .string(limit: 1 << 24), error: .string(limit: 4096))
-            guard references.terminationStatus.isSuccess else { throw RemoteOperationFailure(references.standardError) }
-            localWorkflows = try JSONDecoder().decode([String: String].self, from: Data(references.standardOutput.utf8))
-        }
+        // Reusable workflow references are literal job.uses strings. Ship only their transitive definitions.
+        let references = try await Subprocess.run(.path("/usr/bin/ruby"), arguments: .init(["-ryaml", "-rjson", "-rdate", "-e", #"""
+            root, entry = ARGV
+            allowed = JSON.parse(STDIN.read)
+            queue, seen, definitions = [entry], {}, {}
+            until queue.empty?
+              file = queue.pop
+              next if seen[file]
+              seen[file] = true
+              text = File.read(File.join(root, file))
+              definitions[File.basename(file)] = text unless file == entry
+              (YAML.safe_load(text, permitted_classes: [Date, Time], aliases: true).fetch("jobs", {}) || {}).each_value do |job|
+                path = job["uses"].to_s.delete_prefix("./")
+                next unless job["uses"].to_s.start_with?("./.github/workflows/")
+                raise "Unavailable local workflow: #{path}" unless allowed.include?(path) &&
+                  File.realpath(File.join(root, path)).start_with?(File.realpath(root) + "/")
+                queue << path
+              end
+            end
+            print JSON.generate(definitions)
+            """#, root.path, file]),
+            input: .string(String(decoding: try JSONEncoder().encode(allowed), as: UTF8.self)),
+            output: .string(limit: 1 << 24), error: .string(limit: 4096))
+        guard references.terminationStatus.isSuccess else { throw RemoteOperationFailure(references.standardError) }
+        let localWorkflows = try JSONDecoder().decode([String: String].self, from: Data(references.standardOutput.utf8))
         return WorkflowInvocation(
             file: file, event: event, repository: repository,
             sha: sha, ref: ref, base: base, definition: definition, localWorkflows: localWorkflows
