@@ -40,7 +40,20 @@ extension HostSettingsReport {
     var stateSymbol: String { showsPaused ? "pause.circle.fill" : hostState.systemImage }
     var stateTint: NSColor { showsPaused ? .secondaryLabelColor : hostState.tint }
 
-
+    /// Sidebar activity uses running jobs even when the queue has reserved the remaining capacity.
+    var runnerActivityTitle: String {
+        if let slots = runnerSlots, slots.state == "unknown" || slots.state == "unavailable" {
+            return slots.reason ?? slots.state.capitalized
+        }
+        guard hostState == .running else { return stateTitle }
+        guard let poolStatus, poolError == nil else { return isPaused ? "Paused" : jobSummary }
+        let running = poolStatus.activeJobCount
+        if isPaused { return running == 0 ? "Paused" : "Paused · \(running) running" }
+        guard running > 0 else { return "Idle" }
+        let limit = poolStatus.configuration.maximumConcurrentJobs
+        if running > limit { return "\(running) running · Limit \(limit)" }
+        return "\(running) of \(limit) slots in use"
+    }
 }
 
 private extension HostState {

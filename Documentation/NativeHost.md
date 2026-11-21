@@ -171,6 +171,12 @@ five minutes while signed in. Pool and repository settings are saved separately;
 apply pending changes in the other. **Disconnect** removes local login tokens and
 stops registration management; it leaves existing runner services running.
 
+A runner’s sidebar row shows whether it is idle or how many slots it is using.
+Its **Activity** charts show the last two minutes of observed CPU load and memory pressure.
+CPU load stacks system time (red) and user time (cyan). Memory pressure uses the kernel’s
+memory-status level for height and its current pressure state for color (green, orange, or red).
+Sampling happens on the runner Mac. Gaps indicate periods without observations.
+
 ### Pause a Mac
 
 To use a Mac for something else for a while, turn off **Take new jobs** under

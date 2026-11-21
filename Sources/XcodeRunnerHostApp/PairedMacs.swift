@@ -17,6 +17,7 @@ struct PairedMac: Codable, Equatable, Identifiable, Sendable {
 /// The settings that this Mac last read from a Mac paired with it, and the changes being edited for that Mac.
 @MainActor @Observable
 final class PairedMacSettings {
+    private(set) var resourceHistory = RunnerMetricHistory()
     private(set) var report: HostSettingsReport?
     /// When `report` was read.
     private(set) var readAt: Date?
@@ -72,6 +73,7 @@ final class PairedMacSettings {
     ///
     /// - Parameter readAt: When the report was read, if another Mac read it.
     func show(_ report: HostSettingsReport, readAt: Date = .now) {
+        if let sample = report.resourceSample { resourceHistory.append(sample) }
         if report.hasLoadedPoolStatus, report.poolError == nil { poolDraft.update(from: report.poolStatus?.configuration) }
         if storageDirectoryInput == self.report?.savedStorageDirectory?.path(percentEncoded: false) ?? "" {
             storageDirectoryInput = report.savedStorageDirectory?.path(percentEncoded: false) ?? ""

@@ -30,6 +30,9 @@ struct MacPaneView: View {
             ContentUnavailableView("This Mac was removed", systemImage: "desktopcomputer")
         } else {
             Form {
+                if model.report?.resourceSample != nil {
+                    RunnerResourceGraphs(history: model.resourceHistory)
+                }
                 OverviewSection(model: model)
                 if let report = model.report {
                     SimulatorsSection(model: model, report: report)

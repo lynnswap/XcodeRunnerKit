@@ -58,7 +58,13 @@ struct HostSettingsBridgeTests {
         #expect(installation.isPaused())
         #expect(try await perform(.settings(.saveRunnerLabels(["fast", "gpu"]))).runnerLabels == ["fast", "gpu"])
         #expect(try installation.runnerLabels() == ["fast", "gpu"])
+        settings.sampleResources()
         let status = try await perform(.settings(.read))
+        let sample = try #require(status.resourceSample)
+        let dashboard = PairedMacSettings()
+        dashboard.show(status)
+        dashboard.show(status)
+        #expect(dashboard.resourceHistory.samples == [sample])
         #expect(status.isPaused && status.runnerLabels == ["fast", "gpu"])
 
         // The host's reason for refusing is the command's failure. This host was not started by launchd.

@@ -64,10 +64,7 @@ struct RunnerSlots: Codable, Equatable, Sendable {
         return self
     }
 
-    var title: String {
-        if let available, let limit, state == "available" || state == "busy" { return "\(available) of \(limit) Xcode slots free" }
-        return reason ?? state.capitalized
-    }
+
 }
 
 struct RunnerMacStatus: Codable, Equatable, Identifiable, Sendable {

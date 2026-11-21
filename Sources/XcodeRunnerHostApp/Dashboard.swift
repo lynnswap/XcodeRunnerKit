@@ -415,14 +415,14 @@ final class DashboardWindowModel: PaneWindowModel {
                 ]),
                 SidebarGroup(title: namesHosts ? "\(host.name) Runners" : "Runners", rows: [
                     SidebarRow(
-                        pane: DashboardPane.mac(host.id), title: host.name, subtitle: answer?.report.runnerSlots?.title ?? connection.title,
+                        pane: DashboardPane.mac(host.id), title: host.name, subtitle: answer?.report.runnerActivityTitle ?? connection.title,
                         icon: HostPane.mac.icon
                     ),
                 ] + managed.listedMacs.map { mac in
                     // The host's list of Macs is as old as its last answer, so their states are not shown without one.
                     let status = answer == nil ? nil : managed.status(of: mac.id)
                     return SidebarRow(
-                        pane: DashboardPane.managedMac(mac.id, host: host.id), title: mac.name, subtitle: answer == nil ? connection.title : managed.runnerStatus(of: mac).slots.title,
+                        pane: DashboardPane.managedMac(mac.id, host: host.id), title: mac.name, subtitle: answer == nil ? connection.title : managed.runnerActivityTitle(of: mac),
                         icon: HostPane.mac.icon, status: status.map { .init(symbol: $0.systemImage, color: $0.tint) }
                     )
                 }),

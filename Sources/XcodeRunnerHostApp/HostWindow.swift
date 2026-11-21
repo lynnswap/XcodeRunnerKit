@@ -63,9 +63,9 @@ final class HostWindowModel: PaneWindowModel {
             SidebarGroup(title: nil, rows: [
                 row(.overview, subtitle: report.stateTitle, status: .init(symbol: report.stateSymbol, color: report.stateTint)),
             ]),
-            SidebarGroup(title: "Runners", rows: [row(.mac, subtitle: report.runnerSlots?.title)] + settings.managedMacs.macs.map {
+            SidebarGroup(title: "Runners", rows: [row(.mac, subtitle: report.runnerActivityTitle)] + settings.managedMacs.macs.map {
                 let status = settings.managedMacs.status(of: $0.id)
-                return row(.managedMac($0.id), subtitle: settings.managedMacs.runnerStatus(of: $0.listed).slots.title, status: .init(symbol: status.systemImage, color: status.tint))
+                return row(.managedMac($0.id), subtitle: settings.managedMacs.runnerActivityTitle(of: $0.listed), status: .init(symbol: status.systemImage, color: status.tint))
             }),
         ] + (shownHosts.map { DashboardWindowModel.sidebarGroups(of: $0, namingHosts: true) } ?? [])
     }
