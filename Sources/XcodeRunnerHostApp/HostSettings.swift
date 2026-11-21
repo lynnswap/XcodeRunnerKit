@@ -232,12 +232,12 @@ extension HostSettingsDisplay {
     var storageChangeIsPending: Bool { savedStorageDirectory != nil && savedStorageDirectory != activeStorageDirectory }
 
     var storageMessage: String {
-        let waitingMessage = "Runner services start when storage becomes available."
-        if storageChangeIsPending {
-            let status = hostState == .waitingForStorage ? waitingMessage : "Saved for the next host launch."
-            return "\(status) Finish work using runner storage before restarting to apply the saved folder."
+        if hostState == .waitingForStorage {
+            return "Runner services start when storage becomes available. If you change folders, finish work using runner storage before restarting."
         }
-        if hostState == .waitingForStorage { return waitingMessage }
+        if storageChangeIsPending {
+            return "Saved for the next host launch. Finish work using runner storage before restarting to apply the saved folder."
+        }
         if activeStorageDirectory != nil { return "Runner checkouts, build results, and the shared compiler cache use this folder." }
         return "Choose one folder for runner checkouts, build results, and the shared compiler cache."
     }
