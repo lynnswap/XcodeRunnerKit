@@ -226,7 +226,7 @@ private struct StorageSection: View {
         .confirmationDialog("Restart XcodeHomeRunner on \(model.mac.object)?", isPresented: $isConfirmingRestart) {
             Button("Restart", role: .destructive) { model.restart() }
         } message: {
-            Text("\(runningJobs) Restarting stops \(model.mac.possessive) runner services and their jobs, then applies the saved folder. Finish other work using runner storage first.")
+            Text("\(runningJobs) Restarting stops \(model.mac.possessive) runner services and their jobs, then applies the saved folder.")
         }
     }
 

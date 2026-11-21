@@ -237,7 +237,7 @@ extension HostSettingsDisplay {
         }
         if let savedStorageDirectory, savedStorageDirectory != activeStorageDirectory {
             if activeStorageDirectory == nil { return "Saved for the next host launch." }
-            return "Saved for the next host launch. Running jobs continue using their current storage."
+            return "Saved for the next host launch. Finish work using the current folder before restarting."
         }
         if activeStorageDirectory != nil { return "Runner checkouts, build results, and the shared compiler cache use this folder." }
         return "Choose one folder for runner checkouts, build results, and the shared compiler cache."

@@ -376,7 +376,7 @@ struct HostSettingsTests {
         #expect(settings.savedStorageDirectory == (try installation.requestedStorageDirectory()))
         #expect(settings.savedStorageDirectory == physicalNext)
         #expect(settings.storageDirectoryInput == physicalNext.path(percentEncoded: false))
-        #expect(settings.storageMessage == "Saved for the next host launch. Running jobs continue using their current storage.")
+        #expect(settings.storageMessage == "Saved for the next host launch. Finish work using the current folder before restarting.")
         #expect(settings.hostState == .running)
     }
 
