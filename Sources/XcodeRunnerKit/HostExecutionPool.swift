@@ -236,28 +236,7 @@ public struct HostExecutionPool: Sendable {
             let slot: FileHandle?
             do {
                 try Task.checkCancellation()
-                let coordinator = try Self.open(directory.appending(path: "pool.lock"))
-                slot = try await Self.withHandle(coordinator) {
-                    try await Self.lock(coordinator)
-                    guard let configuration = try configuration() else {
-                        throw ConfigurationError.notConfigured(directory: directory)
-                    }
-                    let slots = try inspectSlots()
-                    guard slots.activeJobCount < configuration.maximumConcurrentJobs else { return nil }
-                    let waiters = try inspectWaiters()
-                    guard waiters.first?.url.lastPathComponent == waiter.url.lastPathComponent else { return nil }
-                    let handle = try Self.open(directory.appending(path: "slot-\(slots.availableIndex).lock"))
-                    do {
-                        if try Self.tryLock(handle) {
-                            try Self.removeWaiter(waiter.url)
-                            return handle
-                        }
-                    } catch {
-                        return try Self.withHandle(handle) { throw error }
-                    }
-                    try handle.close()
-                    return nil
-                }
+                slot = try await claimSlot(for: waiter)
                 if slot == nil { try await Task.sleep(for: .milliseconds(100)) }
             } catch {
                 return CleanupOutcome(value: .failure(error))
@@ -271,6 +250,61 @@ public struct HostExecutionPool: Sendable {
             }
             do { try slot.close() } catch { outcome.cleanupErrors.append(error) }
             return outcome
+        }
+    }
+
+    /// An execution slot held while a host receives a checkout and runs the CLI. The CLI inherits
+    /// the lock so that it keeps its slot even if the host exits.
+    package struct Reservation: Sendable {
+        fileprivate let handle: FileHandle
+
+        package func withDescriptor(_ operation: @Sendable (Int32) async throws -> Void) async throws {
+            try await HostExecutionPool.withHandle(handle) { try await operation(handle.fileDescriptor) }
+        }
+    }
+
+    /// Returns immediately when the pool is full or an earlier job is waiting.
+    package func reserveAvailableSlot() async throws -> Reservation? {
+        try await claimSlot(for: nil).map(Reservation.init)
+    }
+
+    /// Confirms that the inherited descriptor holds a slot of this pool before using it for the build.
+    package func useInheritedSlot(_ descriptor: Int32) throws {
+        var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard fcntl(descriptor, F_GETPATH, &path) == 0 else { throw Self.posixError() }
+        let file = URL(filePath: String(decoding: path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self))
+        let name = file.lastPathComponent
+        guard file.deletingLastPathComponent().standardizedFileURL.path == directory.standardizedFileURL.path,
+              let index = Int(name.dropFirst(5).dropLast(5)), index >= 0, name == "slot-\(index).lock" else {
+            throw CocoaError(.fileReadInvalidFileName)
+        }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0, fcntl(descriptor, F_SETFD, FD_CLOEXEC) == 0 else {
+            throw Self.posixError()
+        }
+    }
+
+    private func claimSlot(for waiter: Waiter?) async throws -> FileHandle? {
+        let coordinator = try Self.open(directory.appending(path: "pool.lock"))
+        return try await Self.withHandle(coordinator) {
+            try await Self.lock(coordinator)
+            guard let configuration = try configuration() else {
+                throw ConfigurationError.notConfigured(directory: directory)
+            }
+            let slots = try inspectSlots()
+            guard slots.activeJobCount < configuration.maximumConcurrentJobs else { return nil }
+            let waiters = try inspectWaiters()
+            guard waiters.first?.url.lastPathComponent == waiter?.url.lastPathComponent else { return nil }
+            let handle = try Self.open(directory.appending(path: "slot-\(slots.availableIndex).lock"))
+            do {
+                if try Self.tryLock(handle) {
+                    if let waiter { try Self.removeWaiter(waiter.url) }
+                    return handle
+                }
+            } catch {
+                return try Self.withHandle(handle) { throw error }
+            }
+            try handle.close()
+            return nil
         }
     }
 

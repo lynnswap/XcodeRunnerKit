@@ -374,6 +374,7 @@ final class PairedMacs: MacList {
     private(set) var isPairing = false
     static let alreadyPairing = HostLinkError.refused("\(HostPane.macName) is already pairing with a Mac.")
     private var endpoints: [HostPairing.ID: NWEndpoint] = [:]
+    func endpoint(for mac: PairedMac) -> NWEndpoint? { endpoints[mac.id] }
     /// Every management service found, by pairing ID. A Mac advertises its new pairing before this host saves it.
     private var advertised: [HostPairing.ID: NWEndpoint] = [:]
     /// The found services that advertise no version. Those Macs run a version from before messages carried one, and

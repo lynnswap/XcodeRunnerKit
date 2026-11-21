@@ -13,6 +13,17 @@ public struct SimulatorConfiguration: Sendable {
         self.runtimeIdentifier = runtimeIdentifier
         self.deviceTypeIdentifier = deviceTypeIdentifier
     }
+
+    /// The platform and build version xcodebuild can download for a standard runtime identifier.
+    package static func downloadArguments(forRuntime identifier: String) -> [String]? {
+        let prefix = "com.apple.CoreSimulator.SimRuntime."
+        guard identifier.hasPrefix(prefix) else { return nil }
+        let parts = identifier.dropFirst(prefix.count).split(separator: "-", omittingEmptySubsequences: false)
+        let platforms = ["iOS": "iOS", "tvOS": "tvOS", "watchOS": "watchOS", "xrOS": "visionOS"]
+        guard parts.count >= 3, let runtimePlatform = parts.first, let platform = platforms[String(runtimePlatform)],
+              parts.dropFirst().allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) }) else { return nil }
+        return ["-downloadPlatform", platform, "-buildVersion", parts.dropFirst().joined(separator: ".")]
+    }
 }
 
 /// A Simulator that could not be prepared for reuse or deleted.
@@ -73,20 +84,12 @@ struct SimulatorTool: Sendable {
     }
 
     func prepareRuntime(_ identifier: String) async throws {
-        let prefix = "com.apple.CoreSimulator.SimRuntime."
-        guard let componentTool, identifier.hasPrefix(prefix) else { return }
-        let parts = identifier.dropFirst(prefix.count).split(separator: "-", omittingEmptySubsequences: false)
-        let platforms = ["iOS": "iOS", "tvOS": "tvOS", "watchOS": "watchOS", "xrOS": "visionOS"]
-        guard parts.count >= 3, let runtimePlatform = parts.first, let platform = platforms[String(runtimePlatform)],
-              parts.dropFirst().allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) }) else { return }
+        guard let componentTool, let arguments = SimulatorConfiguration.downloadArguments(forRuntime: identifier) else { return }
         if let installed = try await runtime(identifier) {
             try installed.requireAvailable()
             return
         }
-        try await componentTool.download(
-            arguments: ["-downloadPlatform", platform, "-buildVersion", parts.dropFirst().joined(separator: ".")],
-            onOutput: componentOutput
-        )
+        try await componentTool.download(arguments: arguments, onOutput: componentOutput)
         guard let installed = try await runtime(identifier) else {
             throw NSError(domain: "XcodeRunnerKit.simctl", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "Simulator runtime \(identifier) is still missing after downloading its requested version.",

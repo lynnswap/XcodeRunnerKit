@@ -49,6 +49,9 @@ struct BuildOptions: ParsableArguments {
     var destination: String?
     @Option(help: "Run on a host Mac that XcodeHomeRunner on this Mac shows, with the files of the Git checkout that contains the current directory. The log and result bundle are copied to --output-directory on this Mac. Relative paths in other options are resolved in the host's copy of the current directory, and absolute paths, as for --developer-directory, name the host's files.")
     var host: String?
+    @Flag(help: "Run on this Mac even when using the CLI inside XcodeHomeRunner.app.")
+    var local = false
+    @Option(help: .hidden) var reservedSlot: Int32?
     @Option var outputDirectory: String?
     @Option var derivedData: String?
     @Option var developerDirectory: String?
@@ -78,8 +81,13 @@ struct BuildOptions: ParsableArguments {
     var additionalArguments: [String] = []
 
     func run(_ action: XcodeBuildAction) async throws {
-        if let host { try run(action, onHostNamed: host) }
+        guard !(local && host != nil) else { throw ValidationError("Choose either --local or --host.") }
+        if let host { try runRemotely(action, host: host) }
         let host = try HostInstallation.hostedConfiguration()
+        if host == nil, !local, action != .testWithoutBuilding, HostApp.executable() != nil,
+           ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] != "true" {
+            try runRemotely(action, host: nil)
+        }
         let sources: [XcodeBuildSource] = [
             workspace.map { .workspace(Self.url($0)) },
             project.map { .project(Self.url($0)) },
@@ -131,7 +139,13 @@ struct BuildOptions: ParsableArguments {
         if let poolDirectory {
             runner.executionPool = HostExecutionPool(directory: Self.url(poolDirectory))
         } else if let host {
-            runner.executionPool = HostExecutionPool(directory: host.poolDirectory)
+            let pool = HostExecutionPool(directory: host.poolDirectory)
+            if let reservedSlot {
+                try pool.useInheritedSlot(reservedSlot)
+                runner.simulatorPool = pool.simulatorPool
+            } else {
+                runner.executionPool = pool
+            }
         }
         let configuredRunner = runner
         let task = Task {
@@ -177,7 +191,7 @@ struct BuildOptions: ParsableArguments {
     /// Replaces this process with the app, which sends the checkout to the host and shows the operation's output.
     ///
     /// The pairings with hosts are in the app's Keychain item, and macOS gives it to the app alone.
-    private func run(_ action: XcodeBuildAction, onHostNamed host: String) throws -> Never {
+    private func runRemotely(_ action: XcodeBuildAction, host: String?) throws -> Never {
         guard action != .testWithoutBuilding else {
             throw ValidationError("A host keeps no build products after an operation. Use test with --host.")
         }
@@ -186,7 +200,7 @@ struct BuildOptions: ParsableArguments {
             ("--build-service-path", buildServicePath),
         ].filter { $0.1 != nil }.map(\.0)
         guard localFolders.isEmpty else {
-            throw ValidationError("\(localFolders.joined(separator: ", ")) cannot be used with --host. The host uses its own folders and build service.")
+            throw ValidationError("\(localFolders.joined(separator: ", ")) requires --local. A remote host uses its own folders and build service.")
         }
         let sources = [workspace, project, package].compactMap { $0 }
         guard sources.count == 1, let source = sources.first else {
@@ -194,14 +208,15 @@ struct BuildOptions: ParsableArguments {
         }
         // The host runs the operation in its copy of the current directory.
         guard !source.hasPrefix("/") else {
-            throw ValidationError("With --host, name the workspace, project, or package relative to the current directory.")
+            throw ValidationError("For a remote operation, name the workspace, project, or package relative to the current directory.")
         }
         _ = try requestedDestination()
         guard let app = HostApp.executable() else {
             throw ValidationError("--host needs the xcode-runner inside XcodeHomeRunner.app, at Contents/Helpers/xcode-runner.")
         }
         try HostApp.replaceProcess(with: [
-            app.path(percentEncoded: false), "--run-on-host", host,
+            app.path(percentEncoded: false),
+        ] + (host.map { ["--run-on-host", $0] } ?? ["--run-on-available-host"]) + [
             "--output-directory", Self.url(outputDirectory ?? "XcodeRunnerOutput").path(percentEncoded: false),
             "--", action.rawValue,
         ] + hostArguments)
@@ -211,7 +226,10 @@ struct BuildOptions: ParsableArguments {
     private var hostArguments: [String] {
         var arguments: [String] = []
         func add(_ name: String, _ value: String?) {
-            if let value { arguments.append("--\(name)=\(value)") }
+            guard let value else { return }
+            // ArgumentParser reads an empty string as a separate argument; --option= has no value.
+            if value.isEmpty { arguments += ["--\(name)", ""] }
+            else { arguments.append("--\(name)=\(value)") }
         }
         add("workspace", workspace)
         add("project", project)

@@ -86,6 +86,10 @@ enum RunnerRequest: Codable, Sendable {
 /// until `finished`. The host stops the operation when the connection ends before the dashboard sends `received`.
 enum RemoteOperationRequest: Codable, Sendable {
     case start(RemoteOperation)
+    /// Reserve a free execution slot before the dashboard sends its checkout.
+    case startIfAvailable(RemoteOperation, allowRuntimeDownload: Bool)
+    /// Ask a paired host to choose among its own execution pool and its managed Macs.
+    case dispatch(RemoteOperation, allowRuntimeDownload: Bool)
     /// A piece of a tar archive of the checkout's files.
     case files(Data)
     case filesEnd
@@ -109,6 +113,10 @@ struct RemoteOperation: Codable, Equatable, Sendable {
 }
 
 enum RemoteOperationEvent: Codable, Sendable {
+    case dispatching
+    case needsRuntimeDownload
+    case busy
+    case unavailable(String)
     /// The host takes the operation. Its output names the checkout and the operation's output by these folders.
     case accepted(checkoutDirectory: String, outputDirectory: String)
     case output(Data)
@@ -307,7 +315,7 @@ enum HostLink {
     /// - A new value in a reply or a report is optional.
     /// - A state that a report names is a type that keeps a raw value it does not know, as `HostState` does. Enums
     ///   that reports carry gain no cases.
-    static let version = 9
+    static let version = 10
     /// The oldest version whose messages this version reads. A Mac that runs an earlier one is shown as running
     /// another version, and the Macs do not pair. Versions before 7 answered only their own version.
     ///

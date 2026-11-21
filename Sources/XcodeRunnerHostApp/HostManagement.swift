@@ -164,18 +164,28 @@ final class HostManagement {
                         }
                         try await reply(await github.answer(request))
                     case .operation(.start(let operation)):
-                        // A managing host sends this Mac its jobs through the runners that it registers.
                         guard role == .dashboard, let settings = await self.settings else {
-                            try await reply(.refused(role == .dashboard
-                                ? "\(self.name) cannot run builds for another Mac."
-                                : "\(self.name) runs builds only for a dashboard."))
+                            try await reply(.refused("\(self.name) runs builds only for a dashboard."))
                             return
                         }
                         guard await !settings.isPaused else {
                             try await reply(.refused("\(self.name) is paused and takes no new jobs."))
                             return
                         }
-                        try await settings.operations.run(operation, for: pairing.id, next: next, reply: reply)
+                        do { try await settings.operations.run(operation, for: pairing.id, next: next, reply: reply) }
+                        catch HostAvailability.unavailable(let reason) { try await reply(.refused(reason)) }
+                    case .operation(.dispatch(let operation, let allowDownload)), .operation(.startIfAvailable(let operation, let allowDownload)):
+                        let dispatch: Bool
+                        if case .operation(.dispatch) = request { dispatch = true } else { dispatch = false }
+                        guard role == (dispatch ? .dashboard : .manager), let settings = await self.settings else {
+                            try await reply(.refused("\(self.name) cannot accept this operation from this pairing."))
+                            return
+                        }
+                        if dispatch { try await reply(.operation(.dispatching)) }
+                        try await settings.dispatch(
+                            operation, from: pairing.id, includingManagedMacs: dispatch, allowRuntimeDownload: allowDownload,
+                            next: next, reply: reply
+                        )
                     case .operation:
                         // These follow a start that this Mac took, on its connection.
                         try await reply(.refused("\(self.name) has no operation that this message belongs to."))

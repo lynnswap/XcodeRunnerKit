@@ -2,6 +2,7 @@ import CryptoKit
 import Foundation
 import Network
 import Subprocess
+import Synchronization
 import XcodeRunnerHostSupport
 
 /// A Git checkout on this Mac whose files a host builds.
@@ -165,6 +166,39 @@ enum RemoteOperationClient {
         return found.endpoint
     }
 
+    /// Only failures before acceptance can be tried on another Mac. The transport may report
+    /// a disconnection independently of the task that streams the checkout and results.
+    static func exchange<T: Sendable>(
+        _ request: RemoteOperationRequest, with host: PairedMac, at endpoint: NWEndpoint, version: Int = HostLink.version,
+        body: @escaping @Sendable (HostLinkReply, HostLink.Exchange) async throws -> T
+    ) async throws -> T {
+        let accepted = Mutex(false)
+        do {
+            return try await HostLink.exchange(with: endpoint, key: host.pairing.symmetricKey, identity: host.id.uuidString, version: version) { link in
+                var response = try await HostLink.within(HostLink.requestTimeout) {
+                    try await link.send(.operation(request))
+                    return try await link.receive()
+                }
+                // The host has answered and may now contact several workers, each with its own deadline.
+                if case .dispatch = request, case .operation(.dispatching) = response { response = try await link.receive() }
+                switch response {
+                case .operation(.needsRuntimeDownload): throw HostAvailability.needsRuntimeDownload
+                case .operation(.busy): throw HostAvailability.busy
+                case .operation(.unavailable(let reason)): throw HostAvailability.unavailable(reason)
+                case .operation(.accepted): break
+                default: throw unexpected(response)
+                }
+                accepted.withLock { $0 = true }
+                return try await body(response, link)
+            }
+        } catch {
+            try Task.checkCancellation()
+            if case .start = request { throw error }
+            if accepted.withLock({ $0 }) || error is HostAvailability { throw error }
+            throw HostAvailability.unavailable(error.localizedDescription)
+        }
+    }
+
     /// Sends the checkout's files to the host and runs the command there. The log and result bundle are copied
     /// into a folder that the host names, inside `outputDirectory`, and the log names this Mac's folders as the
     /// output does.
@@ -179,22 +213,14 @@ enum RemoteOperationClient {
     /// - Returns: The command's exit status.
     static func run(
         _ action: String, arguments: [String], in checkout: Checkout, on host: PairedMac, at endpoint: NWEndpoint,
-        outputDirectory: URL, version: Int = HostLink.version, output: @escaping @Sendable (Data) throws -> Void
+        outputDirectory: URL, automatic: Bool = false, allowRuntimeDownload: Bool = false, version: Int = HostLink.version, output: @escaping @Sendable (Data) throws -> Void
     ) async throws -> Int32 {
-        let files = try await checkout.files()
-        return try await HostLink.exchange(
-            with: endpoint, key: host.pairing.symmetricKey, identity: host.id.uuidString, version: version
-        ) { exchange in
-            let operation = RemoteOperation(
-                repository: checkout.repository, name: checkout.name, directory: checkout.directory, action: action,
-                arguments: arguments
-            )
-            let accepted = try await HostLink.within(HostLink.requestTimeout) {
-                try await exchange.send(.operation(.start(operation)))
-                return try await exchange.receive()
-            }
+        let operation = RemoteOperation(
+            repository: checkout.repository, name: checkout.name, directory: checkout.directory, action: action, arguments: arguments
+        )
+        return try await exchange(automatic ? .dispatch(operation, allowRuntimeDownload: allowRuntimeDownload) : .start(operation), with: host, at: endpoint, version: version) { accepted, exchange in
             guard case .operation(.accepted(let hostCheckout, let hostOutput)) = accepted else { throw unexpected(accepted) }
-            try await send(files, of: checkout, through: exchange)
+            try await send(checkout.files(), of: checkout, through: exchange)
             var rewriter = PathRewriter([
                 (hostCheckout, checkout.root.path(percentEncoded: false)), (hostOutput, outputDirectory.path(percentEncoded: false)),
             ])
@@ -243,15 +269,20 @@ enum RemoteOperationClient {
     }
 
     /// The host that this Mac's dashboard shows under `hostName`.
-    @MainActor static func host(named hostName: String, installation: HostInstallation) throws -> PairedMac {
+    @MainActor static func pairedHosts(installation: HostInstallation) throws -> [PairedMac] {
         let hosts = PairedMacs(
             store: KeychainSecretStore.dashboardHosts(hostRoot: installation.hostRoot), name: HostPane.macName,
             role: .dashboard, browses: false
         )
         if let message = hosts.message { throw RemoteOperationFailure(message) }
-        let named = hosts.macs.filter { $0.name.localizedCaseInsensitiveCompare(hostName) == .orderedSame }
+        return hosts.macs
+    }
+
+    @MainActor static func host(named hostName: String, installation: HostInstallation) throws -> PairedMac {
+        let hosts = try pairedHosts(installation: installation)
+        let named = hosts.filter { $0.name.localizedCaseInsensitiveCompare(hostName) == .orderedSame }
         guard let host = named.first else {
-            let shown = hosts.macs.map(\.name).sorted().joined(separator: ", ")
+            let shown = hosts.map(\.name).sorted().joined(separator: ", ")
             throw RemoteOperationFailure("XcodeHomeRunner on this Mac shows no host named \(hostName). "
                 + (shown.isEmpty ? "Open XcodeHomeRunner and add the host first." : "It shows \(shown)."))
         }
@@ -267,21 +298,61 @@ enum RemoteOperationClient {
     /// - Parameter command: The command and its options.
     /// - Returns: The process's exit status, which is the command's unless this Mac or the host could not run it.
     @MainActor static func run(
-        _ command: [String], onHostNamed hostName: String, installation: HostInstallation, outputDirectory: URL
+        _ command: [String], onHostNamed hostName: String?, installation: HostInstallation, outputDirectory: URL
     ) async -> Int32 {
         do {
-            let host = try self.host(named: hostName, installation: installation)
+            let hosts = try hostName.map { [try self.host(named: $0, installation: installation)] } ?? pairedHosts(installation: installation)
+            guard !hosts.isEmpty else {
+                throw RemoteOperationFailure("Pair a host in XcodeHomeRunner to run this checkout, or pass --local.")
+            }
             let checkout = try await Checkout.containing(.currentDirectory())
-            let endpoint = try await find(host)
-            return try await run(
-                command[0], arguments: Array(command.dropFirst()), in: checkout, on: host, at: endpoint,
-                outputDirectory: outputDirectory
-            ) { try FileHandle.standardOutput.write(contentsOf: $0) }
+            return try await run(command, in: checkout, hosts: hosts, automatic: hostName == nil, outputDirectory: outputDirectory,
+                                 endpoint: find) { try FileHandle.standardOutput.write(contentsOf: $0) }
         } catch {
             // The shell's status for a command that an interrupt ended.
             if Task.isCancelled { return 130 }
             try? FileHandle.standardError.write(contentsOf: Data("Error: \(error.localizedDescription)\n".utf8))
             return EXIT_FAILURE
+        }
+    }
+
+    static func run(
+        _ command: [String], in checkout: Checkout, hosts: [PairedMac], automatic: Bool, outputDirectory: URL,
+        endpoint: @Sendable (PairedMac) async throws -> NWEndpoint,
+        output: @escaping @Sendable (Data) throws -> Void
+    ) async throws -> Int32 {
+        var allowRuntimeDownload = false
+        while true {
+            var needsDownload = false
+            var busy = false
+            var reasons: [String] = []
+            for host in hosts {
+                try Task.checkCancellation()
+                let address: NWEndpoint
+                do { address = try await endpoint(host) }
+                catch where automatic {
+                    try Task.checkCancellation()
+                    reasons.append("\(host.name): \(error.localizedDescription)")
+                    continue
+                }
+                do {
+                    return try await run(command[0], arguments: Array(command.dropFirst()), in: checkout, on: host, at: address,
+                                         outputDirectory: outputDirectory, automatic: automatic, allowRuntimeDownload: allowRuntimeDownload, output: output)
+                } catch HostAvailability.needsRuntimeDownload {
+                    needsDownload = true
+                } catch HostAvailability.busy {
+                    busy = true
+                } catch HostAvailability.unavailable(let reason) {
+                    reasons.append("\(host.name): \(reason)")
+                }
+            }
+            if needsDownload && !allowRuntimeDownload {
+                allowRuntimeDownload = true
+                continue
+            }
+            guard busy else { throw RemoteOperationFailure(reasons.joined(separator: "\n")) }
+            allowRuntimeDownload = false
+            try await Task.sleep(for: .seconds(1))
         }
     }
 

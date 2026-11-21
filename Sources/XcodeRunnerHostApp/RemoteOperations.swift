@@ -1,7 +1,9 @@
 import CryptoKit
 import Foundation
+import Network
 import Subprocess
 import XcodeRunnerHostSupport
+import XcodeRunnerKit
 
 /// Why this Mac could not run a dashboard's build or test, as the dashboard shows it.
 struct RemoteOperationFailure: LocalizedError {
@@ -49,13 +51,12 @@ final class RemoteOperations {
     ///   - next: Waits for the dashboard's next message.
     ///   - reply: Sends an event or a refusal to the dashboard.
     func run(
-        _ operation: RemoteOperation, for dashboard: HostPairing.ID,
+        _ operation: RemoteOperation, for dashboard: HostPairing.ID, slot: Int32? = nil,
         next: @escaping @Sendable () async throws -> HostLinkRequest,
         reply: @escaping @Sendable (HostLinkReply) async throws -> Void
     ) async throws {
         guard let storage else {
-            try await reply(.refused("\(HostPane.macName) has not prepared its storage."))
-            return
+            throw HostAvailability.unavailable("\(HostPane.macName) has not prepared its storage.")
         }
         // Dashboards choose what they call a repository, so each dashboard's repositories get folders of their own.
         let key = SHA256.hash(data: Data("\(dashboard.uuidString)/\(operation.repository)".utf8)).prefix(8)
@@ -85,21 +86,11 @@ final class RemoteOperations {
         let cache = storage.compilationCacheDirectory.appending(path: "remote")
         // The dashboard sends the whole checkout once this Mac accepts, so what can refuse the operation comes first.
         do {
-            // Creating the folders of storage that is not mounted would run the operation on the startup volume.
-            for location in [storage.workDirectory, storage.buildDirectory] {
-                var isDirectory: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: location.path(percentEncoded: false), isDirectory: &isDirectory),
-                      isDirectory.boolValue else {
-                    throw RemoteOperationFailure(
-                        "\(HostPane.macName)'s storage is not available at \(storage.directory.path(percentEncoded: false))."
-                    )
-                }
-            }
+            try Self.requireStorage(storage)
             // An operation that the host did not finish, as when it quit, left its checkout.
             try await Self.remove(folder)
         } catch {
-            try await reply(.refused(error.localizedDescription))
-            return
+            throw HostAvailability.unavailable(error.localizedDescription)
         }
         try await reply(.operation(.accepted(
             checkoutDirectory: checkout.path(percentEncoded: false), outputDirectory: output.path(percentEncoded: false)
@@ -126,8 +117,9 @@ final class RemoteOperations {
             }
             group.addTask {
                 do {
+                    if slot != nil { try await reply(.operation(.output(Data("Running on \(HostPane.macName)\n".utf8)))) }
                     try await Self.execute(
-                        operation, in: checkout, output: output, tool: tool, cache: cache, environment: environment, reply: reply
+                        operation, in: checkout, output: output, tool: tool, cache: cache, environment: environment, slot: slot, reply: reply
                     )
                     return .ran(.success(()))
                 } catch {
@@ -155,6 +147,19 @@ final class RemoteOperations {
                 _ = try await group.next()
             case nil:
                 break
+            }
+        }
+    }
+
+    nonisolated static func requireStorage(_ storage: HostInstallation.Storage) throws {
+        // Creating the folders of storage that is not mounted would run the operation on the startup volume.
+        for location in [storage.workDirectory, storage.buildDirectory] {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: location.path(percentEncoded: false), isDirectory: &isDirectory),
+                  isDirectory.boolValue else {
+                throw RemoteOperationFailure(
+                    "\(HostPane.macName)'s storage is not available at \(storage.directory.path(percentEncoded: false))."
+                )
             }
         }
     }
@@ -211,7 +216,7 @@ final class RemoteOperations {
 
     /// Runs the command in the checkout and sends its output, its exit status, and its log and result bundles.
     @concurrent private nonisolated static func execute(
-        _ operation: RemoteOperation, in checkout: URL, output: URL, tool: URL, cache: URL, environment: [String: String],
+        _ operation: RemoteOperation, in checkout: URL, output: URL, tool: URL, cache: URL, environment: [String: String], slot: Int32?,
         reply: @Sendable (HostLinkReply) async throws -> Void
     ) async throws {
         var options = PlatformOptions()
@@ -219,10 +224,16 @@ final class RemoteOperations {
         options.teardownSequence = [.gracefulShutDown(allowedDurationToNextStep: .seconds(30))]
         // The host's folders come first, so that they are options even when the operation passes arguments to
         // xcodebuild after "--".
+        if let slot {
+            options.preSpawnProcessConfigurator = { _, actions in
+                let code = posix_spawn_file_actions_addinherit_np(&actions, slot)
+                guard code == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(code)) }
+            }
+        }
         let arguments = [
             operation.action, "--output-directory=\(output.path(percentEncoded: false))",
             "--compilation-cache=\(cache.path(percentEncoded: false))",
-        ] + operation.arguments
+        ] + (slot.map { ["--reserved-slot=\($0)"] } ?? []) + operation.arguments
         let directory = operation.directory.isEmpty ? checkout : checkout.appending(path: operation.directory)
         // The archive has no folders without files, and the dashboard's current directory can be one.
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -309,5 +320,224 @@ extension RemoteOperation {
         guard attributes[.type] as? FileAttributeType == type else {
             throw RemoteOperationFailure("Unexpected file type in the build results: \(url.lastPathComponent).")
         }
+    }
+}
+
+/// Outcomes for which no checkout has been sent and another Mac can still take the job.
+enum HostAvailability: Error {
+    case needsRuntimeDownload
+    case busy
+    case unavailable(String)
+}
+
+extension HostSettingsModel {
+    /// Try this Mac and then the Macs it manages. A manager sends each worker a single-host request,
+    /// so a forwarded operation never travels on to another pool.
+    func dispatch(
+        _ operation: RemoteOperation, from dashboard: HostPairing.ID, includingManagedMacs: Bool, allowRuntimeDownload: Bool,
+        next: @escaping @Sendable () async throws -> HostLinkRequest,
+        reply: @escaping @Sendable (HostLinkReply) async throws -> Void
+    ) async throws {
+        var busy = false
+        var needsDownload = false
+        var reasons: [String] = []
+        let reservation: HostExecutionPool.Reservation?
+        do {
+            guard !isPaused else { throw RemoteOperationFailure("Paused.") }
+            guard let storage = operations.storage else { throw RemoteOperationFailure("Storage unavailable.") }
+            try RemoteOperations.requireStorage(storage)
+            try await operation.checkDestination(savedXcode: installation.developerDirectory(), allowRuntimeDownload: allowRuntimeDownload)
+            reservation = try await pool.reserveAvailableSlot()
+            busy = reservation == nil
+        } catch HostAvailability.needsRuntimeDownload {
+            needsDownload = true
+            reservation = nil
+        } catch {
+            try Task.checkCancellation()
+            reasons.append(error.localizedDescription)
+            reservation = nil
+        }
+        if let reservation {
+            do {
+                try await reservation.withDescriptor { descriptor in
+                    guard await !self.isPaused else { throw HostAvailability.unavailable("Paused.") }
+                    try await self.operations.run(operation, for: dashboard, slot: descriptor, next: next, reply: reply)
+                }
+                return
+            } catch HostAvailability.unavailable(let reason) {
+                reasons.append(reason)
+            }
+        }
+        if includingManagedMacs {
+            // The worker knows only its manager's pairing. Keep different dashboards' checkout folders distinct.
+            let forwarded = RemoteOperation(
+                repository: "\(dashboard.uuidString)/\(operation.repository)", name: operation.name,
+                directory: operation.directory, action: operation.action, arguments: operation.arguments
+            )
+            for mac in managedMacs.macs {
+                guard let endpoint = managedMacs.endpoint(for: mac) else {
+                    reasons.append("\(mac.name) is offline.")
+                    continue
+                }
+                do {
+                    try await RemoteOperations.forward(
+                        forwarded, to: mac, at: endpoint, allowRuntimeDownload: allowRuntimeDownload, next: next, reply: reply
+                    )
+                    return
+                } catch HostAvailability.needsRuntimeDownload {
+                    needsDownload = true
+                } catch HostAvailability.busy {
+                    busy = true
+                } catch HostAvailability.unavailable(let reason) {
+                    reasons.append("\(mac.name): \(reason)")
+                }
+            }
+        }
+        if needsDownload { try await reply(.operation(.needsRuntimeDownload)) }
+        else if busy { try await reply(.operation(.busy)) }
+        else { try await reply(.operation(.unavailable(reasons.joined(separator: " ")))) }
+    }
+}
+
+extension RemoteOperations {
+    /// Bridge the selected worker's connection for the lifetime of the job. After acceptance a failed
+    /// transfer or build is final, since the worker may have already started it.
+    nonisolated static func forward(
+        _ operation: RemoteOperation, to mac: PairedMac, at endpoint: NWEndpoint, allowRuntimeDownload: Bool,
+        next: @escaping @Sendable () async throws -> HostLinkRequest,
+        reply: @escaping @Sendable (HostLinkReply) async throws -> Void
+    ) async throws {
+        try await RemoteOperationClient.exchange(.startIfAvailable(operation, allowRuntimeDownload: allowRuntimeDownload), with: mac, at: endpoint) { accepted, worker in
+            try await reply(accepted)
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    files: while true {
+                        switch try await next() {
+                        case .operation(.files(let data)): try await worker.send(.operation(.files(data)))
+                        case .operation(.filesEnd):
+                            try await worker.send(.operation(.filesEnd))
+                            break files
+                        default: throw HostLinkError.unexpectedReply
+                        }
+                    }
+                    guard case .operation(.received) = try await next() else { throw HostLinkError.unexpectedReply }
+                    try await worker.send(.operation(.received))
+                }
+                group.addTask {
+                    while true {
+                        let event = try await worker.receive()
+                        switch event {
+                        case .operation(.output), .operation(.exited), .operation(.results):
+                            try await reply(event)
+                        case .operation(.finished):
+                            try await reply(event)
+                            return
+                        case .refused(let message):
+                            try await reply(event)
+                            throw RemoteOperationFailure(message)
+                        default: throw HostLinkError.unexpectedReply
+                        }
+                    }
+                }
+                defer { group.cancelAll() }
+                while try await group.next() != nil {}
+            }
+        }
+    }
+}
+
+extension RemoteOperation {
+    /// The dashboard joins each option to its value, except for empty values, which ArgumentParser reads separately.
+    func checkDestination(savedXcode: URL?, allowRuntimeDownload: Bool) async throws {
+        let options = arguments.prefix { $0 != "--" }
+        func value(_ key: String) -> String? {
+            for index in options.indices.reversed() {
+                let argument = options[index]
+                if argument.hasPrefix(key) { return String(argument.dropFirst(key.count)) }
+                if argument == key.dropLast(), options.dropFirst(index + 1).first == "" { return "" }
+            }
+            return nil
+        }
+        let explicitDirectory = value("--developer-directory=")
+        let runtime = value("--simulator-runtime=")
+        let developer = explicitDirectory ?? value("--environment=DEVELOPER_DIR=")
+            ?? ProcessInfo.processInfo.environment["DEVELOPER_DIR"] ?? savedXcode?.path(percentEncoded: false)
+        let environment: Subprocess.Environment = developer.map { .inherit.updating(["DEVELOPER_DIR": $0]) } ?? .inherit
+        func xcrun(_ arguments: [String]) async throws -> Data {
+            let result = try await Subprocess.run(
+                .path("/usr/bin/xcrun"), arguments: .init(arguments), environment: environment,
+                output: .bytes(limit: .max), error: .string(limit: .max)
+            )
+            guard result.terminationStatus.isSuccess else { throw RemoteOperationFailure(result.standardError) }
+            return Data(result.standardOutput)
+        }
+        // The CLI resolves an explicit path against its checkout, as does a managed Simulator's
+        // DEVELOPER_DIR. For other destinations xcrun interprets an empty environment value itself.
+        if let developer, !developer.hasPrefix("/"),
+           explicitDirectory != nil || runtime != nil || !developer.isEmpty { return }
+        _ = try await xcrun(["--find", "xcodebuild"])
+        if let runtime, let type = value("--simulator-device-type=") {
+            struct DeviceType: Decodable { let identifier: String }
+            struct Runtime: Decodable {
+                let identifier: String
+                let isAvailable: Bool
+                let supportedDeviceTypes: [DeviceType]
+            }
+            struct Listing: Decodable {
+                let runtimes: [Runtime]
+                let devicetypes: [DeviceType]
+            }
+            let listing = try JSONDecoder().decode(Listing.self, from: try await xcrun(["simctl", "list", "--json"]))
+            if let installed = listing.runtimes.first(where: { $0.identifier == runtime }) {
+                guard installed.isAvailable, installed.supportedDeviceTypes.contains(where: { $0.identifier == type }) else {
+                    throw RemoteOperationFailure("The installed \(runtime) runtime cannot run \(type).")
+                }
+            } else {
+                guard SimulatorConfiguration.downloadArguments(forRuntime: runtime) != nil else {
+                    throw RemoteOperationFailure("This Mac has no installed \(runtime) runtime and cannot download it by identifier.")
+                }
+                guard listing.devicetypes.contains(where: { $0.identifier == type }) else {
+                    throw RemoteOperationFailure("This Xcode has no \(type) device type.")
+                }
+                guard allowRuntimeDownload else { throw HostAvailability.needsRuntimeDownload }
+            }
+            return
+        }
+        guard let specifier = value("--destination=") else { return }
+        var fields: [String: String] = [:]
+        for pair in specifier.split(separator: ",") {
+            let parts = pair.split(separator: "=", maxSplits: 1)
+            if parts.count == 2 { fields[parts[0].trimmingCharacters(in: .whitespaces)] = parts[1].trimmingCharacters(in: .whitespaces) }
+        }
+        let platforms = ["macOS": "macosx", "iOS": "iphoneos", "iOS Simulator": "iphonesimulator",
+                         "tvOS": "appletvos", "tvOS Simulator": "appletvsimulator", "watchOS": "watchos",
+                         "watchOS Simulator": "watchsimulator", "visionOS": "xros", "visionOS Simulator": "xrsimulator"]
+        if let generic = fields["generic/platform"], let sdk = platforms[generic] {
+            _ = try await xcrun(["--sdk", sdk, "--show-sdk-path"])
+            return
+        }
+        if fields["platform"] == "macOS", fields["id"] == nil, fields["OS"] == nil,
+           fields["name"] == nil || fields["name"] == "My Mac" {
+            #if arch(arm64)
+            if fields["arch"] == nil || fields["arch"] == "arm64" { return }
+            #endif
+        }
+        struct Device: Decodable {
+            let identifier: String
+            let platform: String
+            let name: String
+            let available: Bool
+            let operatingSystemVersion: String?
+            let architecture: String?
+        }
+        let devices = try JSONDecoder().decode([Device].self, from: try await xcrun(["xcdevice", "list", "--timeout", "1"]))
+        let platform = fields["platform"].flatMap { platforms[$0] }
+        guard devices.contains(where: { device in
+            device.available && platform.map { device.platform == "com.apple.platform." + $0 } != false
+                && fields["id"].map { device.identifier.caseInsensitiveCompare($0) == .orderedSame } != false
+                && fields["name"].map { device.name == $0 || ($0 == "My Mac" && device.platform == "com.apple.platform.macosx") } != false
+                && fields["arch"].map { device.architecture == $0 } != false
+                && fields["OS"].map { $0 == "latest" || device.operatingSystemVersion?.split(separator: " ").first.map(String.init) == $0 } != false
+        }) else { throw RemoteOperationFailure("No available destination matching \(specifier).") }
     }
 }
