@@ -703,7 +703,10 @@ final class HostSettingsModel: HostSettingsDisplay {
             do {
                 status = try await pool.status(waitForLock: false)
             } catch let error as POSIXError where error.code == .EWOULDBLOCK {
-                // The settings response waits for the lock; the inventory can still sample storage and report contention.
+                // Invalidate a known slot count immediately, keeping any reported storage failure until it is checked.
+                if sampledSlots.state == "available" || sampledSlots.state == "busy" {
+                    sampledSlots = .contended
+                }
                 startRunnerSlotSample()
                 status = try await pool.status()
             }
