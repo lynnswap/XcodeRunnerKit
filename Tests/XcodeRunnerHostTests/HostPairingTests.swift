@@ -960,6 +960,7 @@ struct HostPairingTests {
         env:
           RELEASE_DATE: 2026-11-21
           PATH_SUFFIX: :/opt/bin
+          LIMIT: !!float .inf
         jobs: {test: {uses: "\x2e/.github/workflows/shared.yml"}}
         """#
         try Data(caller.utf8).write(to: root.appending(path: "ci.yml"))

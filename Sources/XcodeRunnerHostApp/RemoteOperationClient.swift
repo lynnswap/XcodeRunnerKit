@@ -136,9 +136,10 @@ struct Checkout: Equatable, Sendable {
             allowed = JSON.parse(STDIN.read)
             # Actions treats plain job IDs and paths as strings, including Ruby/YAML 1.1 scalars.
             loader = Psych::ClassLoader::Restricted.new([], [])
-            scanner = Psych::ScalarScanner.new(loader)
-            def scanner.tokenize(value)
-              value
+            class WorkflowStrings < Psych::Visitors::ToRuby
+              def visit_Psych_Nodes_Scalar(node)
+                register(node, node.value)
+              end
             end
             queue, seen, definitions = [entry], {}, {}
             until queue.empty?
@@ -147,7 +148,7 @@ struct Checkout: Equatable, Sendable {
               seen[file] = true
               text = File.read(File.join(root, file))
               definitions[File.basename(file)] = text unless file == entry
-              workflow = Psych::Visitors::ToRuby.new(scanner, loader).accept(Psych.parse(text))
+              workflow = WorkflowStrings.new(Psych::ScalarScanner.new(loader), loader).accept(Psych.parse(text))
               (workflow.fetch("jobs", {}) || {}).each_value do |job|
                 path = job["uses"].to_s.delete_prefix("./")
                 next unless job["uses"].to_s.start_with?("./.github/workflows/")
