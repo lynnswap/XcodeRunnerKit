@@ -13,7 +13,7 @@ struct HostControl: AsyncParsableCommand {
         commandName: "xcode-runner host",
         abstract: "Read and change the host on this Mac.",
         subcommands: [
-            Status.self, Configure.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self, Macs.self,
+            Status.self, Runners.self, Configure.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self, Macs.self,
         ]
     )
 
@@ -94,13 +94,13 @@ struct HostControl: AsyncParsableCommand {
     /// managing host, with `pairing allow manager` there, and then registers that Mac's runners as its own.
     struct Macs: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "List the Macs that the host manages, pair it with another one, or remove one.",
+            abstract: "Manage pairings with other Macs. Use host runners to see all runner Macs and free slots.",
             subcommands: [Status.self, Pair.self, Remove.self]
         )
 
         struct Status: AsyncParsableCommand {
             static let configuration = CommandConfiguration(
-                abstract: "Print the Macs that the host manages, with their states and settings, as JSON."
+                abstract: "Print paired Macs in macs and all execution candidates, including the host, in runnerMacs."
             )
 
             @OptionGroup var host: HostOption
@@ -482,6 +482,47 @@ struct HostControl: AsyncParsableCommand {
         @OptionGroup var mac: MacOption
 
         func run() async throws { try await HostControl.perform(.read, host: host.host, mac: mac.mac) }
+    }
+
+    struct Runners: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "List runner Macs, including each host, and their available Xcode slots.")
+        @Option(help: "Limit the report to a paired host. By default list this Mac's installed host and all hosts its dashboard shows.")
+        var host: String?
+
+        struct Group: Encodable {
+            let host: String
+            let runnerMacs: [RunnerMacStatus]?
+            let error: String?
+        }
+
+        @MainActor func run() async throws {
+            var groups: [Group] = []
+            func group(_ name: String, request: () async throws -> HostLinkReply) async -> Group {
+                do {
+                    guard case .macs(let report) = try await request(), let runners = report.runnerMacs else {
+                        throw HostSettingsError("Update XcodeHomeRunner on \(name) to read runner availability.")
+                    }
+                    return Group(host: name, runnerMacs: runners, error: report.message)
+                } catch { return Group(host: name, runnerMacs: nil, error: error.localizedDescription) }
+            }
+            let installation = HostInstallation()
+            let request = HostLinkRequest.macs(.listRunners)
+            if host == nil, HostControl.runsHost {
+                groups.append(await group(HostPane.macName) { try await HostControl.reply(to: request) })
+            }
+            let hosts = try host.map { [try RemoteOperationClient.host(named: $0, installation: installation)] }
+                ?? RemoteOperationClient.pairedHosts(installation: installation)
+            for paired in hosts {
+                groups.append(await group(paired.name) {
+                    let reply = try await HostLink.send(request, to: try await RemoteOperationClient.find(paired),
+                        key: paired.pairing.symmetricKey, identity: paired.id.uuidString, timeout: request.replyTimeout)
+                    if case .refused(let message) = reply { throw HostSettingsError(message) }
+                    return reply
+                })
+            }
+            try HostControl.write(groups)
+            if !groups.isEmpty, groups.allSatisfy({ $0.runnerMacs == nil }) { throw ExitCode.failure }
+        }
     }
 
     struct Pause: AsyncParsableCommand {

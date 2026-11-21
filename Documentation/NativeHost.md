@@ -319,6 +319,13 @@ that host without GitHub. The repository needs no runners, GitHub App
 installation, or selection on the host, so a repository that should not register
 self-hosted runners can use the host too.
 
+Run `xcode-runner host runners` in the bundled CLI to see the runner Macs a host
+can send a working tree to. Each group includes the host itself. A host with
+no other paired Macs can still take jobs in its own Xcode slots. For example,
+`slots.available` of 3 and `slots.limit` of 3 means the Mac has room for three
+Xcode jobs. The figures are a snapshot. Dispatch checks the job's Xcode and
+destination and reserves a slot when it accepts the job.
+
 In the checkout on the dashboard's Mac, run the `xcode-runner` inside the app
 from the directory you want to build:
 
@@ -387,7 +394,8 @@ as its window does. Each command prints the host's answer as JSON, and exits
 with a failure and the host's reason when the host refuses or does not run.
 
 ```sh
-xcode-runner host status          # state, jobs, runners, labels, and settings
+xcode-runner host runners         # runner Macs and free Xcode slots, including the host itself
+xcode-runner host status          # state, jobs, runner services, labels, and settings
 xcode-runner host pause           # take no new jobs
 xcode-runner host resume
 xcode-runner host labels fast gpu # replace the runner labels; --none removes them
@@ -480,7 +488,7 @@ A host pairs with a Mac to manage, and lists and removes the Macs that it
 manages:
 
 ```sh
-xcode-runner host macs status                # the Macs that the host manages, with their states
+xcode-runner host macs status                # pairing details for the Macs this host manages
 xcode-runner host macs pair "Second Mac"     # prints the host's code, then reads the Mac's from standard input
 xcode-runner host macs remove "Second Mac"
 ```

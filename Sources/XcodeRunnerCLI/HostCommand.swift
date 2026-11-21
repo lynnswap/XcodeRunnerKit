@@ -7,7 +7,7 @@ struct Host: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Manage the installed runner host.",
         subcommands: [
-            Status.self, Configure.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self,
+            Status.self, Runners.self, Configure.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self,
             Macs.self, Storage.self, BuildService.self, Settings.self,
         ]
     )
@@ -17,6 +17,12 @@ struct Host: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Print the host's state, jobs, runners, and settings as JSON.")
         @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
         func run() throws { try HostApp.run(["status"] + arguments) }
+    }
+
+    struct Runners: ParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "List runner Macs, including each host, and their available Xcode slots.")
+        @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
+        func run() throws { try HostApp.run(["runners"] + arguments) }
     }
 
     struct Configure: ParsableCommand {
@@ -63,7 +69,7 @@ struct Host: AsyncParsableCommand {
 
     struct Macs: ParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "List the Macs that the host manages, pair it with another one, or remove one."
+            abstract: "Manage pairings with other Macs. Use host runners to see all runner Macs and free slots."
         )
         @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
         func run() throws { try HostApp.run(["macs"] + arguments) }

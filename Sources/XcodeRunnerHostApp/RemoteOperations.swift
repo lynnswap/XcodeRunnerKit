@@ -86,7 +86,7 @@ final class RemoteOperations {
         let cache = storage.compilationCacheDirectory.appending(path: "remote")
         // The dashboard sends the whole checkout once this Mac accepts, so what can refuse the operation comes first.
         do {
-            try Self.requireStorage(storage)
+            try await Self.requireStorage(storage)
             // An operation that the host did not finish, as when it quit, left its checkout.
             try await Self.remove(folder)
         } catch {
@@ -151,7 +151,7 @@ final class RemoteOperations {
         }
     }
 
-    nonisolated static func requireStorage(_ storage: HostInstallation.Storage) throws {
+    @concurrent nonisolated static func requireStorage(_ storage: HostInstallation.Storage) async throws {
         // Creating the folders of storage that is not mounted would run the operation on the startup volume.
         for location in [storage.workDirectory, storage.buildDirectory] {
             var isDirectory: ObjCBool = false
@@ -345,7 +345,7 @@ extension HostSettingsModel {
         do {
             guard !isPaused else { throw RemoteOperationFailure("Paused.") }
             guard let storage = operations.storage else { throw RemoteOperationFailure("Storage unavailable.") }
-            try RemoteOperations.requireStorage(storage)
+            try await RemoteOperations.requireStorage(storage)
             try await operation.checkDestination(savedXcode: installation.developerDirectory(), allowRuntimeDownload: allowRuntimeDownload)
             reservation = try await pool.reserveAvailableSlot()
             busy = reservation == nil

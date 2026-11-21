@@ -1028,6 +1028,34 @@ final class PairedMacs: MacList {
         }
     }
 
+    /// Poll slots directly so a concurrent dashboard status check cannot substitute an older pool snapshot.
+    func readRunnerSlots() async -> [RunnerMacStatus] {
+        let listed = macs
+        return await withTaskGroup(of: RunnerMacStatus.self) { group in
+            for mac in listed {
+                let endpoint = endpoints[mac.id]
+                group.addTask {
+                    let slots: RunnerSlots
+                    do {
+                        guard let endpoint else { throw HostLinkError.unreachable(mac.name) }
+                        guard case .runnerSlots(let report) = try await self.send(.runnerSlots, to: mac, at: endpoint, timeout: HostLinkRequest.runnerSlots.replyTimeout) else {
+                            throw HostLinkError.unexpectedReply
+                        }
+                        slots = report
+                    } catch {
+                        slots = RunnerSlots(state: "unknown", available: nil, reason: error.localizedDescription)
+                    }
+                    return RunnerMacStatus(id: mac.id, name: mac.name, slots: slots)
+                }
+            }
+            var reports: [HostPairing.ID: RunnerMacStatus] = [:]
+            for await report in group {
+                if let id = report.id { reports[id] = report }
+            }
+            return macs.compactMap { reports[$0.id] }
+        }
+    }
+
     private func checkFoundMacs() async {
         await withTaskGroup { group in
             for (id, endpoint) in endpoints {
@@ -1072,7 +1100,7 @@ extension HostLinkRequest {
             // The host reads or changes one of its Macs before it answers, within its own time limits.
             switch request {
             case .read(refreshing: nil), .discover, .pair, .confirmCode, .cancelPairing: HostLink.requestTimeout
-            case .read: HostLink.requestTimeout * 3
+            case .read, .listRunners: HostLink.requestTimeout * 3
             case .configurePool, .saveStorage, .saveXcode, .saveBuildService, .saveRunnerLabels, .setPaused, .restart,
                  .remove:
                 PairedMacs.changeTimeout
@@ -1083,6 +1111,7 @@ extension HostLinkRequest {
             case .install: PairedMacs.changeTimeout
             default: HostLink.requestTimeout
             }
+        case .runnerSlots: HostLink.requestTimeout * 2
         case .operation, .unpair:
             HostLink.requestTimeout
         }

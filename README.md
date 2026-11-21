@@ -84,6 +84,9 @@ From a dashboard, the CLI bundled with XcodeHomeRunner sends `build`,
 with a free Xcode slot. Tracked edits and new files that Git does not ignore
 travel with the checkout. You can test before committing or pushing.
 
+Run `xcode-runner host runners` to see which Macs can take jobs and how many
+Xcode slots are free, including on the managing host.
+
 Use `--host "Build Mac"` to pick a particular host or `--local` to run on this
 Mac. The standalone CLI built above runs locally, as do GitHub Actions jobs on
 the runner GitHub assigned. See

@@ -25,6 +25,7 @@ struct HostPairing: Codable, Equatable, Identifiable, Sendable {
 
 /// A request from a managing host or a dashboard to a Mac paired with it.
 enum HostLinkRequest: Codable, Sendable {
+    case runnerSlots
     case settings(HostSettingsRequest)
     case github(GitHubRequest)
     case macs(ManagedMacsRequest)
@@ -128,6 +129,7 @@ enum RemoteOperationEvent: Codable, Sendable {
 }
 
 enum HostLinkReply: Codable, Sendable {
+    case runnerSlots(RunnerSlots)
     case settings(HostSettingsReport)
     case github(GitHubReport)
     case macs(ManagedMacsReport)
@@ -315,7 +317,7 @@ enum HostLink {
     /// - A new value in a reply or a report is optional.
     /// - A state that a report names is a type that keeps a raw value it does not know, as `HostState` does. Enums
     ///   that reports carry gain no cases.
-    static let version = 10
+    static let version = 11
     /// The oldest version whose messages this version reads. A Mac that runs an earlier one is shown as running
     /// another version, and the Macs do not pair. Versions before 7 answered only their own version.
     ///

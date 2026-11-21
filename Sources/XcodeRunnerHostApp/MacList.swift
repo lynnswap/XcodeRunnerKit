@@ -72,3 +72,16 @@ protocol MacList: AnyObject, Observable {
     func pair(with id: WaitingMac.ID) async throws -> ListedMac
     func confirmCode()
 }
+
+extension MacList {
+    func runnerStatus(of mac: ListedMac) -> RunnerMacStatus {
+        let connection = status(of: mac.id)
+        let slots: RunnerSlots
+        if connection == .online {
+            slots = settings(of: mac.id)?.report?.runnerSlots ?? RunnerSlots(state: "unknown", available: nil, reason: "No runner slot report.")
+        } else {
+            slots = RunnerSlots(state: "unavailable", reason: connection.title)
+        }
+        return RunnerMacStatus(id: mac.id, name: mac.name, slots: slots)
+    }
+}

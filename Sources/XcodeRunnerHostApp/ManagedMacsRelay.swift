@@ -1,10 +1,12 @@
 import Foundation
+import XcodeRunnerKit
 
 /// Reads or changes the Macs that a host manages, for a dashboard. The host answers with those Macs afterwards. The
 /// dashboard has no pairing with them, so each request reaches them through the host's own pairing.
 enum ManagedMacsRequest: Codable, Sendable {
     /// - Parameter refreshing: A Mac whose settings the host reads again first, because the dashboard shows its pane.
     case read(refreshing: HostPairing.ID?)
+    case listRunners
     case configurePool(PoolSettingsDraft.Changes, mac: HostPairing.ID)
     case saveStorage(directory: String, mac: HostPairing.ID)
     case saveXcode(developerDirectory: String?, mac: HostPairing.ID)
@@ -26,6 +28,54 @@ enum ManagedMacsRequest: Codable, Sendable {
     case cancelPairing(attempt: UUID)
 }
 
+/// A Mac's reported capacity for a new Xcode job. A job's Xcode and destination are checked at dispatch.
+struct RunnerSlots: Codable, Equatable, Sendable {
+    static let contended = Self(state: "unknown", available: nil, reason: "The execution pool is being updated.")
+
+    let state: String
+    let available: Int?
+    let limit: Int?
+    let reason: String?
+
+    init(state: String, available: Int? = 0, limit: Int? = nil, reason: String? = nil) {
+        self.state = state
+        self.available = available
+        self.limit = limit
+        self.reason = reason
+    }
+
+    init(pool: HostExecutionPool.Status?, poolError: String?, storageError: String?) {
+        let limit = pool?.configuration.maximumConcurrentJobs
+        if let storageError {
+            self.init(state: "unavailable", limit: limit, reason: storageError)
+        } else if let pool, let limit {
+            let free = pool.waitingJobCount == 0 ? max(0, limit - pool.activeJobCount) : 0
+            self.init(state: free > 0 ? "available" : "busy", available: free, limit: limit)
+        } else {
+            self.init(state: "unknown", available: nil, reason: poolError ?? "No pool status.")
+        }
+    }
+
+    @MainActor func forHost(_ host: HostSettingsModel) -> Self {
+        if host.isPaused { return Self(state: "paused", limit: limit) }
+        if host.hostState != .running || host.activeStorageDirectory == nil {
+            return Self(state: "unavailable", limit: limit, reason: host.storageError ?? host.hostState.rawValue)
+        }
+        return self
+    }
+
+    var title: String {
+        if let available, let limit, state == "available" || state == "busy" { return "\(available) of \(limit) Xcode slots free" }
+        return reason ?? state.capitalized
+    }
+}
+
+struct RunnerMacStatus: Codable, Equatable, Identifiable, Sendable {
+    var id: HostPairing.ID? = nil
+    let name: String
+    let slots: RunnerSlots
+}
+
 /// The Macs that a host manages, as its own window lists them and as it sends them to a dashboard.
 struct ManagedMacsReport: Codable, Equatable, Sendable {
     struct Mac: Codable, Equatable, Identifiable, Sendable {
@@ -43,6 +93,8 @@ struct ManagedMacsReport: Codable, Equatable, Sendable {
     /// a read can be older than the answer to a change that was sent before it.
     let revision: Int
     let macs: [Mac]
+    /// Execution candidates, starting with the host itself. Older hosts only reported their pairings.
+    var runnerMacs: [RunnerMacStatus]?
     let message: String?
     /// Whether the host can pair with another Mac. A host that another Mac manages cannot.
     let canAddMacs: Bool
@@ -67,8 +119,8 @@ final class ManagedMacsRelay {
     /// sheet is open, and cannot always say that it closed.
     static let discoveryLifetime = Duration.seconds(10)
 
-    private let macs: PairedMacs
-    private let canAddMacs: @MainActor () -> Bool
+    private unowned let host: HostSettingsModel
+    private var macs: PairedMacs { host.managedMacs }
     private let session = UUID()
     private var revision = 0
     private var pairing: Task<Void, Never>?
@@ -81,10 +133,7 @@ final class ManagedMacsRelay {
     private var discovery: Task<Void, Never>?
     private var lastDiscoveryRequest = ContinuousClock.now
 
-    init(macs: PairedMacs, canAddMacs: @escaping @MainActor () -> Bool) {
-        self.macs = macs
-        self.canAddMacs = canAddMacs
-    }
+    init(host: HostSettingsModel) { self.host = host }
 
     /// What this host tells `dashboard` about its Macs now.
     func report(for dashboard: HostPairing.ID) -> ManagedMacsReport {
@@ -100,7 +149,8 @@ final class ManagedMacsRelay {
                     id: mac.id, name: mac.name, status: macs.status(of: mac.id), settings: settings?.report, readAt: settings?.readAt
                 )
             },
-            message: macs.message, canAddMacs: canAddMacs(), waitingMacs: macs.waitingMacs,
+            runnerMacs: [RunnerMacStatus(name: host.management.name, slots: host.runnerSlots)] + macs.listedMacs.map { macs.runnerStatus(of: $0) },
+            message: macs.message, canAddMacs: host.canAddMacs, waitingMacs: macs.waitingMacs,
             discoveryMessage: macs.discoveryMessage, pairingAttempt: attempt,
             codeConfirmation: isPairing ? macs.codeConfirmation : nil, isPairing: isPairing,
             pairedMac: attempt != nil ? pairedMac : nil, pairingError: attempt != nil ? pairingError : nil
@@ -116,6 +166,12 @@ final class ManagedMacsRelay {
         var registrationsChanged = false
         do {
             switch request {
+            case .listRunners:
+                async let peers = macs.readRunnerSlots()
+                let own = RunnerMacStatus(name: host.management.name, slots: await host.readRunnerSlots())
+                var inventory = report(for: dashboard)
+                inventory.runnerMacs = [own] + (await peers)
+                return (.macs(inventory), false)
             case .read(let refreshing):
                 if let refreshing { await macs.refresh(refreshing) }
             case .configurePool(let changes, let mac):
@@ -193,7 +249,7 @@ final class ManagedMacsRelay {
     }
 
     private func requireCanAddMacs() throws {
-        guard canAddMacs() else {
+        guard host.canAddMacs else {
             throw HostLinkError.refused("\(HostPane.macName) is managed by another Mac, so it cannot add Macs.")
         }
     }

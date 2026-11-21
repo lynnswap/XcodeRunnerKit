@@ -246,6 +246,8 @@ extension HostSettingsDisplay {
 
 /// What a Mac sends the Macs paired with it about its status and settings.
 struct HostSettingsReport: Codable, Equatable, Sendable {
+    /// Missing on hosts from before working-tree capacity reporting.
+    let runnerSlots: RunnerSlots?
     let hostState: HostState
     let isPaused: Bool
     let runnerLabels: [String]
@@ -274,7 +276,8 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
     let canEditStorage: Bool
     let canRestart: Bool
 
-    @MainActor init(_ settings: some HostSettingsDisplay) {
+    @MainActor init(_ settings: HostSettingsModel) {
+        runnerSlots = settings.runnerSlots
         hostState = settings.hostState
         isPaused = settings.isPaused
         runnerLabels = settings.runnerLabels
@@ -315,7 +318,7 @@ final class HostSettingsModel: HostSettingsDisplay {
     /// The Macs that this host manages.
     let managedMacs: PairedMacs
     /// Answers a dashboard's requests about the Macs that this host manages.
-    @ObservationIgnored private(set) lazy var managedMacsRelay = ManagedMacsRelay(macs: managedMacs) { [unowned self] in canAddMacs }
+    @ObservationIgnored private(set) lazy var managedMacsRelay = ManagedMacsRelay(host: self)
     let settingsService: HostSettingsService
     /// Runs the builds and tests that dashboards send to this Mac.
     let operations: RemoteOperations
@@ -696,7 +699,18 @@ final class HostSettingsModel: HostSettingsDisplay {
         refreshXcodes()
         refreshBuildService()
         do {
-            let status = try await pool.status()
+            let status: HostExecutionPool.Status?
+            let observedSample = slotSampleID
+            do {
+                status = try await pool.status(waitForLock: false)
+            } catch let error as POSIXError where error.code == .EWOULDBLOCK {
+                // Invalidate a known slot count immediately, keeping any reported storage failure until it is checked.
+                if observedSample == slotSampleID, sampledSlots.state == "available" || sampledSlots.state == "busy" {
+                    sampledSlots = .contended
+                }
+                startRunnerSlotSample()
+                status = try await pool.status()
+            }
             poolStatus = status
             poolError = nil
             hasLoadedPoolStatus = true
@@ -707,6 +721,63 @@ final class HostSettingsModel: HostSettingsDisplay {
             poolStatus = nil
             poolError = "Could not read the execution pool: \(error.localizedDescription)"
             hasLoadedPoolStatus = true
+        }
+        startRunnerSlotSample()
+    }
+
+    /// Inventory samples use a nonblocking pool read. Settings saves and runner registration use
+    /// the waiting read above and never consume a partial or contended inventory sample.
+    private var sampledSlots = RunnerSlots(state: "unknown", available: nil, reason: "No runner slot report.")
+    @ObservationIgnored private var slotSampleID = UUID()
+    @ObservationIgnored private var slotRead: Task<Void, Never>?
+    @ObservationIgnored private var slotReaders: [UUID: AsyncStream<RunnerSlots>.Continuation] = [:]
+
+    var runnerSlots: RunnerSlots { sampledSlots.forHost(self) }
+
+    private func readRunnerStorageError() async -> String? {
+        guard let storage = operations.storage else { return "Storage unavailable." }
+        do {
+            try await RemoteOperations.requireStorage(storage)
+            return nil
+        } catch { return error.localizedDescription }
+    }
+
+    /// A live reader can leave a stalled volume probe without changing anyone else's observation.
+    func readRunnerSlots() async -> RunnerSlots {
+        let id = UUID()
+        let (events, continuation) = AsyncStream<RunnerSlots>.makeStream()
+        slotReaders[id] = continuation
+        defer { slotReaders[id] = nil }
+        startRunnerSlotSample()
+        do {
+            let sample = try await HostLink.within(HostLink.requestTimeout + HostLink.requestTimeout / 2) {
+                var iterator = events.makeAsyncIterator()
+                guard let sample = await iterator.next() else { throw CancellationError() }
+                return sample
+            }
+            return sample.forHost(self)
+        } catch {
+            return RunnerSlots(state: "unknown", available: nil, reason: error.localizedDescription).forHost(self)
+        }
+    }
+
+    private func startRunnerSlotSample() {
+        guard slotRead == nil else { return }
+        slotRead = Task {
+            let storageError = await readRunnerStorageError()
+            do {
+                let status = try await pool.status(waitForLock: false)
+                sampledSlots = RunnerSlots(pool: status, poolError: nil, storageError: storageError)
+            } catch {
+                let reason = (error as? POSIXError)?.code == .EWOULDBLOCK ? RunnerSlots.contended.reason : error.localizedDescription
+                sampledSlots = RunnerSlots(pool: nil, poolError: reason, storageError: storageError)
+            }
+            slotSampleID = UUID()
+            slotRead = nil
+            for reader in slotReaders.values {
+                reader.yield(sampledSlots)
+                reader.finish()
+            }
         }
     }
 

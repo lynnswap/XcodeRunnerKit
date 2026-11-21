@@ -40,14 +40,7 @@ extension HostSettingsReport {
     var stateSymbol: String { showsPaused ? "pause.circle.fill" : hostState.systemImage }
     var stateTint: NSColor { showsPaused ? .secondaryLabelColor : hostState.tint }
 
-    /// How many runner services the Mac has, in the sidebar's words.
-    var runnerCountTitle: String {
-        switch runners.count {
-        case 0: "No runners"
-        case 1: "1 runner"
-        case let count: "\(count) runners"
-        }
-    }
+
 }
 
 private extension HostState {

@@ -769,6 +769,13 @@ struct HostPairingTests {
         #expect(settings.pauseError == nil)
         #expect(runner.isPaused)
         #expect(settings.report?.isPaused == true)
+        guard case .macs(let inventory) = try await HostLink.send(.macs(.listRunners), to: endpoint,
+            key: shown.pairing.symmetricKey, identity: shown.id.uuidString) else {
+            Issue.record("The host did not return its runner Macs.")
+            return
+        }
+        #expect(inventory.runnerMacs?.map(\.name) == [shown.name, managed.name])
+        #expect(inventory.runnerMacs?.last?.slots == RunnerSlots(state: "paused", limit: 2))
         await macs.restart(managed.id)
         #expect(settings.restartError == nil)
         try await waitUntil { restarts == 1 }
@@ -909,6 +916,16 @@ struct HostPairingTests {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let (host, storage, shown, endpoint, directory) = try await hostAndCheckout(at: root)
+        host.hostState = .running
+        try await host.pool.configure(maximumConcurrentJobs: 3)
+        await host.refreshPoolStatus()
+        guard case .macs(let inventory) = try await HostLink.send(.macs(.listRunners), to: endpoint,
+            key: shown.pairing.symmetricKey, identity: shown.id.uuidString) else {
+            Issue.record("The host did not return its runner Macs.")
+            return
+        }
+        #expect(inventory.macs.isEmpty)
+        #expect(inventory.runnerMacs == [RunnerMacStatus(name: shown.name, slots: RunnerSlots(state: "available", available: 3, limit: 3))])
         let checkout = try await Checkout.containing(directory.appending(path: "App/Empty"))
         #expect(checkout.directory == "App/Empty")
         #expect(checkout.name == "Project")
@@ -1059,6 +1076,11 @@ struct HostPairingTests {
                 "build", arguments: [], in: checkout, on: shown, at: endpoint, outputDirectory: root.appending(path: "Output")
             ) { _ in }
         }
+        host.hostState = .running
+        let slots = await host.readRunnerSlots()
+        #expect(slots.state == "unavailable")
+        #expect(slots.reason?.contains(storage.directory.path(percentEncoded: false)) == true)
+        #expect(HostSettingsReport(host).runnerSlots == slots)
         try await host.pool.configure(maximumConcurrentJobs: 1)
         try await host.pool.withSlot {
             let failure = await #expect(throws: HostAvailability.self) {
@@ -1070,6 +1092,24 @@ struct HostPairingTests {
         }
         #expect(!FileManager.default.fileExists(atPath: storage.directory.path(percentEncoded: false)))
 
+        try FileManager.default.createDirectory(at: storage.directory, withIntermediateDirectories: true)
+        _ = try host.installation.initializeStorage()
+        let coordinator = try FileHandle(forUpdating: host.pool.directory.appending(path: "pool.lock"))
+        try #require(flock(coordinator.fileDescriptor, LOCK_EX | LOCK_NB) == 0)
+        let refresh = Task { await host.refreshPoolStatus() }
+        try await waitUntil { host.runnerSlots == .contended }
+        let updating = await host.readRunnerSlots()
+        #expect(updating.state == "unknown")
+        #expect(updating.available == nil)
+        #expect(updating.reason == "The execution pool is being updated.")
+        try coordinator.close()
+        await refresh.value
+        #expect(await host.readRunnerSlots().available == 1)
+        try await host.pool.withSlot {
+            let recovered = await host.readRunnerSlots()
+            #expect(recovered == RunnerSlots(state: "busy", limit: 1))
+            #expect(await MainActor.run { HostSettingsReport(host).runnerSlots } == recovered)
+        }
         await host.management.shutDown()
     }
 
