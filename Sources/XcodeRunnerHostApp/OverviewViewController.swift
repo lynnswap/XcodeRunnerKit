@@ -164,12 +164,6 @@ struct OverviewView: View {
                 }
             }
             .animation(.default, value: github.isLoadingRepositories)
-        } footer: {
-            if github.managesMacs {
-                Text("\(model.mac.subject) and the Macs that it manages register runners for the selected repositories, and the counts include them all.")
-            } else {
-                Text("\(model.mac.subject) registers runners for the selected repositories.")
-            }
         }
     }
 
@@ -184,12 +178,10 @@ struct OverviewView: View {
                 } else {
                     Text("Removing")
                 }
-                if status.busyCount > 0 { Text("Busy runners are removed after their current jobs finish.") }
-            } else {
+            } else if status.onlineCount < status.desiredCount {
                 Text("\(status.onlineCount) of \(status.desiredCount) online · \(status.busyCount) busy").monospacedDigit()
-            }
-            if status.excessCount > 0 {
-                Text("\(status.excessCount) extra registrations are retained to keep existing jobs running. The shared Xcode execution limit still applies.")
+            } else {
+                Text("\(status.onlineCount) online · \(status.busyCount) busy").monospacedDigit()
             }
         }
         .font(.callout).foregroundStyle(.secondary)

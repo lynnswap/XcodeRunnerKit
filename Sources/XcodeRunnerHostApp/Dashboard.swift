@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import ServiceManagement
 import SwiftUI
 
 /// The app opened without a host: a menu bar item and a window that show the hosts paired with this Mac.
@@ -10,6 +11,10 @@ import SwiftUI
 final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
     private let hosts: PairedMacs
     private var windowController: NSWindowController?
+    private var settingsWindow: NSWindow?
+    private lazy var openAtLogin = NSButton(
+        checkboxWithTitle: "Open dashboard at login", target: self, action: #selector(changeOpenAtLogin(_:))
+    )
     private var content: DashboardSplitViewController? { windowController?.contentViewController as? DashboardSplitViewController }
     private var statusItem: NSStatusItem?
     /// The menu bar item's menu. It lists the hosts as they were last read when it opens.
@@ -28,6 +33,7 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        setUpLoginItem()
         installMainMenu()
         installStatusItem()
         hosts.start()
@@ -91,7 +97,76 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
     }
 
     @objc private func windowWillClose(_ notification: Notification) {
-        NSApplication.shared.setActivationPolicy(.accessory)
+        let windows = [windowController?.window, settingsWindow].compactMap { $0 }
+        let closing = notification.object as? NSWindow
+        if !windows.contains(where: { $0 !== closing && $0.isVisible }) {
+            NSApplication.shared.setActivationPolicy(.accessory)
+        }
+    }
+
+    // macOS uses notRegistered both on first launch and after the person removes the login item.
+    private static let didSetUpLoginItem = "didSetUpDashboardLoginItem"
+
+    private func setUpLoginItem() {
+        guard !UserDefaults.standard.bool(forKey: Self.didSetUpLoginItem) else { return }
+        do {
+            try registerLoginItemIfNeeded()
+            UserDefaults.standard.set(true, forKey: Self.didSetUpLoginItem)
+        } catch {
+            NSLog("Could not register the dashboard to open at login: %@", error.localizedDescription)
+        }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        if settingsWindow?.isVisible == true { refreshLoginItem() }
+    }
+
+    private func refreshLoginItem() {
+        openAtLogin.state = SMAppService.mainApp.status == .enabled ? .on : .off
+    }
+
+    private func registerLoginItemIfNeeded() throws {
+        switch SMAppService.mainApp.status {
+        case .enabled, .requiresApproval: break
+        default: try SMAppService.mainApp.register()
+        }
+    }
+
+    @objc private func changeOpenAtLogin(_ sender: NSButton) {
+        let service = SMAppService.mainApp
+        do {
+            if sender.state == .on {
+                try registerLoginItemIfNeeded()
+                if service.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
+            } else {
+                try service.unregister()
+            }
+            UserDefaults.standard.set(true, forKey: Self.didSetUpLoginItem)
+        } catch {
+            NSApp.presentError(error)
+        }
+        refreshLoginItem()
+    }
+
+    @objc private func showSettings(_ sender: Any?) {
+        if settingsWindow == nil {
+            let stack = NSStackView(views: [openAtLogin])
+            stack.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
+            let window = NSWindow(contentRect: NSRect(origin: .zero, size: stack.fittingSize),
+                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.title = "Dashboard Settings"
+            window.contentView = stack
+            window.isReleasedWhenClosed = false
+            window.center()
+            settingsWindow = window
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(windowWillClose(_:)), name: NSWindow.willCloseNotification, object: window
+            )
+        }
+        refreshLoginItem()
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate()
+        settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
     private func installStatusItem() {
@@ -118,6 +193,7 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         }
         statusMenu.addItem(.separator())
         statusMenu.addItem(withTitle: "Open Dashboard", action: #selector(showDashboard(_:)), keyEquivalent: "").target = self
+        statusMenu.addItem(withTitle: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",").target = self
         statusMenu.addItem(.separator())
         statusMenu.addItem(
             withTitle: "Quit XcodeHomeRunner", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"
@@ -177,6 +253,10 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
 
         let app = add(NSMenu(title: "XcodeHomeRunner"))
         app.addItem(item("About XcodeHomeRunner", #selector(NSApplication.orderFrontStandardAboutPanel(_:))))
+        app.addItem(.separator())
+        let settings = item("Settings…", #selector(showSettings(_:)), ",")
+        settings.target = self
+        app.addItem(settings)
         app.addItem(.separator())
         let services = NSMenu(title: "Services")
         let servicesItem = item("Services", nil)

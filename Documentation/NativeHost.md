@@ -256,6 +256,8 @@ installer. Opened this way, the app is a dashboard: it creates no runner folders
 or execution pool, registers no runners, and keeps no GitHub sign-in. It keeps
 only its pairings, in that Mac's Keychain.
 
+The dashboard opens at login by default after its first launch. To change this
+for this Mac, choose **XcodeHomeRunner → Settings…** and use **Open dashboard at login**.
 The dashboard stays in the menu bar after its window closes. The menu of its
 hammer icon lists each host with its state and jobs; choose a host to open its
 **Settings**, or **Open Dashboard** for the window. Choose **Quit
