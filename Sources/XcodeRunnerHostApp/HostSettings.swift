@@ -233,7 +233,7 @@ extension HostSettingsDisplay {
 
     var storageMessage: String {
         if hostState == .waitingForStorage {
-            return "Runner services start when storage becomes available. If you change folders, finish work using runner storage before restarting."
+            return "Runner services start when storage becomes available. Folder changes apply on the next host launch. Finish work using runner storage before restarting."
         }
         if storageChangeIsPending {
             return "Saved for the next host launch. Finish work using runner storage before restarting to apply the saved folder."
