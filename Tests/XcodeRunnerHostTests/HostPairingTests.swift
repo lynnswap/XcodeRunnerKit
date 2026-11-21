@@ -1094,6 +1094,12 @@ struct HostPairingTests {
 
         try FileManager.default.createDirectory(at: storage.directory, withIntermediateDirectories: true)
         _ = try host.installation.initializeStorage()
+        let coordinator = try FileHandle(forUpdating: host.pool.directory.appending(path: "pool.lock"))
+        try #require(flock(coordinator.fileDescriptor, LOCK_EX | LOCK_NB) == 0)
+        let updating = await host.readRunnerSlots()
+        #expect(updating.state == "unknown")
+        #expect(updating.available == nil)
+        try coordinator.close()
         try await host.pool.withSlot {
             let recovered = await host.readRunnerSlots()
             #expect(recovered == RunnerSlots(state: "busy", limit: 1))

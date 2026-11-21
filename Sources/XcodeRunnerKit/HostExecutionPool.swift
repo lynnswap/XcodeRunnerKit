@@ -69,6 +69,11 @@ public struct HostExecutionPool: Sendable {
     ///
     /// Running operations can finish while this snapshot is being read.
     public func status() async throws -> Status? {
+        try await status(waitForLock: true)
+    }
+
+    /// An inventory sample can report contention immediately while other clients keep waiting for the coordinator.
+    package func status(waitForLock: Bool) async throws -> Status? {
         let coordinator: FileHandle
         do {
             coordinator = try Self.open(directory.appending(path: "pool.lock"), create: false)
@@ -76,7 +81,8 @@ public struct HostExecutionPool: Sendable {
             return nil
         }
         return try await Self.withHandle(coordinator) {
-            try await Self.lock(coordinator)
+            if waitForLock { try await Self.lock(coordinator) }
+            else if try !Self.tryLock(coordinator) { throw POSIXError(.EWOULDBLOCK) }
             guard let configuration = try configuration() else { return nil }
             let waiters = try inspectWaiters()
             return try Status(
