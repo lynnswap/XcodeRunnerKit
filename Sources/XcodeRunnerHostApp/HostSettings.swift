@@ -695,7 +695,6 @@ final class HostSettingsModel: HostSettingsDisplay {
     }
 
     func refreshPoolStatus() async {
-        startRunnerSlotSample()
         refreshStorageSelection()
         refreshXcodes()
         refreshBuildService()
@@ -712,6 +711,7 @@ final class HostSettingsModel: HostSettingsDisplay {
             poolError = "Could not read the execution pool: \(error.localizedDescription)"
             hasLoadedPoolStatus = true
         }
+        startRunnerSlotSample()
     }
 
     /// Inventory samples use a nonblocking pool read. Settings saves and runner registration use
