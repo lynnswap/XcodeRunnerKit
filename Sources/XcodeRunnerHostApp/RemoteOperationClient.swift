@@ -131,9 +131,15 @@ struct Checkout: Equatable, Sendable {
         let allowed = listed.split(separator: "\0").map(String.init)
         guard allowed.contains(file) else { throw RemoteOperationFailure("The selected workflow is excluded from the checkout.") }
         // Reusable workflow references are literal job.uses strings. Ship only their transitive definitions.
-        let references = try await Subprocess.run(.path("/usr/bin/ruby"), arguments: .init(["-ryaml", "-rjson", "-rdate", "-e", #"""
+        let references = try await Subprocess.run(.path("/usr/bin/ruby"), arguments: .init(["-ryaml", "-rjson", "-e", #"""
             root, entry = ARGV
             allowed = JSON.parse(STDIN.read)
+            # Actions treats plain job IDs and paths as strings, including Ruby/YAML 1.1 scalars.
+            loader = Psych::ClassLoader::Restricted.new([], [])
+            scanner = Psych::ScalarScanner.new(loader)
+            def scanner.tokenize(value)
+              value
+            end
             queue, seen, definitions = [entry], {}, {}
             until queue.empty?
               file = queue.pop
@@ -141,7 +147,8 @@ struct Checkout: Equatable, Sendable {
               seen[file] = true
               text = File.read(File.join(root, file))
               definitions[File.basename(file)] = text unless file == entry
-              (YAML.safe_load(text, permitted_classes: [Date, Time], aliases: true).fetch("jobs", {}) || {}).each_value do |job|
+              workflow = Psych::Visitors::ToRuby.new(scanner, loader).accept(Psych.parse(text))
+              (workflow.fetch("jobs", {}) || {}).each_value do |job|
                 path = job["uses"].to_s.delete_prefix("./")
                 next unless job["uses"].to_s.start_with?("./.github/workflows/")
                 raise "Unavailable local workflow: #{path}" unless allowed.include?(path) &&

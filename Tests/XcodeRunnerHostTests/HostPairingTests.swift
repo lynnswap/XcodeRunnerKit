@@ -957,7 +957,9 @@ struct HostPairingTests {
         try Data(shared.utf8).write(to: workflows.appending(path: "shared.yml"))
         try Data().write(to: workflows.appending(path: "unrelated.yml"))
         let caller = #"""
-        env: {RELEASE_DATE: 2026-11-21}
+        env:
+          RELEASE_DATE: 2026-11-21
+          PATH_SUFFIX: :/opt/bin
         jobs: {test: {uses: "\x2e/.github/workflows/shared.yml"}}
         """#
         try Data(caller.utf8).write(to: root.appending(path: "ci.yml"))

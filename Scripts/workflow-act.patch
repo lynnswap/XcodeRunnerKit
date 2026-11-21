@@ -123,13 +123,20 @@
 +	}
 --- a/pkg/runner/runner.go
 +++ b/pkg/runner/runner.go
-@@ -160,0 +161,3 @@
+@@ -125,0 +126,3 @@
++	if runner.caller != nil && len(plan.Stages) == 0 {
++		return common.NewErrorExecutor(fmt.Errorf("no workflow_call jobs in %s", runner.caller.runContext.Run.Job().Uses))
++	}
+@@ -160,0 +164,6 @@
 +				if os.Getenv("XCODE_RUNNER_PLAN") == "1" && routingNeedsOutputs(job) {
++					// An output-dependent job may succeed. Keep its dependents eligible for routing.
++					rc := runner.newRunContext(ctx, run, nil)
++					rc.result("success")
 +					continue
 +				}
-@@ -188,0 +192 @@
+@@ -188,0 +198 @@
 +				maxParallel = min(maxParallel, runner.config.GetConcurrentJobs())
-@@ -210 +214 @@
+@@ -210 +220 @@
 -						return executor(common.WithJobErrorContainer(WithJobLogger(ctx, rc.Run.JobID, jobName, rc.Config, &rc.Masks, matrix)))
 +						return executor(common.WithJobErrorContainer(WithJobLogger(ctx, rc.workflowJobID(), jobName, rc.Config, &rc.Masks, matrix)))
 --- a/pkg/container/host_environment.go
