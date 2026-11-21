@@ -1028,7 +1028,7 @@ final class PairedMacs: MacList {
         }
     }
 
-    private func checkFoundMacs() async {
+    func checkFoundMacs() async {
         await withTaskGroup { group in
             for (id, endpoint) in endpoints {
                 group.addTask { await self.checkStatus(of: id, at: endpoint) }
@@ -1072,7 +1072,7 @@ extension HostLinkRequest {
             // The host reads or changes one of its Macs before it answers, within its own time limits.
             switch request {
             case .read(refreshing: nil), .discover, .pair, .confirmCode, .cancelPairing: HostLink.requestTimeout
-            case .read: HostLink.requestTimeout * 3
+            case .read, .listRunners: HostLink.requestTimeout * 3
             case .configurePool, .saveStorage, .saveXcode, .saveBuildService, .saveRunnerLabels, .setPaused, .restart,
                  .remove:
                 PairedMacs.changeTimeout

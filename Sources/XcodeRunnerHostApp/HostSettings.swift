@@ -246,6 +246,8 @@ extension HostSettingsDisplay {
 
 /// What a Mac sends the Macs paired with it about its status and settings.
 struct HostSettingsReport: Codable, Equatable, Sendable {
+    /// Missing on hosts from before working-tree capacity reporting.
+    let runnerSlots: RunnerSlots?
     let hostState: HostState
     let isPaused: Bool
     let runnerLabels: [String]
@@ -275,6 +277,7 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
     let canRestart: Bool
 
     @MainActor init(_ settings: some HostSettingsDisplay) {
+        runnerSlots = RunnerSlots(settings)
         hostState = settings.hostState
         isPaused = settings.isPaused
         runnerLabels = settings.runnerLabels
@@ -315,7 +318,7 @@ final class HostSettingsModel: HostSettingsDisplay {
     /// The Macs that this host manages.
     let managedMacs: PairedMacs
     /// Answers a dashboard's requests about the Macs that this host manages.
-    @ObservationIgnored private(set) lazy var managedMacsRelay = ManagedMacsRelay(macs: managedMacs) { [unowned self] in canAddMacs }
+    @ObservationIgnored private(set) lazy var managedMacsRelay = ManagedMacsRelay(host: self)
     let settingsService: HostSettingsService
     /// Runs the builds and tests that dashboards send to this Mac.
     let operations: RemoteOperations
@@ -695,6 +698,10 @@ final class HostSettingsModel: HostSettingsDisplay {
         refreshStorageSelection()
         refreshXcodes()
         refreshBuildService()
+        await refreshPoolUsage()
+    }
+
+    func refreshPoolUsage() async {
         do {
             let status = try await pool.status()
             poolStatus = status
@@ -764,7 +771,7 @@ final class HostSettingsModel: HostSettingsDisplay {
     func answer(_ request: HostSettingsRequest) async -> HostLinkReply {
         do {
             switch request {
-            case .read: break
+            case .read: await refreshPoolUsage()
             case .configurePool(let changes): try await applyPairedMacChanges(changes)
             case .saveStorage(let directory): try await savePairedMacStorage(directory)
             case .saveXcode(let developerDirectory): try saveDeveloperDirectory(developerDirectory)

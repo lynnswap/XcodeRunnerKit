@@ -39,7 +39,7 @@ struct OverviewView: View {
                     }
                 }
                 .disabled(model.isWaitingForGitHub)
-                if github.managerName == nil { managedMacs }
+                if github.managerName == nil { runnerAvailability }
                 if let management = model.management {
                     HostDashboardsSection(management: management)
                 }
@@ -211,23 +211,24 @@ struct OverviewView: View {
         }
     }
 
-    /// The Macs that the Mac manages, which the sidebar lists under Runners, and the button that pairs it with
-    /// another one.
-    private var managedMacs: some View {
-        let count = model.managedMacCount
+    /// Available execution slots across the Macs listed under Runners.
+    private var runnerAvailability: some View {
+        let runners = model.runnerMacs
+        let available = runners.filter { $0.slots.available > 0 }.count
+        let slots = runners.reduce(0) { $0 + $1.slots.available }
         return Section {
             LabeledContent {
                 Button("Add Mac…") { model.addManagedMac() }
                     .disabled(!model.canAddManagedMac)
                     .accessibilityIdentifier("add-mac")
             } label: {
-                Text(count == 0 ? "No other Macs" : count == 1 ? "1 other Mac" : "\(count) other Macs")
+                Text("\(available) available · \(slots == 1 ? "1 free Xcode slot" : "\(slots) free Xcode slots")")
             }
         } header: {
-            Text("Runners on Other Macs")
+            Text("Runner Availability")
         } footer: {
             if model.canAddManagedMac {
-                Text("\(model.mac.subject) registers runners on the Macs that it manages, for the selected repositories. To list a Mac here, turn off Host in its settings.")
+                Text("The sidebar lists each runner Mac and its Xcode slots, including \(model.mac.subject). To add another Mac, turn off Host in its settings and pair it here.")
             } else {
                 Text("\(model.mac.subject) waits for a host, so it cannot manage Macs.")
             }

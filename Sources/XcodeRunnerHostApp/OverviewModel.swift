@@ -197,6 +197,21 @@ final class OverviewModel: PaneSaving {
         }
     }
 
+    /// Runners shown in the sidebar, including this host when it runs jobs itself.
+    var runnerMacs: [RunnerMacStatus] {
+        let managed: any MacList
+        let host: RunnerMacStatus
+        switch source {
+        case .thisMac(let settings):
+            host = RunnerMacStatus(name: settings.management.name, slots: RunnerSlots(settings))
+            managed = settings.managedMacs
+        case .host(let hosts, let mac):
+            host = hosts.runnerStatus(of: mac.listed)
+            managed = hosts.macsManaged(by: mac.id)
+        }
+        return [host] + managed.listedMacs.map { managed.runnerStatus(of: $0) }
+    }
+
     /// Whether the Mac can pair with a Mac for it to manage. A Mac that another Mac manages cannot.
     var canAddManagedMac: Bool {
         switch source {

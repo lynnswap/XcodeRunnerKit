@@ -46,7 +46,7 @@ final class HostManagement {
     }
 
     private let store: any SecretStore
-    private let name: String
+    let name: String
     private let advertises: Bool
     private let version: Int
     private let hostID: UUID
