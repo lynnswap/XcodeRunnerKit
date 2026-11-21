@@ -132,6 +132,7 @@ struct WorkflowInvocation: Codable, Equatable, Sendable {
     let ref: String
     let base: String
     let definition: String
+    let localWorkflows: [String: String]
     var output: WorkflowOutput = .concise
 }
 

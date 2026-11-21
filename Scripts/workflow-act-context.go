@@ -3,7 +3,12 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
+	"regexp"
+
 	"fmt"
+	"github.com/nektos/act/pkg/model"
+	"gopkg.in/yaml.v3"
 	"strings"
 
 	"github.com/nektos/act/pkg/workflowpattern"
@@ -59,4 +64,48 @@ func (rc *RunContext) checkWorkflowRef(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// Expression evaluation rewrites YAML nodes. A job's runs-on node is shared by its matrix entries.
+func copyWorkflowNode(node yaml.Node) yaml.Node {
+	children := node.Content
+	node.Content = nil
+	for _, child := range children {
+		value := copyWorkflowNode(*child)
+		node.Content = append(node.Content, &value)
+	}
+	return node
+}
+
+var needsContext = regexp.MustCompile(`(?i)\bneeds\b`)
+
+// Upstream job outputs become available only during execution.
+func routingNeedsOutputs(job *model.Job) bool {
+	var referencesNeeds func(*yaml.Node) bool
+	referencesNeeds = func(node *yaml.Node) bool {
+		if needsContext.MatchString(node.Value) {
+			return true
+		}
+		for _, child := range node.Content {
+			if referencesNeeds(child) {
+				return true
+			}
+		}
+		return false
+	}
+	return needsContext.MatchString(job.If.Value) || referencesNeeds(&job.RawRunsOn) ||
+		(job.Strategy != nil && referencesNeeds(&job.Strategy.RawMatrix))
+}
+
+func (rc *RunContext) workflowJobID() string {
+	if rc.caller == nil {
+		return rc.Run.JobID
+	}
+	parent := rc.caller.runContext
+	key := parent.workflowJobID()
+	if len(parent.Matrix) != 0 {
+		matrix, _ := json.Marshal(parent.Matrix)
+		key += string(matrix)
+	}
+	return key + "/" + rc.Run.JobID
 }

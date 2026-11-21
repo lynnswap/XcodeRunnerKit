@@ -230,7 +230,7 @@ final class RemoteOperations {
         }
     }
 
-    private var workflowEngine: URL { installation.hostRoot.appending(path: "WorkflowEngine/act-0.2.98-xrk3/xrk-act") }
+    private var workflowEngine: URL { installation.hostRoot.appending(path: "WorkflowEngine/act-0.2.98-xrk4/xrk-act") }
 
     func labels(for workflow: WorkflowInvocation) async throws -> [String] {
         guard FileManager.default.isExecutableFile(atPath: workflowEngine.path) else {

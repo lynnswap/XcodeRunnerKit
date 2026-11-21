@@ -124,9 +124,20 @@ struct Checkout: Equatable, Sendable {
         if base.isEmpty && event.hasPrefix("pull_request") {
             throw RemoteOperationFailure("Specify the pull request target with --base when origin has no default branch.")
         }
+        let definition = try String(contentsOf: url, encoding: .utf8)
+        var localWorkflows: [String: String] = [:]
+        if definition.contains("./.github/workflows/") {
+            let folder = root.appending(path: ".github/workflows")
+            for item in try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
+            where ["yml", "yaml"].contains(item.pathExtension) {
+                let target = item.resolvingSymlinksInPath()
+                guard target.pathComponents.starts(with: root.resolvingSymlinksInPath().pathComponents) else { continue }
+                localWorkflows[item.lastPathComponent] = try String(contentsOf: target, encoding: .utf8)
+            }
+        }
         return WorkflowInvocation(
             file: String(url.path(percentEncoded: false).dropFirst(prefix.count)), event: event, repository: repository,
-            sha: sha, ref: ref, base: base, definition: try String(contentsOf: url, encoding: .utf8)
+            sha: sha, ref: ref, base: base, definition: definition, localWorkflows: localWorkflows
         )
     }
 

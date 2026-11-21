@@ -79,7 +79,7 @@ def run(engine, checkout, output, file, event, repository, sha, ref, base, prese
                                 lines = deque(maxlen=3)
                                 recent[identity] = (step, lines)
                             lines.append(body[:240])
-                        if record.get('stepResult') == 'failure' and 'step' not in job_result:
+                        if record.get('stepConclusion', record.get('stepResult')) == 'failure' and 'step' not in job_result:
                             job_result['logLine'] = log_line
                             job_result['step'] = str(record.get('step') or body)[:240]
                             if identity in recent and recent[identity][0] == record.get('step'):
@@ -90,13 +90,15 @@ def run(engine, checkout, output, file, event, repository, sha, ref, base, prese
                                 job_result.pop('step', None)
                                 job_result.pop('message', None)
                                 job_result.pop('logLine', None)
-                if message.startswith('Error:'):
+                if message.startswith(('Error:', 'panic:')):
                     failure = message[:480]
-                if presentation == 'verbose' or (plan and message.startswith('Error:')):
+                if presentation == 'verbose' or (plan and message.startswith(('Error:', 'panic:'))):
                     print(message, flush=True)
                 print(message, file=log, flush=True)
                 log_line += message.count("\n") + 1
             status = child.wait()
+            if plan and status and not failure:
+                print(f'The workflow planner exited with status {status}.', file=sys.stderr)
             if not plan and not status and not any(j['status'] == 'success' for j in jobs.values()):
                 failure = 'No jobs succeeded for this event and ref.'
                 status = 1
@@ -122,6 +124,12 @@ def check_plan(engine, *labels):
     with tempfile.TemporaryDirectory(prefix='xrkw-plan-') as temp:
         checkout = Path(temp) / 'checkout'
         checkout.mkdir()
+        directory = checkout / '.github/workflows'
+        directory.mkdir(parents=True)
+        for name, definition in spec.get('localWorkflows', {}).items():
+            if Path(name).name != name:
+                raise ValueError('Invalid local workflow filename.')
+            (directory / name).write_text(definition)
         file = checkout / 'workflow.yml'
         file.write_text(spec['definition'])
         return run(engine, checkout, Path(temp) / 'output', file.name, spec['event'], spec['repository'],
