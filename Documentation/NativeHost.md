@@ -611,8 +611,11 @@ using the same copy of the working tree, including tracked edits and unignored n
 The local Actions service supplies the checkout, evaluates job dependencies and runs the workflow steps.
 It evaluates the workflow on candidate Macs to match job conditions, matrix labels, and the selected ref
 before sending the checkout. Conditions that reference `needs` can depend on values produced at runtime.
-For routing, the host assumes those jobs can succeed and checks their downstream jobs' static labels.
-This can require a label even when the eventual output or branch condition skips the downstream job.
+The host defers a job whose condition, matrix, or runner label references `needs` until execution.
+While choosing a Mac, it assumes that job can succeed and evaluates its dependents under that assumption.
+A deferred job can discover a missing label at execution time. A dependent can require a label during
+routing even if it is eventually skipped. Spell local reusable workflow references as literal
+`./.github/workflows/<file>` paths.
 Jobs receive a shallow Git repository with the submitted HEAD and index.
 Each invocation has its own runner and artifact store. GitHub's cross-run concurrency groups and repository secrets are unavailable.
 
