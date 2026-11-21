@@ -248,6 +248,7 @@ extension HostSettingsDisplay {
 struct HostSettingsReport: Codable, Equatable, Sendable {
     /// Missing on hosts from before working-tree capacity reporting.
     let runnerSlots: RunnerSlots?
+    let resourceSample: RunnerMetricSample?
     let hostState: HostState
     let isPaused: Bool
     let runnerLabels: [String]
@@ -278,6 +279,7 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
 
     @MainActor init(_ settings: HostSettingsModel) {
         runnerSlots = settings.runnerSlots
+        resourceSample = settings.resourceHistory.samples.last
         hostState = settings.hostState
         isPaused = settings.isPaused
         runnerLabels = settings.runnerLabels
@@ -322,6 +324,11 @@ final class HostSettingsModel: HostSettingsDisplay {
     let settingsService: HostSettingsService
     /// Runs the builds and tests that dashboards send to this Mac.
     let operations: RemoteOperations
+    private(set) var resourceHistory = RunnerMetricHistory()
+    @ObservationIgnored private var resourceSampler = RunnerMetricSampler()
+
+    func sampleResources() { resourceHistory.append(resourceSampler.sample()) }
+
     var hostState = HostState.starting
     private(set) var isPaused: Bool
     private(set) var pauseError: String?

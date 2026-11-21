@@ -126,7 +126,8 @@ with tempfile.TemporaryDirectory(prefix='Dashboard test ') as temporary:
     home = Path(temporary)/'home'
     home.mkdir()
     with (Path(temporary)/'dashboard.log').open('wb') as log:
-        watched = HostOutput([executable, '--home-directory', str(home)], log)
+        # The smoke-test app must not become a login item in the CI account.
+        watched = HostOutput([executable, '--home-directory', str(home), '-didSetUpDashboardLoginItem', 'YES'], log)
         try:
             wait_for(lambda: watched.contains('Dashboard started.'), 'The app did not open as a dashboard')
             assert not any(home.iterdir()), f'The dashboard created host files: {sorted(home.rglob("*"))}'

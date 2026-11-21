@@ -38,6 +38,17 @@ struct HostSettingsBridgeTests {
         #expect(try GitHubHostConfiguration.load(from: record).repositories == [first])
     }
 
+    @Test func runnerHistoryFollowsElapsedTimeWhenTheClockChanges() {
+        let session = UUID()
+        let first = RunnerMetricSample(time: .now, clock: .init(session: session, elapsed: 0), cpu: nil, memory: nil)
+        let next = RunnerMetricSample(time: first.time.addingTimeInterval(-3600), clock: .init(session: session, elapsed: 5), cpu: nil, memory: nil)
+        var history = RunnerMetricHistory()
+        history.append(first)
+        history.append(next)
+        history.append(first)
+        #expect(history.samples == [first, next])
+    }
+
     @Test func commandsReadAndChangeTheHostAsADashboardDoes() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -58,7 +69,13 @@ struct HostSettingsBridgeTests {
         #expect(installation.isPaused())
         #expect(try await perform(.settings(.saveRunnerLabels(["fast", "gpu"]))).runnerLabels == ["fast", "gpu"])
         #expect(try installation.runnerLabels() == ["fast", "gpu"])
+        settings.sampleResources()
         let status = try await perform(.settings(.read))
+        let sample = try #require(status.resourceSample)
+        let dashboard = PairedMacSettings()
+        dashboard.show(status)
+        dashboard.show(status)
+        #expect(dashboard.resourceHistory.samples == [sample])
         #expect(status.isPaused && status.runnerLabels == ["fast", "gpu"])
 
         // The host's reason for refusing is the command's failure. This host was not started by launchd.

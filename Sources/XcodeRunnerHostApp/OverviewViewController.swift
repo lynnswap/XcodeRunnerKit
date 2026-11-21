@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// The Settings pane: a Mac's roles, status, GitHub sign-in, repositories, and pairings with other Macs.
+/// The Settings pane: a Mac's roles, GitHub sign-in, repositories, and pairings with other Macs.
 @MainActor
 final class OverviewViewController: NSHostingController<OverviewView>, SavingPaneViewController {
     let saving: any PaneSaving
@@ -28,8 +28,7 @@ struct OverviewView: View {
             if let management = model.management {
                 MacRolesSection(model: model, management: management)
             }
-            if let report = model.report, let github = model.github {
-                Section(model.mac.name ?? HostPane.macName) { HostStatusRows(settings: report) }
+            if let github = model.github {
                 // The host of a managed Mac selects the repositories and manages the other Macs.
                 Group {
                     account(github)
@@ -39,7 +38,13 @@ struct OverviewView: View {
                     }
                 }
                 .disabled(model.isWaitingForGitHub)
-                if github.managerName == nil { runnerAvailability }
+                if github.managerName == nil {
+                    Section("Pairing") {
+                        Button("Add Mac…") { model.addManagedMac() }
+                            .disabled(!model.canAddManagedMac)
+                            .accessibilityIdentifier("add-mac")
+                    }
+                }
                 if let management = model.management {
                     HostDashboardsSection(management: management)
                 }
@@ -114,7 +119,7 @@ struct OverviewView: View {
                     }
                 )) {
                     Text(repository.fullName)
-                    if let status = statuses[repository.id] { runners(status) }
+                    if let status = statuses[repository.id] { registrationStatus(status) }
                 }
                 .disabled(github.isBusy || !isSignedIn)
             }
@@ -122,7 +127,7 @@ struct OverviewView: View {
             ForEach(github.runnerStatuses.filter { !listed.contains($0.id) }) { status in
                 VStack(alignment: .leading, spacing: 4) {
                     Text(status.fullName)
-                    runners(status)
+                    registrationStatus(status)
                 }
             }
             if isSignedIn, !github.isLoadingRepositories, !github.hasListedRepositories {
@@ -164,35 +169,13 @@ struct OverviewView: View {
                 }
             }
             .animation(.default, value: github.isLoadingRepositories)
-        } footer: {
-            if github.managesMacs {
-                Text("\(model.mac.subject) and the Macs that it manages register runners for the selected repositories, and the counts include them all.")
-            } else {
-                Text("\(model.mac.subject) registers runners for the selected repositories.")
-            }
         }
     }
 
-    /// A repository's runners, under its name.
+    /// Pending changes and errors that affect this repository's selection.
     @ViewBuilder
-    private func runners(_ status: RepositoryRunnerReport) -> some View {
-        Group {
-            if status.isUnlinked {
-                // Without a listing from GitHub, the runners still to remove are not counted.
-                if status.registeredCount > 0 {
-                    Text("Removing \(status.registeredCount) · \(status.busyCount) busy").monospacedDigit()
-                } else {
-                    Text("Removing")
-                }
-                if status.busyCount > 0 { Text("Busy runners are removed after their current jobs finish.") }
-            } else {
-                Text("\(status.onlineCount) of \(status.desiredCount) online · \(status.busyCount) busy").monospacedDigit()
-            }
-            if status.excessCount > 0 {
-                Text("\(status.excessCount) extra registrations are retained to keep existing jobs running. The shared Xcode execution limit still applies.")
-            }
-        }
-        .font(.callout).foregroundStyle(.secondary)
+    private func registrationStatus(_ status: RepositoryRunnerReport) -> some View {
+        if status.isUnlinked { Text("Removing…").font(.callout).foregroundStyle(.secondary) }
         if let error = status.errorMessage { ErrorText(error) }
     }
 
@@ -208,26 +191,6 @@ struct OverviewView: View {
             Text("Hosts on Other Macs")
         } footer: {
             Text("The sidebar lists a host that this Mac paired with, with its settings and runners, as a dashboard does. On that Mac, choose Allow Dashboard… under Dashboards first.")
-        }
-    }
-
-    /// Available execution slots across the Macs listed under Runners.
-    private var runnerAvailability: some View {
-        Section {
-            ForEach(model.runnerMacs) { mac in
-                LabeledContent(mac.name, value: mac.slots.title)
-            }
-            Button("Add Mac…") { model.addManagedMac() }
-                .disabled(!model.canAddManagedMac)
-                .accessibilityIdentifier("add-mac")
-        } header: {
-            Text("Runner Availability")
-        } footer: {
-            if model.canAddManagedMac {
-                Text("The sidebar lists each runner Mac and its Xcode slots, including \(model.mac.subject). To add another Mac, turn off Host in its settings and pair it here.")
-            } else {
-                Text("\(model.mac.subject) waits for a host, so it cannot manage Macs.")
-            }
         }
     }
 }

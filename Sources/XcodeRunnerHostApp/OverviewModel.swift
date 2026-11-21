@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 /// What the Settings pane shows and does for a Mac: this Mac in its own window, or a host on a dashboard. It has the
-/// Mac's roles, status, GitHub sign-in, repositories, and pairings.
+/// Mac's roles, GitHub sign-in, repositories, and pairings.
 @MainActor @Observable
 final class OverviewModel: PaneSaving {
     private enum Source {
@@ -47,14 +47,6 @@ final class OverviewModel: PaneSaving {
         switch source {
         case .thisMac: .thisMac
         case .host(_, let host): MacReference(name: host.name)
-        }
-    }
-
-    /// The Mac's status. A dashboard has none while the host does not answer.
-    var report: HostSettingsReport? {
-        switch source {
-        case .thisMac(let settings): HostSettingsReport(settings)
-        case .host(let hosts, let host): hosts.answer(of: host.id)?.report
         }
     }
 
@@ -195,21 +187,6 @@ final class OverviewModel: PaneSaving {
         case .thisMac(let settings): settings.managedMacs.macs.count
         case .host(let hosts, let host): hosts.macsManaged(by: host.id).listedMacs.count
         }
-    }
-
-    /// Runners shown in the sidebar, including this host when it runs jobs itself.
-    var runnerMacs: [RunnerMacStatus] {
-        let managed: any MacList
-        let host: RunnerMacStatus
-        switch source {
-        case .thisMac(let settings):
-            host = RunnerMacStatus(name: settings.management.name, slots: settings.runnerSlots)
-            managed = settings.managedMacs
-        case .host(let hosts, let mac):
-            host = hosts.runnerStatus(of: mac.listed)
-            managed = hosts.macsManaged(by: mac.id)
-        }
-        return [host] + managed.listedMacs.map { managed.runnerStatus(of: $0) }
     }
 
     /// Whether the Mac can pair with a Mac for it to manage. A Mac that another Mac manages cannot.

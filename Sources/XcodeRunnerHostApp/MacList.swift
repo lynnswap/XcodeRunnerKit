@@ -74,6 +74,12 @@ protocol MacList: AnyObject, Observable {
 }
 
 extension MacList {
+    func runnerActivityTitle(of mac: ListedMac) -> String {
+        let connection = status(of: mac.id)
+        guard connection == .online else { return connection.title }
+        return settings(of: mac.id)?.report?.runnerActivityTitle ?? "Checking…"
+    }
+
     func runnerStatus(of mac: ListedMac) -> RunnerMacStatus {
         let connection = status(of: mac.id)
         let slots: RunnerSlots

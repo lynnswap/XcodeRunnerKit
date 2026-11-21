@@ -147,8 +147,12 @@ public enum RunnerHostApplication {
                 }
                 // This Mac's host owns its runners, so opening the app starts it, as it did before dashboards. If
                 // launchd cannot start its service, the host runs in this process without the settings service.
-                if startInstalledHost(label) { return }
+                if startInstalledHost(label) {
+                    if options.homeDirectory == nil { Dashboard.retireLoginItemForHost() }
+                    return
+                }
             }
+            if options.settingsService, options.homeDirectory == nil { Dashboard.retireLoginItemForHost() }
             let host = try RunnerHost(installation: installation, settingsService: options.settingsService)
             application.setActivationPolicy(.accessory)
             application.delegate = host
@@ -269,6 +273,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private let dashboardHosts: PairedMacs
     private var monitoring: Task<Void, Never>?
     private var poolMonitoring: Task<Void, Never>?
+    private var resourceMonitoring: Task<Void, Never>?
     private var githubMonitoring: Task<Void, Never>?
     private var storagePreparation: Task<Void, Never>?
     private var signals: [any DispatchSourceSignal] = []
@@ -368,6 +373,12 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 showSettings(nil)
             }
         }
+        resourceMonitoring = Task {
+            while !Task.isCancelled {
+                settings.sampleResources()
+                do { try await Task.sleep(for: PairedMacs.settingsInterval) } catch { return }
+            }
+        }
         poolMonitoring = Task {
             // Pool reads and writes can wait for another process's pool lock, so they stay out of runner startup.
             await settings.configureDefaultPool()
@@ -462,6 +473,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         settingsServer?.stop()
         monitoring?.cancel()
         poolMonitoring?.cancel()
+        resourceMonitoring?.cancel()
         githubMonitoring?.cancel()
         storagePreparation?.cancel()
         Task {

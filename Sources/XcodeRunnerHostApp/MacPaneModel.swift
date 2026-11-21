@@ -116,6 +116,8 @@ final class MacPaneModel: PaneSaving {
         }
     }
 
+    var resourceHistory: RunnerMetricHistory { thisMac?.resourceHistory ?? paired?.resourceHistory ?? RunnerMetricHistory() }
+
     // MARK: Runner services
 
     var isChangingPause: Bool { paired?.isChangingPause ?? false }
