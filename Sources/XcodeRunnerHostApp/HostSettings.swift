@@ -699,7 +699,13 @@ final class HostSettingsModel: HostSettingsDisplay {
         refreshXcodes()
         refreshBuildService()
         do {
-            let status = try await pool.status()
+            let status: HostExecutionPool.Status?
+            do {
+                status = try await pool.status(waitForLock: false)
+            } catch let error as POSIXError where error.code == .EWOULDBLOCK {
+                sampledSlots = .contended
+                status = try await pool.status()
+            }
             poolStatus = status
             poolError = nil
             hasLoadedPoolStatus = true
@@ -755,8 +761,7 @@ final class HostSettingsModel: HostSettingsDisplay {
                 let status = try await pool.status(waitForLock: false)
                 sampledSlots = RunnerSlots(pool: status, poolError: nil, storageError: storageError)
             } catch {
-                let contended = (error as? POSIXError)?.code == .EWOULDBLOCK
-                let reason = contended ? "The execution pool is being updated." : error.localizedDescription
+                let reason = (error as? POSIXError)?.code == .EWOULDBLOCK ? RunnerSlots.contended.reason : error.localizedDescription
                 sampledSlots = RunnerSlots(pool: nil, poolError: reason, storageError: storageError)
             }
             slotRead = nil

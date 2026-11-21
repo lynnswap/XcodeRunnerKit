@@ -30,6 +30,8 @@ enum ManagedMacsRequest: Codable, Sendable {
 
 /// A Mac's reported capacity for a new Xcode job. A job's Xcode and destination are checked at dispatch.
 struct RunnerSlots: Codable, Equatable, Sendable {
+    static let contended = Self(state: "unknown", available: nil, reason: "The execution pool is being updated.")
+
     let state: String
     let available: Int?
     let limit: Int?

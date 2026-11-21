@@ -1096,11 +1096,15 @@ struct HostPairingTests {
         _ = try host.installation.initializeStorage()
         let coordinator = try FileHandle(forUpdating: host.pool.directory.appending(path: "pool.lock"))
         try #require(flock(coordinator.fileDescriptor, LOCK_EX | LOCK_NB) == 0)
+        let refresh = Task { await host.refreshPoolStatus() }
+        try await waitUntil { host.runnerSlots == .contended }
         let updating = await host.readRunnerSlots()
         #expect(updating.state == "unknown")
         #expect(updating.available == nil)
         #expect(updating.reason == "The execution pool is being updated.")
         try coordinator.close()
+        await refresh.value
+        #expect(await host.readRunnerSlots().available == 1)
         try await host.pool.withSlot {
             let recovered = await host.readRunnerSlots()
             #expect(recovered == RunnerSlots(state: "busy", limit: 1))
