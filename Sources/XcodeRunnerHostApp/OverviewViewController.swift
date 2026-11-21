@@ -19,6 +19,7 @@ final class OverviewViewController: NSHostingController<OverviewView>, SavingPan
 @MainActor
 struct OverviewView: View {
     let model: OverviewModel
+    @State private var confirmingDisconnect = false
 
     var body: some View {
         Form {
@@ -70,8 +71,14 @@ struct OverviewView: View {
                 LabeledContent("Connected account") {
                     HStack {
                         Text(login)
-                        Button("Disconnect", role: .destructive) { model.signOut() }
+                        Button("Disconnect…", role: .destructive) { confirmingDisconnect = true }
                             .disabled(!github.canDisconnect)
+                            .alert("Disconnect GitHub from \(model.mac.object)?", isPresented: $confirmingDisconnect) {
+                                Button("Cancel", role: .cancel) {}
+                                Button("Disconnect", role: .destructive) { model.signOut() }
+                            } message: {
+                                Text("This signs out \(login) and stops syncing runner registrations until you reconnect. Existing runners and jobs keep running.")
+                            }
                     }
                 }
             } else if github.isConnecting {
@@ -97,10 +104,6 @@ struct OverviewView: View {
             if github.accountLogin == nil || github.managerName != nil, let error = github.errorMessage { ErrorText(error) }
         } header: {
             Text("GitHub")
-        } footer: {
-            if github.accountLogin != nil {
-                Text("Disconnecting removes \(model.mac.possessive) GitHub sign-in and pauses runner management. Existing runner services and jobs continue.")
-            }
         }
     }
 

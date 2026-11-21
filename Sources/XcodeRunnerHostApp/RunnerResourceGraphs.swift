@@ -50,15 +50,15 @@ private struct ResourceGraph: View {
                 func x(_ time: TimeInterval) -> CGFloat {
                     size.width * (1 + (time - last.plotTime) / RunnerMetricHistory.duration)
                 }
-                func band(from left: CGPoint, to right: CGPoint, bottomLeft: CGFloat, bottomRight: CGFloat, color: Color) {
+                func area(from left: CGPoint, to right: CGPoint, color: Color, opacity: Double) {
                     var line = Path()
                     line.move(to: left)
                     line.addLine(to: right)
-                    var area = line
-                    area.addLine(to: CGPoint(x: right.x, y: bottomRight))
-                    area.addLine(to: CGPoint(x: left.x, y: bottomLeft))
-                    area.closeSubpath()
-                    context.fill(area, with: .color(color.opacity(0.48)), style: FillStyle(antialiased: false))
+                    var fill = line
+                    fill.addLine(to: CGPoint(x: right.x, y: size.height))
+                    fill.addLine(to: CGPoint(x: left.x, y: size.height))
+                    fill.closeSubpath()
+                    context.fill(fill, with: .color(color.opacity(opacity)), style: FillStyle(antialiased: false))
                     context.stroke(line, with: .color(color), lineWidth: 1)
                 }
                 for (index, sample) in samples.enumerated() {
@@ -75,11 +75,12 @@ private struct ResourceGraph: View {
                         let bottom = size.height
                         let systemLeft = bottom * (1 - prior.system)
                         let systemRight = bottom * (1 - cpu.system)
-                        band(from: CGPoint(x: leftX, y: systemLeft), to: CGPoint(x: end, y: systemRight),
-                             bottomLeft: bottom, bottomRight: bottom, color: .red)
-                        band(from: CGPoint(x: leftX, y: systemLeft - bottom * prior.user),
+                        // Activity Monitor overlays the system area on the filled total CPU load.
+                        area(from: CGPoint(x: leftX, y: systemLeft - bottom * prior.user),
                              to: CGPoint(x: end, y: systemRight - bottom * cpu.user),
-                             bottomLeft: systemLeft, bottomRight: systemRight, color: .cyan)
+                             color: Color(nsColor: .systemCyan), opacity: 0.3)
+                        area(from: CGPoint(x: leftX, y: systemLeft), to: CGPoint(x: end, y: systemRight),
+                             color: Color(nsColor: .systemRed), opacity: 0.3)
                     case .memory:
                         guard let memory = sample.memory else { continue }
                         let color: Color = switch memory.pressure {
@@ -89,9 +90,9 @@ private struct ResourceGraph: View {
                         default: .secondary
                         }
                         let leftX = left.memory == nil ? end - 1 : start
-                        band(from: CGPoint(x: leftX, y: size.height * (1 - (left.memory ?? memory).load)),
+                        area(from: CGPoint(x: leftX, y: size.height * (1 - (left.memory ?? memory).load)),
                              to: CGPoint(x: end, y: size.height * (1 - memory.load)),
-                             bottomLeft: size.height, bottomRight: size.height, color: color)
+                             color: color, opacity: 0.48)
                     }
                 }
             }
