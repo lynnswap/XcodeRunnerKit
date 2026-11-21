@@ -611,7 +611,8 @@ using the same copy of the working tree, including tracked edits and unignored n
 The local Actions service supplies the checkout, evaluates job dependencies and runs the workflow steps.
 It evaluates the workflow on candidate Macs to match job conditions, matrix labels, and the selected ref
 before sending the checkout. Conditions that reference `needs` can depend on values produced at runtime.
-The host defers a job whose condition, matrix, or runner label references `needs` until execution.
+The host defers a job when its condition, matrix, or runner label contains the word `needs`
+(case-insensitive). This also matches literal labels such as `needs-xcode`.
 While choosing a Mac, it assumes that job can succeed and evaluates its dependents under that assumption.
 A deferred job can discover a missing label at execution time. A dependent can require a label during
 routing even if it is eventually skipped. Spell local reusable workflow references as literal
