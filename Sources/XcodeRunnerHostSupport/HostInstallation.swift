@@ -319,13 +319,13 @@ package struct HostInstallation: Sendable {
         }
         let storage = Storage(directory: URL(filePath: directory))
         let hostRoot = URL(filePath: root)
-        // A workflow already owns a slot. Nested builds share its private pool until the workflow exits.
+        // A workflow already owns a slot. Nested builds use its reservation and the host’s persistent Simulator pool.
         // Tools that start jobs for another storage must use that host's own pool and repository cache.
         if let path = environment["XCODE_RUNNER_WORKFLOW_DIRECTORY"] {
             let work = storage.workDirectory.resolvingSymlinksInPath().standardizedFileURL.pathComponents
             let workflow = URL(filePath: path).resolvingSymlinksInPath().standardizedFileURL
             if workflow.pathComponents.starts(with: work), workflow.pathComponents.count > work.count {
-                return (storage.directory, hostRoot, workflow.appending(path: "Pool"), true)
+                return (storage.directory, hostRoot, poolDirectory(hostRoot: hostRoot), true)
             }
         }
         return (storage.directory, hostRoot, poolDirectory(hostRoot: hostRoot), false)

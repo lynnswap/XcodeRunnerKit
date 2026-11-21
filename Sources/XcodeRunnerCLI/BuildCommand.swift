@@ -145,6 +145,8 @@ struct BuildOptions: ParsableArguments {
             if let reservedSlot {
                 try pool.useInheritedSlot(reservedSlot)
                 runner.simulatorPool = pool.simulatorPool
+            } else if host.isWorkflow {
+                runner.simulatorPool = pool.simulatorPool
             } else {
                 runner.executionPool = pool
             }

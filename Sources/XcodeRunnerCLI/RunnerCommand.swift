@@ -26,13 +26,17 @@ struct Workflow: AsyncParsableCommand {
         @Option(help: "Target branch for a pull request event (defaults to origin’s default branch).") var base: String?
         @Option(help: "Where this Mac receives the workflow log and artifacts.") var outputDirectory = "XcodeRunnerOutput"
 
+        @Flag(help: "Print a compact JSON result with the job outcomes and local artifact paths.") var json = false
+        @Flag(help: "Stream every workflow step to the terminal.") var verbose = false
+
         func run() throws {
+            guard !(json && verbose) else { throw ValidationError("Choose --json or --verbose.") }
             guard let app = HostApp.executable() else {
                 throw ValidationError("Workflow runs need the CLI inside the paired XcodeHomeRunner.app.")
             }
             try HostApp.replaceProcess(with: [
                 app.path(percentEncoded: false), "--run-on-available-host", "--output-directory",
-                URL(filePath: outputDirectory).standardizedFileURL.path(percentEncoded: false), "--", "workflow", file, event, base ?? "",
+                URL(filePath: outputDirectory).standardizedFileURL.path(percentEncoded: false), "--", "workflow", file, event, base ?? "", json ? "json" : (verbose ? "verbose" : "concise"),
             ])
         }
     }

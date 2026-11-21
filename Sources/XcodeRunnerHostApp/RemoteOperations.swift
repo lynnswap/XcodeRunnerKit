@@ -89,7 +89,7 @@ final class RemoteOperations {
             }
             executable = URL(filePath: "/usr/bin/python3")
             arguments = [script.path, workflowEngine.path, checkout.path, output.path, workflow.file,
-                         workflow.event, workflow.repository, workflow.sha, workflow.ref, workflow.base] + labels
+                         workflow.event, workflow.repository, workflow.sha, workflow.ref, workflow.base, workflow.output.rawValue, HostPane.macName] + labels
             if let developer = try installation.developerDirectory() { hostEnvironment["DEVELOPER_DIR"] = developer.path }
         } else {
             executable = tool
@@ -132,7 +132,7 @@ final class RemoteOperations {
             }
             group.addTask {
                 do {
-                    if slot != nil { try await reply(.operation(.output(Data("Running on \(HostPane.macName)\n".utf8)))) }
+                    if slot != nil, operation.workflow?.output != .json { try await reply(.operation(.output(Data("Running on \(HostPane.macName)\n".utf8)))) }
                     try await Self.execute(
                         operation, in: checkout, output: output, tool: executable, arguments: arguments, environment: environment,
                         slot: operation.workflow == nil ? slot : nil, reply: reply
@@ -230,7 +230,7 @@ final class RemoteOperations {
         }
     }
 
-    private var workflowEngine: URL { installation.hostRoot.appending(path: "WorkflowEngine/act-0.2.98-xrk1/xrk-act") }
+    private var workflowEngine: URL { installation.hostRoot.appending(path: "WorkflowEngine/act-0.2.98-xrk3/xrk-act") }
 
     func labels(for workflow: WorkflowInvocation) async throws -> [String] {
         guard FileManager.default.isExecutableFile(atPath: workflowEngine.path) else {
@@ -250,9 +250,17 @@ final class RemoteOperations {
         guard xcode.terminationStatus.isSuccess else { throw RemoteOperationFailure(xcode.standardError) }
         if let version = xcode.standardOutput.split(whereSeparator: { $0.isWhitespace }).dropFirst().first,
            let major = version.split(separator: ".").first { labels.append("xcode-" + major) }
-        let available = Set(labels.map { $0.lowercased() })
-        let missing = workflow.requiredLabels.filter { !available.contains($0.lowercased()) }
-        guard missing.isEmpty else { throw HostAvailability.unavailable("Missing workflow runner labels: " + missing.joined(separator: ", ")) }
+        guard let script = Bundle.module.url(forResource: "run-workflow", withExtension: "py") else {
+            throw RemoteOperationFailure("The workflow helper is missing.")
+        }
+        let encoded = try JSONEncoder().encode(workflow)
+        let plan = try await Subprocess.run(.path("/usr/bin/python3"),
+            arguments: .init([script.path, "plan", workflowEngine.path] + labels),
+            environment: environment, input: .string(String(decoding: encoded, as: UTF8.self)),
+            output: .string(limit: 1 << 20), error: .string(limit: 4096))
+        guard plan.terminationStatus.isSuccess else {
+            throw HostAvailability.unavailable((plan.standardOutput + plan.standardError).trimmingCharacters(in: .whitespacesAndNewlines))
+        }
         return labels
     }
 
@@ -306,7 +314,7 @@ final class RemoteOperations {
             try RemoteOperation.requireResultType(.typeDirectory, at: directory)
             for name in try FileManager.default.contentsOfDirectory(atPath: directory.path(percentEncoded: false)) {
                 let type: FileAttributeType
-                if name == "xcodebuild.log" || (operation.workflow != nil && name == "workflow.log") { type = .typeRegular }
+                if name == "xcodebuild.log" || (operation.workflow != nil && ["workflow.log", "summary.json"].contains(name)) { type = .typeRegular }
                 else if name.hasSuffix(".xcresult") || (operation.workflow != nil && name == "artifacts") { type = .typeDirectory }
                 else { continue }
                 try RemoteOperation.requireResultType(type, at: directory.appending(component: name, directoryHint: .notDirectory))
@@ -395,6 +403,9 @@ extension HostSettingsModel {
             busy = reservation == nil
         } catch HostAvailability.needsRuntimeDownload {
             needsDownload = true
+            reservation = nil
+        } catch HostAvailability.unavailable(let reason) {
+            reasons.append(reason)
             reservation = nil
         } catch {
             try Task.checkCancellation()

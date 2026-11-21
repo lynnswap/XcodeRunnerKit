@@ -131,7 +131,12 @@ struct WorkflowInvocation: Codable, Equatable, Sendable {
     let sha: String
     let ref: String
     let base: String
-    let requiredLabels: [String]
+    let definition: String
+    var output: WorkflowOutput = .concise
+}
+
+enum WorkflowOutput: String, Codable, Sendable {
+    case concise, json, verbose
 }
 
 enum RemoteOperationEvent: Codable, Sendable {

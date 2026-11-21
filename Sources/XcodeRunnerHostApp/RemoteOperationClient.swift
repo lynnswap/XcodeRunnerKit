@@ -124,20 +124,9 @@ struct Checkout: Equatable, Sendable {
         if base.isEmpty && event.hasPrefix("pull_request") {
             throw RemoteOperationFailure("Specify the pull request target with --base when origin has no default branch.")
         }
-        // Only literal labels can be matched before the workflow engine evaluates expressions on the runner.
-        let plan = try await Subprocess.run(.path("/usr/bin/ruby"), arguments: .init(["-ryaml", "-rjson", "-e", #"""
-            jobs = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true).fetch("jobs")
-            labels = jobs.values.flat_map do |job|
-              value = job["runs-on"]
-              value = value["labels"] if value.is_a?(Hash)
-              Array(value).select { |label| label.is_a?(String) && !label.include?('$' + '{{') }
-            end
-            print JSON.generate(labels.uniq)
-            """#, url.path(percentEncoded: false)]), output: .string(limit: 1 << 20), error: .string(limit: 4096))
-        guard plan.terminationStatus.isSuccess else { throw RemoteOperationFailure(plan.standardError) }
         return WorkflowInvocation(
             file: String(url.path(percentEncoded: false).dropFirst(prefix.count)), event: event, repository: repository,
-            sha: sha, ref: ref, base: base, requiredLabels: try JSONDecoder().decode([String].self, from: Data(plan.standardOutput.utf8))
+            sha: sha, ref: ref, base: base, definition: try String(contentsOf: url, encoding: .utf8)
         )
     }
 
@@ -296,20 +285,26 @@ enum RemoteOperationClient {
         else { request = .start(operation) }
         return try await exchange(request, with: host, at: endpoint, version: version) { accepted, exchange in
             guard case .operation(.accepted(let hostCheckout, let hostOutput)) = accepted else { throw unexpected(accepted) }
-            try await send(checkout.files(excludingResultsIn: outputDirectory), of: checkout, through: exchange)
+            try await send(checkout.files(excludingResultsIn: outputDirectory), of: checkout, workflow: workflow, through: exchange)
             var rewriter = PathRewriter([
                 (hostCheckout, checkout.root.path(percentEncoded: false)), (hostOutput, outputDirectory.path(percentEncoded: false)),
             ])
             var status: Int32?
+            var diagnostic = Data()
             // The results are unpacked beside their place, and appear there once they are whole.
             var results: (folder: URL, handle: FileHandle?)?
             do {
                 events: while true {
                     switch try await exchange.receive() {
                     case .operation(.output(let data)):
-                        try output(rewriter.rewrite(data))
+                        let bytes = rewriter.rewrite(data)
+                        if workflow?.output == .json {
+                            diagnostic = (diagnostic + bytes).suffix(2048)
+                        } else { try output(bytes) }
                     case .operation(.exited(let code)):
-                        try output(rewriter.finish())
+                        let remaining = rewriter.finish()
+                        if workflow?.output == .json { diagnostic = (diagnostic + remaining).suffix(2048) }
+                        else { try output(remaining) }
                         status = code
                     case .operation(.results(let data)):
                         if results == nil {
@@ -337,11 +332,18 @@ enum RemoteOperationClient {
                 throw error
             }
             guard let status else { throw HostLinkError.unexpectedReply }
+            var folders: [URL] = []
             if let results {
-                try await unpackResults(in: results.folder, into: outputDirectory, rewriter: rewriter, workflow: action == "workflow")
+                folders = try await unpackResults(in: results.folder, into: outputDirectory, rewriter: rewriter, workflow: workflow != nil)
             }
             // The host has nothing more to send, and removed what the operation left.
             try? await exchange.send(.operation(.received))
+            if let workflow {
+                guard let folder = folders.first, folders.count == 1 else {
+                    throw RemoteOperationFailure("No workflow results were received. " + String(decoding: diagnostic, as: UTF8.self))
+                }
+                try output(WorkflowSummary.report(in: folder, format: workflow.output, exitCode: status))
+            }
             return status
         }
     }
@@ -389,7 +391,14 @@ enum RemoteOperationClient {
         } catch {
             // The shell's status for a command that an interrupt ended.
             if Task.isCancelled { return 130 }
-            try? FileHandle.standardError.write(contentsOf: Data("Error: \(error.localizedDescription)\n".utf8))
+            if command.first == "workflow", command.last == "json" {
+                let message = String(error.localizedDescription.suffix(2048))
+                if let data = try? JSONEncoder().encode(["status": "error", "message": message]) {
+                    try? FileHandle.standardOutput.write(contentsOf: data + Data([10]))
+                }
+            } else {
+                try? FileHandle.standardError.write(contentsOf: Data("Error: \(error.localizedDescription)\n".utf8))
+            }
             return EXIT_FAILURE
         }
     }
@@ -403,8 +412,10 @@ enum RemoteOperationClient {
         while true {
             let workflow: WorkflowInvocation?
             if command.first == "workflow" {
-                guard command.count == 4 else { throw RemoteOperationFailure("Expected the workflow file, event and base branch.") }
-                workflow = try await checkout.workflow(file: command[1], event: command[2], base: command[3])
+                guard command.count == 5, let mode = WorkflowOutput(rawValue: command[4]) else { throw RemoteOperationFailure("Expected the workflow file, event and base branch.") }
+                var invocation = try await checkout.workflow(file: command[1], event: command[2], base: command[3])
+                invocation.output = mode
+                workflow = invocation
             } else {
                 workflow = nil
             }
@@ -442,17 +453,28 @@ enum RemoteOperationClient {
     }
 
     /// Sends the files as a tar archive, which keeps links and executable files as they are.
-    private static func send(_ files: [String], of checkout: Checkout, through exchange: HostLink.Exchange) async throws {
+    private static func send(_ files: [String], of checkout: Checkout, workflow: WorkflowInvocation?, through exchange: HostLink.Exchange) async throws {
         let list = FileManager.default.temporaryDirectory.appending(path: "xcode-runner-files-\(UUID().uuidString)")
         try Data(files.joined(separator: "\0").utf8).write(to: list)
         defer { try? FileManager.default.removeItem(at: list) }
+        var arguments = ["-cf", "-", "--no-mac-metadata", "--no-xattrs", "-n", "--null"]
+        let temporary = URL.temporaryDirectory.appending(path: "xcode-workflow-git-" + UUID().uuidString)
+        defer { if workflow != nil { try? FileManager.default.removeItem(at: temporary) } }
+        if let workflow {
+            guard let script = Bundle.module.url(forResource: "run-workflow", withExtension: "py") else {
+                throw RemoteOperationFailure("The workflow helper is missing.")
+            }
+            try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: false)
+            let snapshot = try await Subprocess.run(.path("/usr/bin/python3"), arguments: .init([
+                script.path, "snapshot-git", checkout.root.path, temporary.path, workflow.sha, workflow.ref, workflow.repository
+            ]), output: .discarded, error: .string(limit: 4096))
+            guard snapshot.terminationStatus.isSuccess else { throw RemoteOperationFailure(snapshot.standardError) }
+        }
+        arguments += ["-C", checkout.root.path(percentEncoded: false), "-T", list.path(percentEncoded: false)]
+        // bsdtar accepts a single -T list. Import the shallow repository's members from their own archive.
+        if workflow != nil { arguments.append("@" + temporary.appending(path: "metadata.tar").path) }
         let archive = try await Subprocess.run(
-            .path("/usr/bin/tar"),
-            // Extended attributes, such as the quarantine of a downloaded file, stay on this Mac.
-            arguments: [
-                "-cf", "-", "--no-mac-metadata", "--no-xattrs", "-n", "-C", checkout.root.path(percentEncoded: false),
-                "--null", "-T", list.path(percentEncoded: false),
-            ],
+            .path("/usr/bin/tar"), arguments: .init(arguments),
             input: .none, output: .sequence, error: .discarded
         ) { execution in
             for try await buffer in execution.standardOutput {
@@ -469,7 +491,7 @@ enum RemoteOperationClient {
 
     /// Unpacks the archive in `folder`, shows the host's folders in each log as this Mac's, and moves the
     /// operation's folder into `directory`.
-    private static func unpackResults(in folder: URL, into directory: URL, rewriter: PathRewriter, workflow: Bool) async throws {
+    private static func unpackResults(in folder: URL, into directory: URL, rewriter: PathRewriter, workflow: Bool) async throws -> [URL] {
         let archive = folder.appending(path: resultsArchiveName)
         // Only this directory receives archive entries. The archive and the rewritten log belong to the receiver.
         let payload = folder.appending(path: "payload")
@@ -488,6 +510,8 @@ enum RemoteOperationClient {
                     if name.hasSuffix(".xcresult") || (workflow && name == "artifacts") {
                         try RemoteOperation.requireResultType(.typeDirectory, at: item)
                         try validateResultDirectory(at: item)
+                    } else if workflow && name == "summary.json" {
+                        try RemoteOperation.requireResultType(.typeRegular, at: item)
                     } else if name == "xcodebuild.log" || (workflow && name == "workflow.log") {
                         try RemoteOperation.requireResultType(.typeRegular, at: item)
                         logs.append(item)
@@ -512,6 +536,7 @@ enum RemoteOperationClient {
             try FileManager.default.moveItem(at: job, to: directory.appending(component: job.lastPathComponent))
         }
         try FileManager.default.removeItem(at: folder)
+        return jobs.map { directory.appending(component: $0.lastPathComponent) }
     }
 
     private static func extractResults(from archive: URL, into payload: URL) async throws {
@@ -561,5 +586,58 @@ enum RemoteOperationClient {
     private static func unexpected(_ reply: HostLinkReply) -> HostLinkError {
         if case .refused(let message) = reply { return .refused(message) }
         return .unexpectedReply
+    }
+}
+
+/// The terminal gets a bounded result. The complete list of jobs and the transcript live beside the artifacts.
+struct WorkflowSummary: Codable {
+    struct Job: Codable {
+        var id: String?
+        let name: String
+        let status: String
+        var step: String?
+        var logLine: Int?
+        var message: String?
+    }
+    let status: String
+    let runner: String
+    var jobs: [Job]
+    var message: String?
+    var jobCount: Int?
+    var log: String?
+    var summary: String?
+    var artifacts: String?
+
+    static func report(in folder: URL, format: WorkflowOutput, exitCode: Int32) throws -> Data {
+        let file = folder.appending(path: "summary.json")
+        let log = folder.appending(path: "workflow.log")
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            throw RemoteOperationFailure("Workflow exited with status \(exitCode) before writing its summary. Log: \(log.path)")
+        }
+        var report = try JSONDecoder().decode(Self.self, from: Data(contentsOf: file))
+        let count = report.jobs.count
+        report.jobCount = count
+        let failures = report.jobs.filter { $0.status == "failure" }
+        report.jobs = Array((failures + report.jobs.filter { $0.status != "failure" }).prefix(12))
+        report.summary = file.path
+        report.log = log.path
+        let artifacts = folder.appending(path: "artifacts")
+        if FileManager.default.fileExists(atPath: artifacts.path) { report.artifacts = artifacts.path }
+        if format == .json {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            return try encoder.encode(report) + Data([10])
+        }
+        var lines = ["Workflow \(report.status) on \(report.runner) (\(count) jobs)."]
+        if let message = report.message { lines.append(message) }
+        for job in report.jobs {
+            lines.append("\(job.name): \(job.status)" + (job.step.map { " — " + $0 } ?? ""))
+            if let message = job.message { lines.append(message) }
+            if let line = job.logLine { lines.append("Details: " + log.path + ":\(line)") }
+        }
+        if count > report.jobs.count { lines.append("All jobs: " + file.path) }
+        lines.append("Log: " + log.path)
+        if let artifacts = report.artifacts { lines.append("Artifacts: " + artifacts) }
+        return Data((lines.joined(separator: "\n") + "\n").utf8)
     }
 }

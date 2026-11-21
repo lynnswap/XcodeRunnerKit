@@ -16,7 +16,7 @@ case "$(uname -m)" in
     *) echo "Unsupported workflow engine architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 root="$HOME/Library/Application Support/XcodeRunnerKit/WorkflowEngine"
-target="$root/act-0.2.98-xrk1"
+target="$root/act-0.2.98-xrk3"
 if [[ -x "$target/xrk-act" && -x "$target/node" ]]; then exit 0; fi
 mkdir -p "$root"
 staging=$(mktemp -d "$root/.install.XXXXXX")
@@ -37,12 +37,16 @@ tar -xzf source.tar.gz --strip-components 1 -C source
     # act's v4 artifact service needs the v7 upload client's protobuf and URL encodings.
     # The native runner also enforces job timeouts and every runs-on label.
     patch -s -p1 < "$script_dir/workflow-act.patch"
+    cp "$script_dir/workflow-act-context.go" pkg/runner/xcode_workflow.go
+    cp "$script_dir/workflow-act-step.go" pkg/container/xcode_workflow.go
     GOTOOLCHAIN=local GOCACHE="$staging/go-cache" GOMODCACHE="$staging/modules" \
         "$staging/go/bin/go" build -trimpath -ldflags '-s -w -X main.version=0.2.98' -o "$staging/engine/xrk-act" .
 )
 node=node-v24.22.3-darwin-$node_arch
 download node.tar.gz "https://nodejs.org/dist/v24.22.3/$node.tar.gz" "$node_hash"
 tar -xzf node.tar.gz -C engine --strip-components 2 "$node/bin/node"
+tar -xzOf node.tar.gz "$node/LICENSE" > engine/Node-LICENSE
+cp source/LICENSE engine/act-LICENSE
 # Concurrent installers publish only complete directories.
 python3 - "$target" <<'PY'
 from pathlib import Path

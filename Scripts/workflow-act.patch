@@ -36,7 +36,15 @@
 +}
 --- a/pkg/runner/run_context.go
 +++ b/pkg/runner/run_context.go
-@@ -736,0 +737,9 @@
+@@ -731,0 +732,3 @@
++		if err := rc.checkWorkflowRef(ctx); err != nil {
++			return err
++		}
+@@ -736,0 +740,13 @@
++			if os.Getenv("XCODE_RUNNER_PLAN") == "1" {
++				rc.result("success")
++				return nil
++			}
 +			if value := rc.Run.Job().TimeoutMinutes; value != "" {
 +				minutes, err := strconv.Atoi(rc.ExprEval.Interpolate(ctx, value))
 +				if err != nil || minutes <= 0 {
@@ -46,7 +54,10 @@
 +				ctx, cancel = context.WithTimeout(ctx, time.Duration(minutes)*time.Minute)
 +				defer cancel()
 +			}
-@@ -886,6 +895,7 @@
+@@ -878 +894 @@
+-		l.WithField("jobResult", "skipped").Debugf("Skipping job '%s' due to '%s'", job.Name, job.If.Value)
++		l.WithField("jobResult", "skipped").Infof("Skipping job '%s' due to '%s'", job.Name, job.If.Value)
+@@ -886,6 +902,7 @@
 -	img := rc.platformImage(ctx)
 -	if img == "" {
 -		for _, platformName := range rc.runsOnPlatformNames(ctx) {
@@ -69,3 +80,63 @@
 +			return err
 +		}
 +		config.ArtifactServerPort = port
+--- a/pkg/runner/step_run.go
++++ b/pkg/runner/step_run.go
+@@ -143 +143,4 @@
+-	sr.cmd, err = shellquote.Split(sr.cmdline)
++	sr.cmd, err = shellquote.Split(scCmd)
++	for i, arg := range sr.cmd {
++		sr.cmd[i] = strings.ReplaceAll(arg, "{0}", scriptPath)
++	}
+--- a/pkg/runner/runner.go
++++ b/pkg/runner/runner.go
+@@ -188,0 +189 @@
++				maxParallel = min(maxParallel, runner.config.GetConcurrentJobs())
+--- a/pkg/container/host_environment.go
++++ b/pkg/container/host_environment.go
+@@ -324,44 +324 @@
+-	var ppty *os.File
+-	var tty *os.File
+-	defer func() {
+-		if ppty != nil {
+-			ppty.Close()
+-		}
+-		if tty != nil {
+-			tty.Close()
+-		}
+-	}()
+-	if true /* allocate Terminal */ {
+-		var err error
+-		ppty, tty, err = setupPty(cmd, cmdline)
+-		if err != nil {
+-			common.Logger(ctx).Debugf("Failed to setup Pty %v\n", err.Error())
+-		}
+-	}
+-	writer := &ptyWriter{Out: e.StdOut}
+-	logctx, finishLog := context.WithCancel(context.Background())
+-	if ppty != nil {
+-		go copyPtyOutput(writer, ppty, finishLog)
+-	} else {
+-		finishLog()
+-	}
+-	if ppty != nil {
+-		go writeKeepAlive(ppty)
+-	}
+-	err = cmd.Run()
+-	if err != nil {
+-		return err
+-	}
+-	if tty != nil {
+-		writer.AutoStop = true
+-		if _, err := tty.Write([]byte("\x04")); err != nil {
+-			common.Logger(ctx).Debug("Failed to write EOT")
+-		}
+-	}
+-	<-logctx.Done()
+-
+-	if ppty != nil {
+-		ppty.Close()
+-		ppty = nil
+-	}
+-	return err
++	return runNativeStep(ctx, cmd)

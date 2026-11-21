@@ -358,7 +358,7 @@ cancels a pending request or stops the running operation.
   directory, including uncommitted edits to tracked files and untracked files
   that Git does not ignore. The same rules apply inside submodules. The CLI
   reads the working tree when a runner accepts the job, so edits made while
-  waiting are included. Each transfer omits the Git history. The host runs the
+  waiting are included. Build and test transfers omit Git history. The host runs the
   operation in its copy of the current directory, so name the workspace,
   project, or package relative to that directory.
 - **Host settings.** The operation uses the host's storage, its saved Xcode, and
@@ -607,12 +607,15 @@ For a pull request, `--base` selects the target branch and defaults to origin's 
 The host reserves one free slot on a Mac with the engine installed. Its jobs run one at a time on that Mac
 using the same copy of the working tree, including tracked edits and unignored new files.
 The local Actions service supplies the checkout, evaluates job dependencies and runs the workflow steps.
-It uses the repository name and ref from the dashboard. Each invocation has its own service, runner
-and artifacts. GitHub's cross-run concurrency groups and repository secrets are unavailable.
+It evaluates the workflow on candidate Macs to match job conditions, matrix labels, and the selected ref
+before sending the checkout. Jobs receive a shallow Git repository with the submitted HEAD and index.
+Each invocation has its own runner and artifact store. GitHub's cross-run concurrency groups and repository secrets are unavailable.
 
 A native job can select the Mac by its configured runner labels, `macos-latest`, or the installed
 Xcode major version (for example, `xcode-27`). The workflow inherits the host's selected Xcode.
-The command streams job output and returns the workflow exit status. It copies `workflow.log`
+The CLI reports job outcomes and the failed step, and returns the workflow exit status. Use `--json`
+for a compact result with local paths and the log line for each failed step. Both formats show up to twelve jobs, with failures first.
+`summary.json` contains every job, and `--verbose` streams the full transcript. The runner copies `workflow.log`
 and uploaded artifacts to `XcodeRunnerOutput/<run ID>/` on the dashboard. Use `--output-directory`
 to choose another folder. An artifact uploaded as a ZIP is kept in its original form.
 

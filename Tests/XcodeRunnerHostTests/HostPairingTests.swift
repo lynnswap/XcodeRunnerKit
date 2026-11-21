@@ -927,6 +927,22 @@ struct HostPairingTests {
         #expect(Set(files) == ["new.swift", "XcodeRunnerOutput/" + job.lastPathComponent + "/tracked.txt"])
     }
 
+    @Test func compactWorkflowOutputKeepsTheFailedStepInALargeMatrix() throws {
+        let folder = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let successes = (1...20).map { WorkflowSummary.Job(name: "Build \($0)", status: "success") }
+        let failure = WorkflowSummary.Job(name: "Test", status: "failure", step: "Run tests", logLine: 50)
+        let full = WorkflowSummary(status: "failed", runner: "Runner", jobs: successes + [failure])
+        try JSONEncoder().encode(full).write(to: folder.appending(path: "summary.json"))
+        let json = try WorkflowSummary.report(in: folder, format: .json, exitCode: 1)
+        let report = try JSONDecoder().decode(WorkflowSummary.self, from: json)
+        #expect(report.jobCount == 21)
+        #expect(report.jobs.count == 12)
+        #expect(report.jobs.first?.step == "Run tests")
+        #expect(report.jobs.first?.logLine == 50)
+    }
+
     @Test func workflowUsesTheDashboardRefAndRepositoryFromASubdirectory() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         let directory = root.appending(path: "Sources")
@@ -941,7 +957,7 @@ struct HostPairingTests {
         #expect(workflow.file == "ci.yml")
         #expect(workflow.repository == "owner/project")
         #expect(workflow.ref == "refs/heads/feature")
-        #expect(workflow.requiredLabels == ["fast"])
+        #expect(workflow.definition.contains("runs-on: fast"))
     }
 
     @Test func aDashboardRunsABuildOfItsCheckoutOnAHost() async throws {
