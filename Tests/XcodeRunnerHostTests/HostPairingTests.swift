@@ -1092,6 +1092,13 @@ struct HostPairingTests {
         }
         #expect(!FileManager.default.fileExists(atPath: storage.directory.path(percentEncoded: false)))
 
+        try FileManager.default.createDirectory(at: storage.directory, withIntermediateDirectories: true)
+        _ = try host.installation.initializeStorage()
+        try await host.pool.withSlot {
+            let recovered = await host.readRunnerSlots()
+            #expect(recovered == RunnerSlots(state: "busy", limit: 1))
+            #expect(await MainActor.run { HostSettingsReport(host).runnerSlots } == recovered)
+        }
         await host.management.shutDown()
     }
 

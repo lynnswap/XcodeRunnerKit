@@ -1038,7 +1038,7 @@ final class PairedMacs: MacList {
                     let slots: RunnerSlots
                     do {
                         guard let endpoint else { throw HostLinkError.unreachable(mac.name) }
-                        guard case .runnerSlots(let report) = try await self.send(.runnerSlots, to: mac, at: endpoint) else {
+                        guard case .runnerSlots(let report) = try await self.send(.runnerSlots, to: mac, at: endpoint, timeout: HostLinkRequest.runnerSlots.replyTimeout) else {
                             throw HostLinkError.unexpectedReply
                         }
                         slots = report
@@ -1111,7 +1111,8 @@ extension HostLinkRequest {
             case .install: PairedMacs.changeTimeout
             default: HostLink.requestTimeout
             }
-        case .operation, .unpair, .runnerSlots:
+        case .runnerSlots: HostLink.requestTimeout * 2
+        case .operation, .unpair:
             HostLink.requestTimeout
         }
     }

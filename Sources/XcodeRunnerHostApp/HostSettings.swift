@@ -702,9 +702,12 @@ final class HostSettingsModel: HostSettingsDisplay {
     }
 
     private var runnerStorageError: String?
+    private var runnerReadError: String?
+    @ObservationIgnored private var poolRead: Task<Void, Never>?
+    @ObservationIgnored private var poolReaders: [UUID: AsyncStream<Void>.Continuation] = [:]
 
     var runnerSlots: RunnerSlots {
-        RunnerSlots(self, pool: poolStatus, poolError: poolError, storageError: runnerStorageError)
+        RunnerSlots(self, pool: poolStatus, poolError: runnerReadError ?? poolError, storageError: runnerStorageError)
     }
 
     private func readRunnerStorageError() async -> String? {
@@ -715,34 +718,46 @@ final class HostSettingsModel: HostSettingsDisplay {
         } catch { return error.localizedDescription }
     }
 
-    /// Read live capacity for an explicit inventory request without holding up ordinary settings reads.
+    /// A live request can stop waiting even if the filesystem has not returned from a volume check.
     func readRunnerSlots() async -> RunnerSlots {
-        runnerStorageError = await readRunnerStorageError()
-        if runnerStorageError != nil { return runnerSlots }
-        let pool = pool
         do {
-            let status = try await HostLink.within(HostLink.requestTimeout / 2) { try await pool.status() }
-            return RunnerSlots(self, pool: status, poolError: nil, storageError: runnerStorageError)
+            try await HostLink.within(HostLink.requestTimeout + HostLink.requestTimeout / 2) {
+                await self.refreshPoolUsage()
+            }
         } catch {
-            return RunnerSlots(self, pool: nil, poolError: error.localizedDescription, storageError: runnerStorageError)
+            runnerReadError = error.localizedDescription
         }
+        return runnerSlots
     }
 
+    /// The monitor and inventory readers share one sample. Cancelling a reader releases its wait
+    /// without starting another filesystem operation on an unresponsive volume.
     private func refreshPoolUsage() async {
-        runnerStorageError = await readRunnerStorageError()
-        do {
-            let status = try await pool.status()
-            poolStatus = status
-            poolError = nil
-            hasLoadedPoolStatus = true
-            poolDraft.update(from: status?.configuration)
-        } catch is CancellationError {
-            return
-        } catch {
-            poolStatus = nil
-            poolError = "Could not read the execution pool: \(error.localizedDescription)"
-            hasLoadedPoolStatus = true
+        let id = UUID()
+        let (events, continuation) = AsyncStream<Void>.makeStream()
+        poolReaders[id] = continuation
+        defer { poolReaders[id] = nil }
+        if poolRead == nil {
+            poolRead = Task {
+                let storageError = await readRunnerStorageError()
+                if let storageError { runnerStorageError = storageError }
+                do {
+                    let status = try await pool.status()
+                    poolStatus = status
+                    poolError = nil
+                    poolDraft.update(from: status?.configuration)
+                } catch {
+                    poolStatus = nil
+                    poolError = "Could not read the execution pool: \(error.localizedDescription)"
+                }
+                runnerStorageError = storageError
+                runnerReadError = nil
+                hasLoadedPoolStatus = true
+                poolRead = nil
+                for reader in poolReaders.values { reader.finish() }
+            }
         }
+        for await _ in events {}
     }
 
     private func refreshStorageSelection() {
