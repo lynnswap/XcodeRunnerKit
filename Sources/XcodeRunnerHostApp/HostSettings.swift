@@ -700,11 +700,12 @@ final class HostSettingsModel: HostSettingsDisplay {
         refreshBuildService()
         do {
             let status: HostExecutionPool.Status?
+            let observedSample = slotSampleID
             do {
                 status = try await pool.status(waitForLock: false)
             } catch let error as POSIXError where error.code == .EWOULDBLOCK {
                 // Invalidate a known slot count immediately, keeping any reported storage failure until it is checked.
-                if sampledSlots.state == "available" || sampledSlots.state == "busy" {
+                if observedSample == slotSampleID, sampledSlots.state == "available" || sampledSlots.state == "busy" {
                     sampledSlots = .contended
                 }
                 startRunnerSlotSample()
@@ -727,6 +728,7 @@ final class HostSettingsModel: HostSettingsDisplay {
     /// Inventory samples use a nonblocking pool read. Settings saves and runner registration use
     /// the waiting read above and never consume a partial or contended inventory sample.
     private var sampledSlots = RunnerSlots(state: "unknown", available: nil, reason: "No runner slot report.")
+    @ObservationIgnored private var slotSampleID = UUID()
     @ObservationIgnored private var slotRead: Task<Void, Never>?
     @ObservationIgnored private var slotReaders: [UUID: AsyncStream<RunnerSlots>.Continuation] = [:]
 
@@ -770,6 +772,7 @@ final class HostSettingsModel: HostSettingsDisplay {
                 let reason = (error as? POSIXError)?.code == .EWOULDBLOCK ? RunnerSlots.contended.reason : error.localizedDescription
                 sampledSlots = RunnerSlots(pool: nil, poolError: reason, storageError: storageError)
             }
+            slotSampleID = UUID()
             slotRead = nil
             for reader in slotReaders.values {
                 reader.yield(sampledSlots)
