@@ -107,6 +107,19 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
     // macOS uses notRegistered both on first launch and after the person removes the login item.
     private static let didSetUpLoginItem = "didSetUpDashboardLoginItem"
 
+    /// A Mac promoted to a host starts from its LaunchAgent. An old dashboard login item can still open this copy.
+    @discardableResult
+    static func retireLoginItemForHost() -> Bool {
+        guard UserDefaults.standard.bool(forKey: didSetUpLoginItem) else { return false }
+        let service = SMAppService.mainApp
+        let status = service.status
+        guard status == .enabled || status == .requiresApproval else { return false }
+        do { try service.unregister() } catch {
+            NSLog("Could not remove the dashboard login item: %@", error.localizedDescription)
+        }
+        return status == .enabled
+    }
+
     private func setUpLoginItem() {
         guard !UserDefaults.standard.bool(forKey: Self.didSetUpLoginItem) else { return }
         do {
@@ -189,10 +202,9 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
             item.representedObject = host.id
         }
         if hosts.macs.isEmpty {
-            statusMenu.addItem(withTitle: "No Macs", action: nil, keyEquivalent: "")
+            statusMenu.addItem(withTitle: "Add Mac…", action: #selector(showMacOnDashboard(_:)), keyEquivalent: "").target = self
         }
         statusMenu.addItem(.separator())
-        statusMenu.addItem(withTitle: "Open Dashboard", action: #selector(showDashboard(_:)), keyEquivalent: "").target = self
         statusMenu.addItem(withTitle: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",").target = self
         statusMenu.addItem(.separator())
         statusMenu.addItem(
@@ -201,7 +213,7 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         showHostStates()
     }
 
-    /// Shows each listed host's state and jobs on its item, as its Settings pane shows them.
+    /// Shows each listed host's state and jobs on its item.
     private func showHostStates() {
         for item in statusMenu.items {
             guard let host = item.representedObject as? HostPairing.ID else { continue }
@@ -217,10 +229,6 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
                     .withSymbolConfiguration(.init(paletteColors: [connection.tint]))
             }
         }
-    }
-
-    @objc private func showDashboard(_ sender: Any?) {
-        showWindow(nil)
     }
 
     /// Opens the window on the settings of the host that the person chose in the menu bar item's menu.

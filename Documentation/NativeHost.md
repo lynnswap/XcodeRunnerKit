@@ -164,9 +164,9 @@ Devices in use finish before they are removed, so lowering the limit can
 temporarily leave more devices than the new limit. Runner registrations and
 GitHub's in-progress job count can still be higher.
 
-**Settings** shows the host status, the running and waiting Xcode jobs, and each
-repository's online and busy runner counts with any error. This Mac's pane under
-**Runners** counts its runner services and names the ones that need attention. The host retries synchronization every
+**Settings** shows the selected repositories and any errors applying that selection.
+Choose a Mac under **Runners** for its status, running and waiting Xcode jobs,
+runner service counts, and services that need attention. The host retries synchronization every
 five minutes while signed in. Pool and repository settings are saved separately; editing one does not
 apply pending changes in the other. **Disconnect** removes local login tokens and
 stops registration management; it leaves existing runner services running.
@@ -240,8 +240,8 @@ The managing Mac also registers runners on each paired Mac for the repositories
 selected in its **Settings**, up to that Mac's job limit, and removes them
 when you deselect a repository. It sends the paired Mac only short-lived
 registration tokens, never its GitHub sign-in, and removes registrations from
-GitHub itself. **Settings** on the managing Mac counts the runners on all its
-Macs and names the Mac in each of its errors. A Mac that does not answer keeps
+GitHub itself. **Settings** on the managing Mac shows registration errors for the selected
+repositories and names the Mac in each error. A Mac that does not answer keeps
 its runners, and a deselected repository stays listed until that Mac answers
 and its runners are removed. A newly paired Mac gets its runners at the next
 synchronization, or when you change its job limit in its pane. While a Mac is
@@ -260,7 +260,7 @@ The dashboard opens at login by default after its first launch. To change this
 for this Mac, choose **XcodeHomeRunner → Settings…** and use **Open dashboard at login**.
 The dashboard stays in the menu bar after its window closes. The menu of its
 hammer icon lists each host with its state and jobs; choose a host to open its
-**Settings**, or **Open Dashboard** for the window. Choose **Quit
+**Settings** pane. With no paired hosts, choose **Add Mac…**. Choose **Quit
 XcodeHomeRunner** there to end it.
 
 A Mac with a host shows other hosts too, in its own window: choose **Show a
@@ -279,7 +279,7 @@ lists that host's settings and runners after the Mac's own.
 
 Each host has the panes of its own window: **Settings**, and under **Runners**
 the host by its name and the Macs that it manages. While the host answers, they
-show its status, GitHub sign-in, repositories and runner counts, runner services, Xcode job counts,
+show GitHub sign-in and repository selection in **Settings**. Each runner’s pane shows its status, runner services, Xcode job counts,
 job limit, Simulator retention, and storage folder. **Save** changes them with the same
 checks as the host's own window. After a changed job limit, the host registers
 its runners itself; for a host that another Mac manages, that Mac does at its
