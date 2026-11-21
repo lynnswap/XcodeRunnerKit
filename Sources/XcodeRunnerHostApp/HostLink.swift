@@ -64,7 +64,7 @@ enum GitHubRequest: Codable, Sendable {
     /// Starts the device flow on the host. A later read carries the code for the person to enter on GitHub's page.
     case signIn
     case cancelSignIn
-    case signOut
+    case signOut(confirmedLogin: String? = nil)
     case reloadRepositories
     /// Saves the selection. The host then registers and removes runners, which later reads report.
     case applySelection(Set<Int>)

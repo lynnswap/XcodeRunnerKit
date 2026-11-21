@@ -459,7 +459,7 @@ struct HostControl: AsyncParsableCommand {
 
             @OptionGroup var host: HostOption
 
-            func run() async throws { try await HostControl.change(.signOut, on: host.host) }
+            func run() async throws { try await HostControl.change(.signOut(), on: host.host) }
         }
 
         struct Reload: AsyncParsableCommand {

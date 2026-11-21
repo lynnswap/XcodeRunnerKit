@@ -121,10 +121,10 @@ final class OverviewModel: PaneSaving {
         }
     }
 
-    func signOut() {
+    func signOut(confirmedLogin: String) {
         switch source {
-        case .thisMac(let settings): Task { await settings.github.signOut() }
-        case .host(let hosts, let host): Task { await hosts.signOut(of: host.id) }
+        case .thisMac(let settings): Task { await settings.github.signOut(confirmedLogin: confirmedLogin) }
+        case .host(let hosts, let host): Task { await hosts.signOut(of: host.id, confirmedLogin: confirmedLogin) }
         }
     }
 

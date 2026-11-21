@@ -110,7 +110,8 @@ actor GitHubAuthentication {
         return token
     }
 
-    func signOut() throws {
+    func signOut(confirmedLogin: String? = nil) throws {
+        if let confirmedLogin, try account()?.login != confirmedLogin { throw GitHubError.authenticationChanged }
         generation += 1
         refresh?.task.cancel()
         refresh = nil
