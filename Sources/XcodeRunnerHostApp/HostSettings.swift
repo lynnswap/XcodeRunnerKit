@@ -701,37 +701,34 @@ final class HostSettingsModel: HostSettingsDisplay {
         await refreshPoolUsage()
     }
 
-    private(set) var runnerStorageError: String?
+    private var runnerStorageError: String?
 
-    var runnerSlots: RunnerSlots { RunnerSlots(self, pool: poolStatus, poolError: poolError) }
+    var runnerSlots: RunnerSlots {
+        RunnerSlots(self, pool: poolStatus, poolError: poolError, storageError: runnerStorageError)
+    }
 
-    private func checkRunnerStorage() {
-        guard let storage = operations.storage else {
-            runnerStorageError = "Storage unavailable."
-            return
-        }
+    private func readRunnerStorageError() async -> String? {
+        guard let storage = operations.storage else { return "Storage unavailable." }
         do {
-            try RemoteOperations.requireStorage(storage)
-            runnerStorageError = nil
-        } catch {
-            runnerStorageError = error.localizedDescription
-        }
+            try await RemoteOperations.requireStorage(storage)
+            return nil
+        } catch { return error.localizedDescription }
     }
 
     /// Read live capacity for an explicit inventory request without holding up ordinary settings reads.
     func readRunnerSlots() async -> RunnerSlots {
-        checkRunnerStorage()
+        async let storageError = readRunnerStorageError()
         let pool = pool
         do {
             let status = try await HostLink.within(HostLink.requestTimeout / 2) { try await pool.status() }
-            return RunnerSlots(self, pool: status, poolError: nil)
+            return await RunnerSlots(self, pool: status, poolError: nil, storageError: storageError)
         } catch {
-            return RunnerSlots(self, pool: nil, poolError: error.localizedDescription)
+            return await RunnerSlots(self, pool: nil, poolError: error.localizedDescription, storageError: storageError)
         }
     }
 
     private func refreshPoolUsage() async {
-        checkRunnerStorage()
+        runnerStorageError = await readRunnerStorageError()
         do {
             let status = try await pool.status()
             poolStatus = status

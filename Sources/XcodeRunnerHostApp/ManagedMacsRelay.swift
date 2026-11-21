@@ -42,12 +42,12 @@ struct RunnerSlots: Codable, Equatable, Sendable {
         self.reason = reason
     }
 
-    @MainActor init(_ host: HostSettingsModel, pool: HostExecutionPool.Status?, poolError: String?) {
+    @MainActor init(_ host: HostSettingsModel, pool: HostExecutionPool.Status?, poolError: String?, storageError: String?) {
         let limit = pool?.configuration.maximumConcurrentJobs
         if host.isPaused {
             self.init(state: "paused", limit: limit)
-        } else if host.hostState != .running || host.activeStorageDirectory == nil || host.runnerStorageError != nil {
-            self.init(state: "unavailable", limit: limit, reason: host.runnerStorageError ?? host.storageError ?? host.hostState.rawValue)
+        } else if host.hostState != .running || host.activeStorageDirectory == nil || storageError != nil {
+            self.init(state: "unavailable", limit: limit, reason: storageError ?? host.storageError ?? host.hostState.rawValue)
         } else if let pool, let limit, poolError == nil {
             let free = pool.waitingJobCount == 0 ? max(0, limit - pool.activeJobCount) : 0
             self.init(state: free > 0 ? "available" : "busy", available: free, limit: limit)
