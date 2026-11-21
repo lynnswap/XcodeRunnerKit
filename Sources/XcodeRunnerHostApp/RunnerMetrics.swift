@@ -13,7 +13,14 @@ struct RunnerMetricSample: Codable, Equatable, Sendable {
         let pressure: Int32
     }
 
+    struct SampleClock: Codable, Equatable, Sendable {
+        let session: UUID
+        let elapsed: TimeInterval
+    }
+
     let time: Date
+    let clock: SampleClock?
+    var plotTime: TimeInterval { clock?.elapsed ?? time.timeIntervalSinceReferenceDate }
     let cpu: CPU?
     let memory: Memory?
 }
@@ -23,13 +30,18 @@ struct RunnerMetricHistory {
     private(set) var samples: [RunnerMetricSample] = []
 
     mutating func append(_ sample: RunnerMetricSample) {
-        if let last = samples.last, sample.time <= last.time { return }
-        samples.removeAll { sample.time.timeIntervalSince($0.time) > Self.duration }
+        if let last = samples.last {
+            if last.clock?.session != sample.clock?.session { samples.removeAll() }
+            else if sample.plotTime <= last.plotTime { return }
+        }
+        samples.removeAll { sample.plotTime - $0.plotTime > Self.duration }
         samples.append(sample)
     }
 }
 
 struct RunnerMetricSampler {
+    private let session = UUID()
+    private let start = ContinuousClock.now
     private var previousCPU: host_cpu_load_info_data_t?
 
     mutating func sample() -> RunnerMetricSample {
@@ -63,7 +75,9 @@ struct RunnerMetricSampler {
            let pressure = Self.kernelValue("kern.memorystatus_vm_pressure_level") {
             memory = .init(load: Double(100 - free) / 100, pressure: pressure)
         }
-        return RunnerMetricSample(time: .now, cpu: cpu, memory: memory)
+        let elapsed = start.duration(to: .now).components
+        let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+        return RunnerMetricSample(time: .now, clock: .init(session: session, elapsed: seconds), cpu: cpu, memory: memory)
     }
 
     private static func kernelValue(_ name: String) -> Int32? {

@@ -47,8 +47,8 @@ private struct ResourceGraph: View {
             Divider().padding(.horizontal, 8)
             Canvas { context, size in
                 guard let last = samples.last else { return }
-                func x(_ time: Date) -> CGFloat {
-                    size.width * (1 + time.timeIntervalSince(last.time) / RunnerMetricHistory.duration)
+                func x(_ time: TimeInterval) -> CGFloat {
+                    size.width * (1 + (time - last.plotTime) / RunnerMetricHistory.duration)
                 }
                 func band(from left: CGPoint, to right: CGPoint, bottomLeft: CGFloat, bottomRight: CGFloat, color: Color) {
                     var line = Path()
@@ -58,15 +58,15 @@ private struct ResourceGraph: View {
                     area.addLine(to: CGPoint(x: right.x, y: bottomRight))
                     area.addLine(to: CGPoint(x: left.x, y: bottomLeft))
                     area.closeSubpath()
-                    context.fill(area, with: .color(color.opacity(0.48)))
+                    context.fill(area, with: .color(color.opacity(0.48)), style: FillStyle(antialiased: false))
                     context.stroke(line, with: .color(color), lineWidth: 1)
                 }
                 for (index, sample) in samples.enumerated() {
                     let previous = index > 0 ? samples[index - 1] : sample
                     // After sleep or a disconnected read, leave the unobserved interval empty.
-                    let left = sample.time.timeIntervalSince(previous.time) <= 15 ? previous : sample
-                    let end = x(sample.time)
-                    let start = min(x(left.time), end - 1)
+                    let left = sample.plotTime - previous.plotTime <= 15 ? previous : sample
+                    let end = x(sample.plotTime)
+                    let start = min(x(left.plotTime), end - 1)
                     switch kind {
                     case .cpu:
                         guard let cpu = sample.cpu else { continue }

@@ -167,5 +167,6 @@ final class ThisMacSetup {
             let reason = result.standardError.trimmingCharacters(in: .whitespacesAndNewlines)
             throw HostSettingsError("The installer failed\(reason.isEmpty ? "." : ": \(reason)")")
         }
+        Dashboard.retireLoginItemForHost()
     }
 }

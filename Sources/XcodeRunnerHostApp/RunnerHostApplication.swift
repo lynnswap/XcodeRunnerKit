@@ -147,8 +147,10 @@ public enum RunnerHostApplication {
                 }
                 // This Mac's host owns its runners, so opening the app starts it, as it did before dashboards. If
                 // launchd cannot start its service, the host runs in this process without the settings service.
-                let hadDashboardLoginItem = options.homeDirectory == nil && Dashboard.retireLoginItemForHost()
-                if startInstalledHost(label) || hadDashboardLoginItem { return }
+                if startInstalledHost(label) {
+                    if options.homeDirectory == nil { Dashboard.retireLoginItemForHost() }
+                    return
+                }
             }
             if options.settingsService, options.homeDirectory == nil { Dashboard.retireLoginItemForHost() }
             let host = try RunnerHost(installation: installation, settingsService: options.settingsService)

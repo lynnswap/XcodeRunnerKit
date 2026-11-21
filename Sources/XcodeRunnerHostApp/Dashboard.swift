@@ -108,16 +108,14 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
     private static let didSetUpLoginItem = "didSetUpDashboardLoginItem"
 
     /// A Mac promoted to a host starts from its LaunchAgent. An old dashboard login item can still open this copy.
-    @discardableResult
-    static func retireLoginItemForHost() -> Bool {
-        guard UserDefaults.standard.bool(forKey: didSetUpLoginItem) else { return false }
+    static func retireLoginItemForHost() {
+        guard UserDefaults.standard.bool(forKey: didSetUpLoginItem) else { return }
         let service = SMAppService.mainApp
         let status = service.status
-        guard status == .enabled || status == .requiresApproval else { return false }
+        guard status == .enabled || status == .requiresApproval else { return }
         do { try service.unregister() } catch {
             NSLog("Could not remove the dashboard login item: %@", error.localizedDescription)
         }
-        return status == .enabled
     }
 
     private func setUpLoginItem() {
