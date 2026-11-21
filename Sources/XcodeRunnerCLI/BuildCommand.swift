@@ -104,6 +104,8 @@ struct BuildOptions: ParsableArguments {
         let cache: CompilationCache?
         if let compilationCache {
             cache = CompilationCache(directory: Self.url(compilationCache))
+        } else if let host, host.isWorkflow {
+            cache = CompilationCache(directory: host.storage.compilationCacheDirectory.appending(path: "remote"))
         } else if let host {
             guard let value = ProcessInfo.processInfo.environment["GITHUB_REPOSITORY_ID"],
                   let identifier = Int(value), identifier > 0 else {

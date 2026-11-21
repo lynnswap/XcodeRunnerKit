@@ -51,7 +51,7 @@ final class RemoteOperations {
     ///   - next: Waits for the dashboard's next message.
     ///   - reply: Sends an event or a refusal to the dashboard.
     func run(
-        _ operation: RemoteOperation, for dashboard: HostPairing.ID, slot: Int32? = nil,
+        _ operation: RemoteOperation, for dashboard: HostPairing.ID, slot: Int32? = nil, labels: [String] = [],
         next: @escaping @Sendable () async throws -> HostLinkRequest,
         reply: @escaping @Sendable (HostLinkReply) async throws -> Void
     ) async throws {
@@ -80,10 +80,25 @@ final class RemoteOperations {
         }
         let checkout = folder.appending(path: operation.name)
         let output = storage.buildDirectory.appending(path: "Remote/\(UUID().uuidString)")
-        let tool = tool
-        let environment = installation.environment(for: storage)
-        // Operations from every dashboard share one cache, apart from the repositories that run jobs from GitHub.
-        let cache = storage.compilationCacheDirectory.appending(path: "remote")
+        let executable: URL
+        let arguments: [String]
+        var hostEnvironment = installation.environment(for: storage)
+        if let workflow = operation.workflow {
+            guard slot != nil, let script = Bundle.module.url(forResource: "run-workflow", withExtension: "py") else {
+                throw HostAvailability.unavailable("This host could not start the workflow.")
+            }
+            executable = URL(filePath: "/usr/bin/python3")
+            arguments = [script.path, workflowEngine.path, checkout.path, output.path, workflow.file,
+                         workflow.event, workflow.repository, workflow.sha, workflow.ref, workflow.base] + labels
+            if let developer = try installation.developerDirectory() { hostEnvironment["DEVELOPER_DIR"] = developer.path }
+        } else {
+            executable = tool
+            let cache = storage.compilationCacheDirectory.appending(path: "remote")
+            arguments = [operation.action, "--output-directory=\(output.path(percentEncoded: false))",
+                         "--compilation-cache=\(cache.path(percentEncoded: false))"]
+                + (slot.map { ["--reserved-slot=\($0)"] } ?? []) + operation.arguments
+        }
+        let environment = hostEnvironment
         // The dashboard sends the whole checkout once this Mac accepts, so what can refuse the operation comes first.
         do {
             try await Self.requireStorage(storage)
@@ -119,7 +134,8 @@ final class RemoteOperations {
                 do {
                     if slot != nil { try await reply(.operation(.output(Data("Running on \(HostPane.macName)\n".utf8)))) }
                     try await Self.execute(
-                        operation, in: checkout, output: output, tool: tool, cache: cache, environment: environment, slot: slot, reply: reply
+                        operation, in: checkout, output: output, tool: executable, arguments: arguments, environment: environment,
+                        slot: operation.workflow == nil ? slot : nil, reply: reply
                     )
                     return .ran(.success(()))
                 } catch {
@@ -214,9 +230,35 @@ final class RemoteOperations {
         }
     }
 
+    private var workflowEngine: URL { installation.hostRoot.appending(path: "WorkflowEngine/act-0.2.98-xrk1/xrk-act") }
+
+    func labels(for workflow: WorkflowInvocation) async throws -> [String] {
+        guard FileManager.default.isExecutableFile(atPath: workflowEngine.path) else {
+            throw HostAvailability.unavailable("Install the workflow engine on this Mac with Scripts/install-workflow-engine.sh.")
+        }
+        var labels = try installation.runnerLabels() + ["macOS", "macos-latest", "self-hosted", "xcode-runnerkit"]
+        #if arch(arm64)
+        labels.append("arm64")
+        #else
+        labels.append("x64")
+        #endif
+        let environment: Subprocess.Environment = try installation.developerDirectory().map {
+            .inherit.updating(["DEVELOPER_DIR": $0.path])
+        } ?? .inherit
+        let xcode = try await Subprocess.run(.path("/usr/bin/xcodebuild"), arguments: ["-version"], environment: environment,
+                                             output: .string(limit: 4096), error: .string(limit: 4096))
+        guard xcode.terminationStatus.isSuccess else { throw RemoteOperationFailure(xcode.standardError) }
+        if let version = xcode.standardOutput.split(whereSeparator: { $0.isWhitespace }).dropFirst().first,
+           let major = version.split(separator: ".").first { labels.append("xcode-" + major) }
+        let available = Set(labels.map { $0.lowercased() })
+        let missing = workflow.requiredLabels.filter { !available.contains($0.lowercased()) }
+        guard missing.isEmpty else { throw HostAvailability.unavailable("Missing workflow runner labels: " + missing.joined(separator: ", ")) }
+        return labels
+    }
+
     /// Runs the command in the checkout and sends its output, its exit status, and its log and result bundles.
     @concurrent private nonisolated static func execute(
-        _ operation: RemoteOperation, in checkout: URL, output: URL, tool: URL, cache: URL, environment: [String: String], slot: Int32?,
+        _ operation: RemoteOperation, in checkout: URL, output: URL, tool: URL, arguments: [String], environment: [String: String], slot: Int32?,
         reply: @Sendable (HostLinkReply) async throws -> Void
     ) async throws {
         var options = PlatformOptions()
@@ -230,10 +272,6 @@ final class RemoteOperations {
                 guard code == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(code)) }
             }
         }
-        let arguments = [
-            operation.action, "--output-directory=\(output.path(percentEncoded: false))",
-            "--compilation-cache=\(cache.path(percentEncoded: false))",
-        ] + (slot.map { ["--reserved-slot=\($0)"] } ?? []) + operation.arguments
         let directory = operation.directory.isEmpty ? checkout : checkout.appending(path: operation.directory)
         // The archive has no folders without files, and the dashboard's current directory can be one.
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -268,8 +306,8 @@ final class RemoteOperations {
             try RemoteOperation.requireResultType(.typeDirectory, at: directory)
             for name in try FileManager.default.contentsOfDirectory(atPath: directory.path(percentEncoded: false)) {
                 let type: FileAttributeType
-                if name == "xcodebuild.log" { type = .typeRegular }
-                else if name.hasSuffix(".xcresult") { type = .typeDirectory }
+                if name == "xcodebuild.log" || (operation.workflow != nil && name == "workflow.log") { type = .typeRegular }
+                else if name.hasSuffix(".xcresult") || (operation.workflow != nil && name == "artifacts") { type = .typeDirectory }
                 else { continue }
                 try RemoteOperation.requireResultType(type, at: directory.appending(component: name, directoryHint: .notDirectory))
                 results.append("./" + job + "/" + name)
@@ -341,12 +379,18 @@ extension HostSettingsModel {
         var busy = false
         var needsDownload = false
         var reasons: [String] = []
+        var labels: [String] = []
         let reservation: HostExecutionPool.Reservation?
         do {
             guard !isPaused else { throw RemoteOperationFailure("Paused.") }
             guard let storage = operations.storage else { throw RemoteOperationFailure("Storage unavailable.") }
             try await RemoteOperations.requireStorage(storage)
-            try await operation.checkDestination(savedXcode: installation.developerDirectory(), allowRuntimeDownload: allowRuntimeDownload)
+            if let workflow = operation.workflow {
+                labels = try await operations.labels(for: workflow)
+            } else {
+                labels = []
+                try await operation.checkDestination(savedXcode: installation.developerDirectory(), allowRuntimeDownload: allowRuntimeDownload)
+            }
             reservation = try await pool.reserveAvailableSlot()
             busy = reservation == nil
         } catch HostAvailability.needsRuntimeDownload {
@@ -358,10 +402,11 @@ extension HostSettingsModel {
             reservation = nil
         }
         if let reservation {
+            let matchedLabels = labels
             do {
                 try await reservation.withDescriptor { descriptor in
                     guard await !self.isPaused else { throw HostAvailability.unavailable("Paused.") }
-                    try await self.operations.run(operation, for: dashboard, slot: descriptor, next: next, reply: reply)
+                    try await self.operations.run(operation, for: dashboard, slot: descriptor, labels: matchedLabels, next: next, reply: reply)
                 }
                 return
             } catch HostAvailability.unavailable(let reason) {
@@ -372,7 +417,7 @@ extension HostSettingsModel {
             // The worker knows only its manager's pairing. Keep different dashboards' checkout folders distinct.
             let forwarded = RemoteOperation(
                 repository: "\(dashboard.uuidString)/\(operation.repository)", name: operation.name,
-                directory: operation.directory, action: operation.action, arguments: operation.arguments
+                directory: operation.directory, action: operation.action, arguments: operation.arguments, workflow: operation.workflow
             )
             for mac in managedMacs.macs {
                 guard let endpoint = managedMacs.endpoint(for: mac) else {
@@ -407,7 +452,9 @@ extension RemoteOperations {
         next: @escaping @Sendable () async throws -> HostLinkRequest,
         reply: @escaping @Sendable (HostLinkReply) async throws -> Void
     ) async throws {
-        try await RemoteOperationClient.exchange(.startIfAvailable(operation, allowRuntimeDownload: allowRuntimeDownload), with: mac, at: endpoint) { accepted, worker in
+        let request: RemoteOperationRequest = operation.action == "workflow" ? .workflow(operation, dispatch: false)
+            : .startIfAvailable(operation, allowRuntimeDownload: allowRuntimeDownload)
+        try await RemoteOperationClient.exchange(request, with: mac, at: endpoint) { accepted, worker in
             try await reply(accepted)
             try await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTask {

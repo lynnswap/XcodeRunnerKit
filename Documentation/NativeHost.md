@@ -587,6 +587,35 @@ the update then returns `state: "savedWithErrors"` and an `errors` list. Retryin
 cleanup does not require reverting the saved settings. Invalid input and failures
 before saving produce an error.
 
+## Run a workflow from a dashboard
+
+On each Mac that will run workflows, install the [act](https://github.com/nektos/act)
+engine from this checkout:
+
+```sh
+bash Scripts/install-workflow-engine.sh
+```
+
+On a paired dashboard, run the CLI inside XcodeHomeRunner.app from a Git checkout with an origin remote:
+
+```sh
+/Applications/XcodeHomeRunner.app/Contents/Helpers/xcode-runner workflow run .github/workflows/native-ci.yml
+```
+
+The default event is `workflow_dispatch`. Use `--event` to choose another event declared by the workflow.
+For a pull request, `--base` selects the target branch and defaults to origin's default branch.
+The host reserves one free slot on a Mac with the engine installed. Its jobs run one at a time on that Mac
+using the same copy of the working tree, including tracked edits and unignored new files.
+The local Actions service supplies the checkout, evaluates job dependencies and runs the workflow steps.
+It uses the repository name and ref from the dashboard. Each invocation has its own service, runner
+and artifacts. GitHub's cross-run concurrency groups and repository secrets are unavailable.
+
+A native job can select the Mac by its configured runner labels, `macos-latest`, or the installed
+Xcode major version (for example, `xcode-27`). The workflow inherits the host's selected Xcode.
+The command streams job output and returns the workflow exit status. It copies `workflow.log`
+and uploaded artifacts to `XcodeRunnerOutput/<run ID>/` on the dashboard. Use `--output-directory`
+to choose another folder. An artifact uploaded as a ZIP is kept in its original form.
+
 ## Configure a workflow
 
 Use labels that match your runners. New runners include `xcode-runnerkit`,

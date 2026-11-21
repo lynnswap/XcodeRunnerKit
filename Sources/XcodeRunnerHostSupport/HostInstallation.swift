@@ -292,13 +292,14 @@ package struct HostInstallation: Sendable {
 
     package static func hostedConfiguration(
         environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> (storage: Storage, poolDirectory: URL, buildServiceExecutableURL: URL?, developerDirectory: URL?)? {
+    ) throws -> (storage: Storage, poolDirectory: URL, buildServiceExecutableURL: URL?, developerDirectory: URL?, isWorkflow: Bool)? {
         guard let hosted = try hostedLocations(environment) else { return nil }
         return (
             Storage(directory: hosted.storageDirectory),
-            poolDirectory(hostRoot: hosted.hostRoot),
+            hosted.poolDirectory,
             try buildServiceExecutableURL(hostRoot: hosted.hostRoot),
-            try developerDirectory(hostRoot: hosted.hostRoot)
+            try developerDirectory(hostRoot: hosted.hostRoot),
+            hosted.isWorkflow
         )
     }
 
@@ -306,17 +307,28 @@ package struct HostInstallation: Sendable {
     package static func hostedPoolDirectory(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> URL? {
-        try hostedLocations(environment).map { poolDirectory(hostRoot: $0.hostRoot) }
+        try hostedLocations(environment)?.poolDirectory
     }
 
-    private static func hostedLocations(_ environment: [String: String]) throws -> (storageDirectory: URL, hostRoot: URL)? {
+    private static func hostedLocations(_ environment: [String: String]) throws -> (storageDirectory: URL, hostRoot: URL, poolDirectory: URL, isWorkflow: Bool)? {
         let directory = environment["XCODE_RUNNER_HOST_STORAGE_DIRECTORY"]
         let root = environment["XCODE_RUNNER_HOST_ROOT"]
         guard directory != nil || root != nil else { return nil }
         guard let directory, let root, !directory.isEmpty, !root.isEmpty else {
             throw ConfigurationError.incompleteHostEnvironment
         }
-        return (URL(filePath: directory), URL(filePath: root))
+        let storage = Storage(directory: URL(filePath: directory))
+        let hostRoot = URL(filePath: root)
+        // A workflow already owns a slot. Nested builds share its private pool until the workflow exits.
+        // Tools that start jobs for another storage must use that host's own pool and repository cache.
+        if let path = environment["XCODE_RUNNER_WORKFLOW_DIRECTORY"] {
+            let work = storage.workDirectory.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+            let workflow = URL(filePath: path).resolvingSymlinksInPath().standardizedFileURL
+            if workflow.pathComponents.starts(with: work), workflow.pathComponents.count > work.count {
+                return (storage.directory, hostRoot, workflow.appending(path: "Pool"), true)
+            }
+        }
+        return (storage.directory, hostRoot, poolDirectory(hostRoot: hostRoot), false)
     }
 
     private static func poolDirectory(hostRoot: URL) -> URL { hostRoot.appending(path: "Pool") }

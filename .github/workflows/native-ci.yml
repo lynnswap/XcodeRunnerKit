@@ -20,9 +20,6 @@ defaults:
   run:
     shell: bash
 
-env:
-  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
-
 # The jobs share nothing and run side by side. Each builds only what its checks
 # use: the two that run the CLI build it, and the host app's job uses the CLI
 # that the app embeds, which is the one an installed host runs.

@@ -912,6 +912,38 @@ struct HostPairingTests {
         }
     }
 
+    @Test func aRepeatedRunSendsSourceButLeavesDownloadedResultsOnTheDashboard() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        let output = root.appending(path: "XcodeRunnerOutput")
+        let job = output.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: job, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try git("init", "--quiet", in: root)
+        for name in ["workflow.log", "tracked.txt"] { try Data().write(to: job.appending(path: name)) }
+        try git("add", "*.txt", in: root)
+        try Data().write(to: root.appending(path: "new.swift"))
+        let checkout = try await Checkout.containing(root)
+        let files = try await checkout.files(excludingResultsIn: output)
+        #expect(Set(files) == ["new.swift", "XcodeRunnerOutput/" + job.lastPathComponent + "/tracked.txt"])
+    }
+
+    @Test func workflowUsesTheDashboardRefAndRepositoryFromASubdirectory() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        let directory = root.appending(path: "Sources")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try git("init", "--quiet", "-b", "feature", in: root)
+        try git("commit", "--quiet", "--allow-empty", "-m", "Initial", in: root)
+        try git("remote", "add", "origin", "git@github.com:owner/project.git", in: root)
+        try Data("jobs: {test: {runs-on: fast, steps: []}}".utf8).write(to: root.appending(path: "ci.yml"))
+        let checkout = try await Checkout.containing(directory)
+        let workflow = try await checkout.workflow(file: "../ci.yml", event: "push")
+        #expect(workflow.file == "ci.yml")
+        #expect(workflow.repository == "owner/project")
+        #expect(workflow.ref == "refs/heads/feature")
+        #expect(workflow.requiredLabels == ["fast"])
+    }
+
     @Test func aDashboardRunsABuildOfItsCheckoutOnAHost() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

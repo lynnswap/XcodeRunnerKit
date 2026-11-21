@@ -91,6 +91,16 @@ enum RemoteOperationRequest: Codable, Sendable {
     case startIfAvailable(RemoteOperation, allowRuntimeDownload: Bool)
     /// Ask a paired host to choose among its own execution pool and its managed Macs.
     case dispatch(RemoteOperation, allowRuntimeDownload: Bool)
+    /// A workflow reserves one slot for its jobs on the selected Mac. Older hosts do not accept this request.
+    case workflow(RemoteOperation, dispatch: Bool)
+
+    var dispatches: Bool {
+        switch self {
+        case .dispatch, .workflow(_, dispatch: true): true
+        default: false
+        }
+    }
+
     /// A piece of a tar archive of the checkout's files.
     case files(Data)
     case filesEnd
@@ -98,7 +108,7 @@ enum RemoteOperationRequest: Codable, Sendable {
     case received
 }
 
-/// A build or test that a dashboard asks a host to run.
+/// An operation that a dashboard asks a host to run with a snapshot of its checkout.
 struct RemoteOperation: Codable, Equatable, Sendable {
     /// Identifies the checkout's repository on the dashboard. The host unpacks every checkout of a repository at the
     /// same path, because compiler cache entries name source files by their paths.
@@ -111,6 +121,17 @@ struct RemoteOperation: Codable, Equatable, Sendable {
     let action: String
     /// The command's options, without those that name the host's own folders.
     let arguments: [String]
+    var workflow: WorkflowInvocation? = nil
+}
+
+struct WorkflowInvocation: Codable, Equatable, Sendable {
+    let file: String
+    let event: String
+    let repository: String
+    let sha: String
+    let ref: String
+    let base: String
+    let requiredLabels: [String]
 }
 
 enum RemoteOperationEvent: Codable, Sendable {
@@ -317,7 +338,7 @@ enum HostLink {
     /// - A new value in a reply or a report is optional.
     /// - A state that a report names is a type that keeps a raw value it does not know, as `HostState` does. Enums
     ///   that reports carry gain no cases.
-    static let version = 11
+    static let version = 12
     /// The oldest version whose messages this version reads. A Mac that runs an earlier one is shown as running
     /// another version, and the Macs do not pair. Versions before 7 answered only their own version.
     ///

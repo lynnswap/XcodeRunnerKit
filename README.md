@@ -92,6 +92,9 @@ Mac. The standalone CLI built above runs locally, as do GitHub Actions jobs on
 the runner GitHub assigned. See
 [Build or test on a host from another Mac](Documentation/NativeHost.md#build-or-test-on-a-host-from-another-mac).
 
+To run a GitHub Actions YAML file with uncommitted changes, use the bundled CLI's
+`workflow run .github/workflows/native-ci.yml`. See [workflow setup and results](Documentation/NativeHost.md#run-a-workflow-from-a-dashboard).
+
 ### Automatic Xcode components
 
 If xcodebuild reports that the Metal Toolchain is missing, the runner downloads
@@ -381,7 +384,6 @@ The app supplies storage, cache, and pool settings to the jobs it starts.
 Run package tests with:
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer \
 xcodebuild test -scheme XcodeRunnerKit-Package \
   -destination 'platform=macOS,arch=arm64'
 ```
@@ -413,7 +415,7 @@ or iOS destinations:
 
 ```sh
 swift build -c release --product xcode-runner
-DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer \
+DEVELOPER_DIR="$(xcode-select -p)" \
 python3 Scripts/check-simulators.py .build/release/xcode-runner
 ```
 

@@ -180,6 +180,15 @@ final class HostManagement {
                         }
                         do { try await settings.operations.run(operation, for: pairing.id, next: next, reply: reply) }
                         catch HostAvailability.unavailable(let reason) { try await reply(.refused(reason)) }
+                    case .operation(.workflow(let operation, let dispatch)):
+                        guard operation.workflow != nil, operation.action == "workflow", role == (dispatch ? .dashboard : .manager),
+                              let settings = await self.settings else {
+                            try await reply(.refused("This pairing cannot start that workflow."))
+                            return
+                        }
+                        if dispatch { try await reply(.operation(.dispatching)) }
+                        try await settings.dispatch(operation, from: pairing.id, includingManagedMacs: dispatch,
+                                                    allowRuntimeDownload: false, next: next, reply: reply)
                     case .operation(.dispatch(let operation, let allowDownload)), .operation(.startIfAvailable(let operation, let allowDownload)):
                         let dispatch: Bool
                         if case .operation(.dispatch) = request { dispatch = true } else { dispatch = false }

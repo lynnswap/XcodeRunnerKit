@@ -1,0 +1,71 @@
+--- a/pkg/artifacts/artifacts_v4.go
++++ b/pkg/artifacts/artifacts_v4.go
+@@ -255 +255 @@
+-		"/" + endp + "?sig=" + base64.URLEncoding.EncodeToString(r.buildSignature(endp, expires, artifactName, taskID)) + "&expires=" + url.QueryEscape(expires) + "&artifactName=" + url.QueryEscape(artifactName) + "&taskID=" + fmt.Sprint(taskID)
++		"/" + endp + "?sig=" + base64.RawURLEncoding.EncodeToString(r.buildSignature(endp, expires, artifactName, taskID)) + "&expires=" + url.QueryEscape(expires) + "&artifactName=" + url.QueryEscape(artifactName) + "&taskID=" + fmt.Sprint(taskID)
+@@ -264 +264 @@
+-	dsig, _ := base64.URLEncoding.DecodeString(sig)
++	dsig, _ := base64.RawURLEncoding.DecodeString(strings.TrimRight(sig, "="))
+@@ -289 +289 @@
+-	err = protojson.Unmarshal(body, req)
++	err = (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(body, req)
+--- a/pkg/artifacts/server.go
++++ b/pkg/artifacts/server.go
+@@ -11,0 +12 @@
++	"net"
+@@ -592 +593 @@
+-func Serve(ctx context.Context, artifactPath string, addr string, port string, authKey []byte) context.CancelFunc {
++func Serve(ctx context.Context, artifactPath string, addr string, port string, authKey []byte) (context.CancelFunc, string, error) {
+@@ -597 +598 @@
+-		return cancel
++		return cancel, port, nil
+@@ -610,0 +612,6 @@
++	listener, err := net.Listen("tcp", net.JoinHostPort(addr, port))
++	if err != nil {
++		cancel()
++		return nil, "", err
++	}
++	port = strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+@@ -614 +621 @@
+-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
++		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+@@ -629,2 +636,2 @@
+-	return cancel
+-}
++	return cancel, port, nil
++}
+--- a/pkg/runner/run_context.go
++++ b/pkg/runner/run_context.go
+@@ -736,0 +737,9 @@
++			if value := rc.Run.Job().TimeoutMinutes; value != "" {
++				minutes, err := strconv.Atoi(rc.ExprEval.Interpolate(ctx, value))
++				if err != nil || minutes <= 0 {
++					return fmt.Errorf("invalid job timeout-minutes: %s", value)
++				}
++				var cancel context.CancelFunc
++				ctx, cancel = context.WithTimeout(ctx, time.Duration(minutes)*time.Minute)
++				defer cancel()
++			}
+@@ -886,6 +895,7 @@
+-	img := rc.platformImage(ctx)
+-	if img == "" {
+-		for _, platformName := range rc.runsOnPlatformNames(ctx) {
+-			l.Infof("\U0001F6A7  Skipping unsupported platform -- Try running with `-P %+v=...`", platformName)
+-		}
+-		return false, nil
++	for _, label := range rc.runsOnPlatformNames(ctx) {
++		if rc.Config.Platforms[strings.ToLower(label)] != "-self-hosted" {
++			return false, fmt.Errorf("no native runner for label %q", label)
++		}
++	}
++	if rc.containerImage(ctx) != "" || len(job.Services) > 0 {
++		return false, fmt.Errorf("container jobs require a container runner")
+--- a/cmd/root.go
++++ b/cmd/root.go
+@@ -682 +682,5 @@
+-		cancel := artifacts.Serve(ctx, input.artifactServerPath, artifactAddr, input.artifactServerPort, artifactServerAuthKey)
++		cancel, port, err := artifacts.Serve(ctx, input.artifactServerPath, artifactAddr, input.artifactServerPort, artifactServerAuthKey)
++		if err != nil {
++			return err
++		}
++		config.ArtifactServerPort = port
