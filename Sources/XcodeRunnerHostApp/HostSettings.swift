@@ -276,8 +276,8 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
     let canEditStorage: Bool
     let canRestart: Bool
 
-    @MainActor init(_ settings: some HostSettingsDisplay) {
-        runnerSlots = RunnerSlots(settings)
+    @MainActor init(_ settings: HostSettingsModel) {
+        runnerSlots = settings.runnerSlots
         hostState = settings.hostState
         isPaused = settings.isPaused
         runnerLabels = settings.runnerLabels
@@ -701,7 +701,37 @@ final class HostSettingsModel: HostSettingsDisplay {
         await refreshPoolUsage()
     }
 
-    func refreshPoolUsage() async {
+    private(set) var runnerStorageError: String?
+
+    var runnerSlots: RunnerSlots { RunnerSlots(self, pool: poolStatus, poolError: poolError) }
+
+    private func checkRunnerStorage() {
+        guard let storage = operations.storage else {
+            runnerStorageError = "Storage unavailable."
+            return
+        }
+        do {
+            try RemoteOperations.requireStorage(storage)
+            runnerStorageError = nil
+        } catch {
+            runnerStorageError = error.localizedDescription
+        }
+    }
+
+    /// Read live capacity for an explicit inventory request without holding up ordinary settings reads.
+    func readRunnerSlots() async -> RunnerSlots {
+        checkRunnerStorage()
+        let pool = pool
+        do {
+            let status = try await HostLink.within(HostLink.requestTimeout / 2) { try await pool.status() }
+            return RunnerSlots(self, pool: status, poolError: nil)
+        } catch {
+            return RunnerSlots(self, pool: nil, poolError: error.localizedDescription)
+        }
+    }
+
+    private func refreshPoolUsage() async {
+        checkRunnerStorage()
         do {
             let status = try await pool.status()
             poolStatus = status
@@ -771,7 +801,7 @@ final class HostSettingsModel: HostSettingsDisplay {
     func answer(_ request: HostSettingsRequest) async -> HostLinkReply {
         do {
             switch request {
-            case .read: await refreshPoolUsage()
+            case .read: break
             case .configurePool(let changes): try await applyPairedMacChanges(changes)
             case .saveStorage(let directory): try await savePairedMacStorage(directory)
             case .saveXcode(let developerDirectory): try saveDeveloperDirectory(developerDirectory)

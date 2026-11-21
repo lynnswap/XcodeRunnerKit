@@ -203,7 +203,7 @@ final class OverviewModel: PaneSaving {
         let host: RunnerMacStatus
         switch source {
         case .thisMac(let settings):
-            host = RunnerMacStatus(name: settings.management.name, slots: RunnerSlots(settings))
+            host = RunnerMacStatus(name: settings.management.name, slots: settings.runnerSlots)
             managed = settings.managedMacs
         case .host(let hosts, let mac):
             host = hosts.runnerStatus(of: mac.listed)

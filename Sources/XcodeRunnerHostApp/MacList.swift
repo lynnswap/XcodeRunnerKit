@@ -78,10 +78,10 @@ extension MacList {
         let connection = status(of: mac.id)
         let slots: RunnerSlots
         if connection == .online {
-            slots = settings(of: mac.id)?.report?.runnerSlots ?? RunnerSlots(state: "unknown", reason: "No runner slot report.")
+            slots = settings(of: mac.id)?.report?.runnerSlots ?? RunnerSlots(state: "unknown", available: nil, reason: "No runner slot report.")
         } else {
             slots = RunnerSlots(state: "unavailable", reason: connection.title)
         }
-        return RunnerMacStatus(name: mac.name, slots: slots)
+        return RunnerMacStatus(id: mac.id, name: mac.name, slots: slots)
     }
 }

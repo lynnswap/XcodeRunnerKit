@@ -213,17 +213,13 @@ struct OverviewView: View {
 
     /// Available execution slots across the Macs listed under Runners.
     private var runnerAvailability: some View {
-        let runners = model.runnerMacs
-        let available = runners.filter { $0.slots.available > 0 }.count
-        let slots = runners.reduce(0) { $0 + $1.slots.available }
-        return Section {
-            LabeledContent {
-                Button("Add Mac…") { model.addManagedMac() }
-                    .disabled(!model.canAddManagedMac)
-                    .accessibilityIdentifier("add-mac")
-            } label: {
-                Text("\(available) available · \(slots == 1 ? "1 free Xcode slot" : "\(slots) free Xcode slots")")
+        Section {
+            ForEach(model.runnerMacs) { mac in
+                LabeledContent(mac.name, value: mac.slots.title)
             }
+            Button("Add Mac…") { model.addManagedMac() }
+                .disabled(!model.canAddManagedMac)
+                .accessibilityIdentifier("add-mac")
         } header: {
             Text("Runner Availability")
         } footer: {

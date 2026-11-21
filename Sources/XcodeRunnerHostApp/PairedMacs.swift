@@ -1028,7 +1028,35 @@ final class PairedMacs: MacList {
         }
     }
 
-    func checkFoundMacs() async {
+    /// Poll slots directly so a concurrent dashboard status check cannot substitute an older pool snapshot.
+    func readRunnerSlots() async -> [RunnerMacStatus] {
+        let listed = macs
+        return await withTaskGroup(of: RunnerMacStatus.self) { group in
+            for mac in listed {
+                let endpoint = endpoints[mac.id]
+                group.addTask {
+                    let slots: RunnerSlots
+                    do {
+                        guard let endpoint else { throw HostLinkError.unreachable(mac.name) }
+                        guard case .runnerSlots(let report) = try await self.send(.runnerSlots, to: mac, at: endpoint) else {
+                            throw HostLinkError.unexpectedReply
+                        }
+                        slots = report
+                    } catch {
+                        slots = RunnerSlots(state: "unknown", available: nil, reason: error.localizedDescription)
+                    }
+                    return RunnerMacStatus(id: mac.id, name: mac.name, slots: slots)
+                }
+            }
+            var reports: [HostPairing.ID: RunnerMacStatus] = [:]
+            for await report in group {
+                if let id = report.id { reports[id] = report }
+            }
+            return macs.compactMap { reports[$0.id] }
+        }
+    }
+
+    private func checkFoundMacs() async {
         await withTaskGroup { group in
             for (id, endpoint) in endpoints {
                 group.addTask { await self.checkStatus(of: id, at: endpoint) }
@@ -1083,7 +1111,7 @@ extension HostLinkRequest {
             case .install: PairedMacs.changeTimeout
             default: HostLink.requestTimeout
             }
-        case .operation, .unpair:
+        case .operation, .unpair, .runnerSlots:
             HostLink.requestTimeout
         }
     }

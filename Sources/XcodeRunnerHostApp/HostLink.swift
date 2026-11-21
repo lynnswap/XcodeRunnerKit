@@ -25,6 +25,7 @@ struct HostPairing: Codable, Equatable, Identifiable, Sendable {
 
 /// A request from a managing host or a dashboard to a Mac paired with it.
 enum HostLinkRequest: Codable, Sendable {
+    case runnerSlots
     case settings(HostSettingsRequest)
     case github(GitHubRequest)
     case macs(ManagedMacsRequest)
@@ -128,6 +129,7 @@ enum RemoteOperationEvent: Codable, Sendable {
 }
 
 enum HostLinkReply: Codable, Sendable {
+    case runnerSlots(RunnerSlots)
     case settings(HostSettingsReport)
     case github(GitHubReport)
     case macs(ManagedMacsReport)

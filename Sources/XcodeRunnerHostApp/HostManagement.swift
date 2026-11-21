@@ -114,6 +114,12 @@ final class HostManagement {
                     connected: { version in await self.connected(pairing.id, version: version) }
                 ) { request, reply, next in
                     switch request {
+                    case .runnerSlots:
+                        guard let settings = await self.settings else {
+                            try await reply(.refused("\(self.name) cannot report runner slots."))
+                            return
+                        }
+                        try await reply(.runnerSlots(await settings.readRunnerSlots()))
                     case .settings(let request):
                         guard let settings = await self.settings else {
                             try await reply(.refused("\(self.name) cannot share its settings."))

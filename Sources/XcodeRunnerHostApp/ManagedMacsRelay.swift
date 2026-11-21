@@ -1,4 +1,5 @@
 import Foundation
+import XcodeRunnerKit
 
 /// Reads or changes the Macs that a host manages, for a dashboard. The host answers with those Macs afterwards. The
 /// dashboard has no pairing with them, so each request reaches them through the host's own pairing.
@@ -30,42 +31,39 @@ enum ManagedMacsRequest: Codable, Sendable {
 /// A Mac's reported capacity for a new Xcode job. A job's Xcode and destination are checked at dispatch.
 struct RunnerSlots: Codable, Equatable, Sendable {
     let state: String
-    let available: Int
+    let available: Int?
     let limit: Int?
     let reason: String?
 
-    init(state: String, available: Int = 0, limit: Int? = nil, reason: String? = nil) {
+    init(state: String, available: Int? = 0, limit: Int? = nil, reason: String? = nil) {
         self.state = state
         self.available = available
         self.limit = limit
         self.reason = reason
     }
 
-    @MainActor init(_ settings: some HostSettingsDisplay) {
-        let limit = settings.poolStatus?.configuration.maximumConcurrentJobs
-        if settings.isPaused {
+    @MainActor init(_ host: HostSettingsModel, pool: HostExecutionPool.Status?, poolError: String?) {
+        let limit = pool?.configuration.maximumConcurrentJobs
+        if host.isPaused {
             self.init(state: "paused", limit: limit)
-        } else if settings.hostState != .running || settings.activeStorageDirectory == nil || settings.storageError != nil {
-            self.init(state: "unavailable", limit: limit, reason: settings.storageError ?? (settings.activeStorageDirectory == nil ? "Storage unavailable" : settings.hostState.rawValue))
-        } else if let error = settings.poolError ?? settings.xcodeError ?? settings.buildServiceError {
-            self.init(state: "unavailable", limit: limit, reason: error)
-        } else if settings.savedXcodeIsMissing || settings.savedBuildServiceIsMissing {
-            self.init(state: "unavailable", limit: limit, reason: "The configured Xcode or build service is missing.")
-        } else if let pool = settings.poolStatus, let limit {
+        } else if host.hostState != .running || host.activeStorageDirectory == nil || host.runnerStorageError != nil {
+            self.init(state: "unavailable", limit: limit, reason: host.runnerStorageError ?? host.storageError ?? host.hostState.rawValue)
+        } else if let pool, let limit, poolError == nil {
             let free = pool.waitingJobCount == 0 ? max(0, limit - pool.activeJobCount) : 0
             self.init(state: free > 0 ? "available" : "busy", available: free, limit: limit)
         } else {
-            self.init(state: "unknown", reason: "No pool status.")
+            self.init(state: "unknown", available: nil, reason: poolError ?? "No pool status.")
         }
     }
 
     var title: String {
-        if let limit, state == "available" || state == "busy" { return "\(available) of \(limit) Xcode slots free" }
+        if let available, let limit, state == "available" || state == "busy" { return "\(available) of \(limit) Xcode slots free" }
         return reason ?? state.capitalized
     }
 }
 
-struct RunnerMacStatus: Codable, Equatable, Sendable {
+struct RunnerMacStatus: Codable, Equatable, Identifiable, Sendable {
+    var id: HostPairing.ID? = nil
     let name: String
     let slots: RunnerSlots
 }
@@ -143,7 +141,7 @@ final class ManagedMacsRelay {
                     id: mac.id, name: mac.name, status: macs.status(of: mac.id), settings: settings?.report, readAt: settings?.readAt
                 )
             },
-            runnerMacs: [RunnerMacStatus(name: host.management.name, slots: RunnerSlots(host))] + macs.listedMacs.map { macs.runnerStatus(of: $0) },
+            runnerMacs: [RunnerMacStatus(name: host.management.name, slots: host.runnerSlots)] + macs.listedMacs.map { macs.runnerStatus(of: $0) },
             message: macs.message, canAddMacs: host.canAddMacs, waitingMacs: macs.waitingMacs,
             discoveryMessage: macs.discoveryMessage, pairingAttempt: attempt,
             codeConfirmation: isPairing ? macs.codeConfirmation : nil, isPairing: isPairing,
@@ -161,8 +159,11 @@ final class ManagedMacsRelay {
         do {
             switch request {
             case .listRunners:
-                await host.refreshPoolUsage()
-                await macs.checkFoundMacs()
+                async let peers = macs.readRunnerSlots()
+                let own = RunnerMacStatus(name: host.management.name, slots: await host.readRunnerSlots())
+                var inventory = report(for: dashboard)
+                inventory.runnerMacs = [own] + (await peers)
+                return (.macs(inventory), false)
             case .read(let refreshing):
                 if let refreshing { await macs.refresh(refreshing) }
             case .configurePool(let changes, let mac):
