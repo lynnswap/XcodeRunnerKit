@@ -447,11 +447,16 @@ extension RemoteOperations {
 }
 
 extension RemoteOperation {
-    /// The dashboard serializes its CLI options as --name=value before the xcodebuild terminator.
+    /// The dashboard joins each option to its value, except for empty values, which ArgumentParser reads separately.
     func checkDestination(savedXcode: URL?, allowRuntimeDownload: Bool) async throws {
         let options = arguments.prefix { $0 != "--" }
         func value(_ key: String) -> String? {
-            options.last { $0.hasPrefix(key) }.map { String($0.dropFirst(key.count)) }
+            for index in options.indices.reversed() {
+                let argument = options[index]
+                if argument.hasPrefix(key) { return String(argument.dropFirst(key.count)) }
+                if argument == key.dropLast(), options.dropFirst(index + 1).first == "" { return "" }
+            }
+            return nil
         }
         let explicitDirectory = value("--developer-directory=")
         let runtime = value("--simulator-runtime=")

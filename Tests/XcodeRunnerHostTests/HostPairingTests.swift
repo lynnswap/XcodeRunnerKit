@@ -1029,11 +1029,11 @@ struct HostPairingTests {
     }
 
     @Test func aCheckoutRelativeXcodeDefersTheDestinationCheckUntilTransfer() async throws {
-        func operation(_ selection: String) -> RemoteOperation {
+        func operation(_ selection: String...) -> RemoteOperation {
             RemoteOperation(repository: "Project", name: "Project", directory: "", action: "test",
-                            arguments: [selection, "--destination=id=\(UUID().uuidString)"])
+                            arguments: selection + ["--destination=id=\(UUID().uuidString)"])
         }
-        try await operation("--developer-directory=").checkDestination(savedXcode: nil, allowRuntimeDownload: false)
+        try await operation("--developer-directory", "").checkDestination(savedXcode: nil, allowRuntimeDownload: false)
         await #expect(throws: RemoteOperationFailure.self) {
             try await operation("--environment=DEVELOPER_DIR=").checkDestination(savedXcode: nil, allowRuntimeDownload: false)
         }

@@ -226,7 +226,10 @@ struct BuildOptions: ParsableArguments {
     private var hostArguments: [String] {
         var arguments: [String] = []
         func add(_ name: String, _ value: String?) {
-            if let value { arguments.append("--\(name)=\(value)") }
+            guard let value else { return }
+            // ArgumentParser reads an empty string as a separate argument; --option= has no value.
+            if value.isEmpty { arguments += ["--\(name)", ""] }
+            else { arguments.append("--\(name)=\(value)") }
         }
         add("workspace", workspace)
         add("project", project)
