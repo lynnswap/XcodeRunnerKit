@@ -202,7 +202,9 @@ One host can list the other XcodeHomeRunner hosts on your local network under
    added Mac. A different code means that another device answered, so choose
    **Don't Allow**.
 
-The added Mac needs no GitHub sign-in, Remote Login, or SSH key. Each Mac keeps
+Pairing lets the managing host run its dashboards' checkouts on the added Mac
+under the runner's macOS account. The added Mac needs no GitHub sign-in,
+Remote Login, or SSH key. Each Mac keeps
 the pairing key in its Keychain, and the key never crosses the network. The
 added Mac considers one request at a time. It stops waiting when you choose
 **Don't Allow** or when a request ends before the Macs pair; turn off **Host**
@@ -318,27 +320,38 @@ installation, or selection on the host, so a repository that should not register
 self-hosted runners can use the host too.
 
 In the checkout on the dashboard's Mac, run the `xcode-runner` inside the app
-with `--host` and the host's name as the dashboard lists it:
+from the directory you want to build:
 
 ```sh
 /Applications/XcodeHomeRunner.app/Contents/Helpers/xcode-runner test \
-  --host "Build Mac" --package . --scheme PackageName
+  --package . --scheme PackageName
 ```
 
-`build`, `build-for-testing`, and `test` take `--host` with their other
-options. The command sends the checkout, shows the operation's output as it
-runs, and exits with the operation's status. Interrupting the command stops the
-operation on the host.
+For `build`, `build-for-testing`, and `test` the dashboard asks its paired hosts
+for an execution slot. Each host can take the job or forward it to a Mac it
+manages, even when the host's own runner is paused. The worker needs a pairing
+only with its managing host. Update the dashboard, host and workers to use
+automatic selection.
+
+The host checks the requested Xcode and destination and reserves a free slot in
+the same pool that GitHub Actions jobs use. When every eligible Mac is busy,
+the command waits and checks again. If no Mac can take the job, the command
+reports why. For a managed Simulator it first looks for an installed runtime\nand device type. If a runtime needs downloading, the selected runner prepares\nit before the build. Use `--host "Build Mac"` to run on that specific host, or
+`--local` to build on the Mac where you ran the command.
+
+The checkout goes to the selected Mac. The command shows its output, copies the
+results back and exits with the build or test status. Interrupting the command
+cancels a pending request or stops the running operation.
 
 - **Files.** The command sends the Git checkout that contains the current
-  directory: tracked files as they are in the working tree, and untracked files
-  that Git does not ignore, including those of submodules. It sends them again
+  directory, including uncommitted edits to tracked files and untracked files
+  that Git does not ignore. The same rules apply inside submodules. It sends them again
   for every operation, and does not send the Git history. The host runs the
   operation in its copy of the current directory, so name the workspace,
   project, or package relative to that directory.
 - **Host settings.** The operation uses the host's storage, its saved Xcode, and
-  its build service, and takes a place in its job limit together with the jobs
-  from GitHub, waiting in arrival order. An absolute path in an option, such as
+  its build service, and the same execution pool as jobs from GitHub. Automatic
+  jobs take a free slot after jobs already queued on that Mac. An absolute path in an option, such as
   `--developer-directory` or the source of a `--prefix-mapping`, names a file on
   the host. The operation runs with the host app's environment, not with the
   shell's.
@@ -353,10 +366,10 @@ operation on the host.
   unpacks every worktree of a repository at the same path, so a later operation
   reuses the entries of earlier ones, also from another worktree.
 
-`--derived-data`, `--compilation-cache`, `--pool-directory`,
-`--build-service-path`, and `test-without-building` cannot be used with `--host`,
-because the host uses its own folders and keeps no build products after an
-operation.
+Use `--local` for `--derived-data`, `--compilation-cache`, `--pool-directory`,
+or `--build-service-path`. A remote job uses the executing Mac's folders and
+build service. `test-without-building` runs locally because remote Macs
+discard build products when the operation finishes.
 
 The command starts the app that contains it to reach the host, because macOS
 gives the pairings in the app's Keychain item to the app alone. It finds the

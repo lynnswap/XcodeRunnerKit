@@ -24,6 +24,7 @@ struct HostOptions: ParsableCommand {
     /// The host that runs `operation`. `xcode-runner` starts the app with this for its `--host` option, because macOS
     /// gives the pairings in the app's Keychain item to the app alone.
     @Option(help: .hidden) var runOnHost: String?
+    @Flag(help: .hidden) var runOnAvailableHost = false
     /// This Mac's folder for the operation's log and result bundle.
     @Option(help: .hidden) var outputDirectory: String?
     /// Reads or changes a host as `operation` says. `xcode-runner host` starts the app with this for the commands that
@@ -61,11 +62,13 @@ struct HostOptions: ParsableCommand {
         if settingsService && !host {
             throw ValidationError("--settings-service requires --host. Run the installer in this app to update the LaunchAgent.")
         }
+        let remote = runOnHost != nil || runOnAvailableHost
+        guard !(runOnAvailableHost && runOnHost != nil) else { throw ValidationError("Choose one remote host selection.") }
         if control {
-            guard runOnHost == nil, outputDirectory == nil, !operation.isEmpty else {
+            guard !remote, outputDirectory == nil, !operation.isEmpty else {
                 throw ValidationError("--control takes a command after -- and neither --run-on-host nor --output-directory.")
             }
-        } else if (runOnHost == nil) != operation.isEmpty || (runOnHost == nil) != (outputDirectory == nil) {
+        } else if remote != !operation.isEmpty || remote != (outputDirectory != nil) {
             throw ValidationError("--run-on-host requires --output-directory and a command after --.")
         }
     }
@@ -113,10 +116,10 @@ public enum RunnerHostApplication {
                 withExtendedLifetime(signals) { dispatchMain() }
             }
             let installation = options.installation
-            if let hostName = options.runOnHost, let outputDirectory = options.outputDirectory {
+            if let outputDirectory = options.outputDirectory {
                 let command = Task {
                     await RemoteOperationClient.run(
-                        options.operation, onHostNamed: hostName, installation: installation,
+                        options.operation, onHostNamed: options.runOnHost, installation: installation,
                         outputDirectory: URL(filePath: outputDirectory)
                     )
                 }

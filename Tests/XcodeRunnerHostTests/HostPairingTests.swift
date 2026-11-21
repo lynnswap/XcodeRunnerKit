@@ -843,8 +843,9 @@ struct HostPairingTests {
         echo "folder: $(basename "$(dirname "$PWD")")"
         echo "files: $(find .. \( -type f -o -type l \) | sort | tr '\n' ' ')"
         if [ -L ../link ]; then echo "link: $(readlink ../link)"; fi
+        if [ -f ../changed ]; then echo "contents: $(cat ../changed)"; fi
         if [ "$1" = test ]; then
-            trap 'touch "$XCODE_RUNNER_HOST_ROOT/stopped"; exit 143' TERM
+            trap 'kill "$!" 2>/dev/null; wait; touch "$XCODE_RUNNER_HOST_ROOT/stopped"; exit 143' TERM
             echo started
             sleep 600 &
             wait $!
@@ -939,6 +940,64 @@ struct HostPairingTests {
         await host.management.shutDown()
     }
 
+    @Test func aHostDispatchesAnUncommittedCheckoutToItsNextAvailableRunner() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (host, _, shown, endpoint, directory) = try await hostAndCheckout(at: root)
+        let worker = managedMac(named: "Runner", at: root.appending(path: "Runner"), operationTool: try operationTool(at: root))
+        worker.storageDidBecomeAvailable(try worker.installation.initializeStorage())
+        try await host.pool.configure(maximumConcurrentJobs: 1)
+        try await worker.pool.configure(maximumConcurrentJobs: 1)
+        let paired = try await pair(host.managedMacs, with: worker.management)
+        try await waitUntil { worker.management.managementPort != nil }
+        await host.managedMacs.checkStatus(of: paired.id, at: try local(worker.management.managementPort))
+
+        let checkout = try await Checkout.containing(directory.appending(path: "App/Empty"))
+        let output = root.appending(path: "Output")
+        let received = Output()
+        let occupied = Task { try await worker.pool.withSlot { try await Task.sleep(for: .seconds(60)) } }
+        defer { occupied.cancel() }
+        try await waitUntil { try await worker.pool.status()?.activeJobCount == 1 }
+        try await host.pool.withSlot {
+            let contacts = Mutex(0)
+            let result = try await RemoteOperationClient.run(
+                ["build", "--scheme=App"], in: checkout, hosts: [shown], automatic: true, outputDirectory: output,
+                endpoint: { _ in
+                    let number = contacts.withLock { $0 += 1; return $0 }
+                    if number == 2 {
+                        occupied.cancel()
+                        _ = await occupied.result
+                    }
+                    return endpoint
+                }, output: { received.append($0) }
+            )
+            #expect(result == 3)
+            #expect(contacts.withLock { $0 } >= 2)
+        }
+        #expect(received.text.contains(worker.installation.homeDirectory.path(percentEncoded: false)))
+        #expect(received.text.contains("files: ../changed ../committed ../link ../untracked "))
+        #expect(received.text.contains("contents: changed"))
+        #expect(try String(contentsOf: output.appending(path: "Job/Results.xcresult/Info.plist"), encoding: .utf8) == "the results\n")
+        try await waitUntil { try await worker.pool.status()?.activeJobCount == 0 }
+
+        host.setPaused(true)
+        let testing = Output()
+        let test = Task {
+            try await RemoteOperationClient.run(
+                "test", arguments: [], in: checkout, on: shown, at: endpoint, outputDirectory: output, automatic: true
+            ) { testing.append($0) }
+        }
+        try await waitUntil { testing.text.contains("started\n") }
+        #expect(try await worker.pool.status()?.activeJobCount == 1)
+        test.cancel()
+        await #expect(throws: (any Error).self) { try await test.value }
+        try await waitUntil { try await worker.pool.status()?.activeJobCount == 0 }
+
+        await worker.management.shutDown()
+        await host.managedMacs.shutDown()
+        await host.management.shutDown()
+    }
+
     @Test func aDashboardReportsAnInvalidResultBundle() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -988,17 +1047,19 @@ struct HostPairingTests {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let (host, storage, shown, endpoint, directory) = try await hostAndCheckout(at: root)
+        try await host.pool.configure(maximumConcurrentJobs: 1)
         let checkout = try await Checkout.containing(directory)
         let outputDirectory = root.appending(path: "Output")
 
         let received = Output()
         let test = Task {
             try await RemoteOperationClient.run(
-                "test", arguments: [], in: checkout, on: shown, at: endpoint, outputDirectory: outputDirectory
+                "test", arguments: [], in: checkout, on: shown, at: endpoint, outputDirectory: outputDirectory, automatic: true
             ) { received.append($0) }
         }
         try await waitUntil { received.text.contains("started\n") }
         #expect(received.text.contains("folder: 0\n"))
+        #expect(try await host.pool.status()?.activeJobCount == 1)
 
         // A second operation on the repository gets a folder of its own while the first one runs.
         let overlapping = Output()
@@ -1011,7 +1072,7 @@ struct HostPairingTests {
         await #expect(throws: (any Error).self) { try await test.value }
         let stopped = root.appending(path: "Home/Library/Application Support/XcodeRunnerKit/stopped")
         try await waitUntil { FileManager.default.fileExists(atPath: stopped.path(percentEncoded: false)) }
-        try await waitUntil { remoteFolders(in: storage).isEmpty }
+        try await waitUntil { try await host.pool.status()?.activeJobCount == 0 && remoteFolders(in: storage).isEmpty }
 
         await host.management.shutDown()
     }

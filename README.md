@@ -79,8 +79,14 @@ Use repeated `--setting NAME=VALUE` and `--environment NAME=VALUE` options
 for build settings and environment values. `--developer-directory` selects
 Xcode without changing `xcode-select`.
 
-`--host` runs `build`, `build-for-testing`, or `test` on another Mac's host
-with the files of the current checkout. See
+From a dashboard, the CLI bundled with XcodeHomeRunner sends `build`,
+`build-for-testing`, and `test` to a paired host. The host chooses a Mac
+with a free Xcode slot. Tracked edits and new files that Git does not ignore
+travel with the checkout. You can test before committing or pushing.
+
+Use `--host "Build Mac"` to pick a particular host or `--local` to run on this
+Mac. The standalone CLI built above runs locally, as do GitHub Actions jobs on
+the runner GitHub assigned. See
 [Build or test on a host from another Mac](Documentation/NativeHost.md#build-or-test-on-a-host-from-another-mac).
 
 ### Automatic Xcode components
