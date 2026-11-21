@@ -344,6 +344,8 @@ extension HostSettingsModel {
         let reservation: HostExecutionPool.Reservation?
         do {
             guard !isPaused else { throw RemoteOperationFailure("Paused.") }
+            guard let storage = operations.storage else { throw RemoteOperationFailure("Storage unavailable.") }
+            try RemoteOperations.requireStorage(storage)
             try await operation.checkDestination(savedXcode: installation.developerDirectory(), allowRuntimeDownload: allowRuntimeDownload)
             reservation = try await pool.reserveAvailableSlot()
             busy = reservation == nil
@@ -463,7 +465,7 @@ extension RemoteOperation {
             return Data(result.standardOutput.utf8)
         }
         // A checkout-relative Xcode (including a symlink) only resolves after the files arrive.
-        if let developer, !developer.hasPrefix("/") { return }
+        if let developer, !developer.isEmpty, !developer.hasPrefix("/") { return }
         _ = try await xcrun(["--find", "xcodebuild"])
         if let runtime = value("--simulator-runtime="), let type = value("--simulator-device-type=") {
             struct DeviceType: Decodable { let identifier: String }

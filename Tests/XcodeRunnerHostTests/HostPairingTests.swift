@@ -1048,6 +1048,15 @@ struct HostPairingTests {
                 "build", arguments: [], in: checkout, on: shown, at: endpoint, outputDirectory: root.appending(path: "Output")
             ) { _ in }
         }
+        try await host.pool.configure(maximumConcurrentJobs: 1)
+        try await host.pool.withSlot {
+            let failure = await #expect(throws: HostAvailability.self) {
+                try await RemoteOperationClient.run("test", arguments: [], in: checkout, on: shown, at: endpoint,
+                                                    outputDirectory: root.appending(path: "Output"), automatic: true) { _ in }
+            }
+            guard case .unavailable(let message) = failure else { Issue.record("Missing storage reported as busy"); return }
+            #expect(message.contains(storage.directory.path(percentEncoded: false)))
+        }
         #expect(!FileManager.default.fileExists(atPath: storage.directory.path(percentEncoded: false)))
 
         await host.management.shutDown()
