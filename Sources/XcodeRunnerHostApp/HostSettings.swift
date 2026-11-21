@@ -694,26 +694,33 @@ final class HostSettingsModel: HostSettingsDisplay {
         }
     }
 
-    func refreshPoolStatus(afterSaving: Bool = false) async {
+    func refreshPoolStatus() async {
+        startRunnerSlotSample()
         refreshStorageSelection()
         refreshXcodes()
         refreshBuildService()
-        if afterSaving {
-            // The managing host uses the returned configuration to synchronize its registrations.
-            await updatePoolUsage(waitForLock: true)
-        } else {
-            await refreshPoolUsage()
+        do {
+            let status = try await pool.status()
+            poolStatus = status
+            poolError = nil
+            hasLoadedPoolStatus = true
+            poolDraft.update(from: status?.configuration)
+        } catch is CancellationError {
+            return
+        } catch {
+            poolStatus = nil
+            poolError = "Could not read the execution pool: \(error.localizedDescription)"
+            hasLoadedPoolStatus = true
         }
     }
 
-    private var runnerStorageError: String?
-    private var runnerPoolError: String?
-    @ObservationIgnored private var poolRead: Task<Void, Never>?
-    @ObservationIgnored private var poolReaders: [UUID: AsyncStream<Void>.Continuation] = [:]
+    /// Inventory samples use a nonblocking pool read. Settings saves and runner registration use
+    /// the waiting read above and never consume a partial or contended inventory sample.
+    private var sampledSlots = RunnerSlots(state: "unknown", available: nil, reason: "No runner slot report.")
+    @ObservationIgnored private var slotRead: Task<Void, Never>?
+    @ObservationIgnored private var slotReaders: [UUID: AsyncStream<Void>.Continuation] = [:]
 
-    var runnerSlots: RunnerSlots {
-        RunnerSlots(self, pool: runnerPoolError == nil ? poolStatus : nil, poolError: runnerPoolError ?? poolError, storageError: runnerStorageError)
-    }
+    var runnerSlots: RunnerSlots { sampledSlots.forHost(self) }
 
     private func readRunnerStorageError() async -> String? {
         guard let storage = operations.storage else { return "Storage unavailable." }
@@ -723,53 +730,37 @@ final class HostSettingsModel: HostSettingsDisplay {
         } catch { return error.localizedDescription }
     }
 
-    /// A live request can stop waiting even if the filesystem has not returned from a volume check.
+    /// A live reader can leave a stalled volume probe without changing anyone else's observation.
     func readRunnerSlots() async -> RunnerSlots {
+        let id = UUID()
+        let (events, continuation) = AsyncStream<Void>.makeStream()
+        slotReaders[id] = continuation
+        defer { slotReaders[id] = nil }
+        startRunnerSlotSample()
         do {
             try await HostLink.within(HostLink.requestTimeout + HostLink.requestTimeout / 2) {
-                await self.refreshPoolUsage()
+                for await _ in events {}
             }
         } catch {
-            return RunnerSlots(self, pool: nil, poolError: error.localizedDescription, storageError: nil)
+            return RunnerSlots(state: "unknown", available: nil, reason: error.localizedDescription).forHost(self)
         }
         return runnerSlots
     }
 
-    /// The monitor and inventory readers share one sample. Cancelling a reader releases its wait
-    /// without starting another filesystem operation on an unresponsive volume.
-    private func refreshPoolUsage() async {
-        let id = UUID()
-        let (events, continuation) = AsyncStream<Void>.makeStream()
-        poolReaders[id] = continuation
-        defer { poolReaders[id] = nil }
-        if poolRead == nil {
-            poolRead = Task {
-                let storageError = await readRunnerStorageError()
-                await updatePoolUsage(waitForLock: false)
-                runnerStorageError = storageError
-                poolRead = nil
-                for reader in poolReaders.values { reader.finish() }
+    private func startRunnerSlotSample() {
+        guard slotRead == nil else { return }
+        slotRead = Task {
+            let storageError = await readRunnerStorageError()
+            do {
+                let status = try await pool.status(waitForLock: false)
+                sampledSlots = RunnerSlots(pool: status, poolError: nil, storageError: storageError)
+            } catch {
+                let contended = (error as? POSIXError)?.code == .EWOULDBLOCK
+                let reason = contended ? "The execution pool is being updated." : error.localizedDescription
+                sampledSlots = RunnerSlots(pool: nil, poolError: reason, storageError: storageError)
             }
-        }
-        for await _ in events {}
-    }
-
-    private func updatePoolUsage(waitForLock: Bool) async {
-        do {
-            let status = try await pool.status(waitForLock: waitForLock)
-            runnerPoolError = nil
-            poolStatus = status
-            poolError = nil
-            hasLoadedPoolStatus = true
-            poolDraft.update(from: status?.configuration)
-        } catch let error as POSIXError where !waitForLock && error.code == .EWOULDBLOCK {
-            // Ordinary settings keep their last sample while a configuration write or admission holds the lock.
-            runnerPoolError = "The execution pool is being updated."
-        } catch {
-            runnerPoolError = nil
-            poolStatus = nil
-            poolError = "Could not read the execution pool: \(error.localizedDescription)"
-            hasLoadedPoolStatus = true
+            slotRead = nil
+            for reader in slotReaders.values { reader.finish() }
         }
     }
 
@@ -816,7 +807,7 @@ final class HostSettingsModel: HostSettingsDisplay {
             let saved = try await savePoolConfiguration(changes)
             saveError = nil
             poolDraft.reset(to: saved)
-            await refreshPoolStatus(afterSaving: true)
+            await refreshPoolStatus()
             if previousCapacity != saved.maximumConcurrentJobs { await github.synchronize() }
         } catch {
             saveError = "Could not save the execution pool settings: \(error.localizedDescription)"
@@ -855,7 +846,7 @@ final class HostSettingsModel: HostSettingsDisplay {
         } catch {
             throw HostSettingsError("Could not save the execution pool settings: \(error.localizedDescription)")
         }
-        await refreshPoolStatus(afterSaving: true)
+        await refreshPoolStatus()
     }
 
     /// Takes a paired Mac's request to restart. From here on this Mac takes no other change, so that none starts
