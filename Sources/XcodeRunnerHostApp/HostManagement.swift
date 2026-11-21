@@ -172,7 +172,8 @@ final class HostManagement {
                             try await reply(.refused("\(self.name) is paused and takes no new jobs."))
                             return
                         }
-                        try await settings.operations.run(operation, for: pairing.id, next: next, reply: reply)
+                        do { try await settings.operations.run(operation, for: pairing.id, next: next, reply: reply) }
+                        catch HostAvailability.unavailable(let reason) { try await reply(.refused(reason)) }
                     case .operation(.dispatch(let operation, let allowDownload)), .operation(.startIfAvailable(let operation, let allowDownload)):
                         let dispatch: Bool
                         if case .operation(.dispatch) = request { dispatch = true } else { dispatch = false }

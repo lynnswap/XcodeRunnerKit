@@ -336,7 +336,11 @@ automatic selection.
 The host checks the requested Xcode and destination and reserves a free slot in
 the same pool that GitHub Actions jobs use. When every eligible Mac is busy,
 the command waits and checks again. If no Mac can take the job, the command
-reports why. For a managed Simulator it first looks for an installed runtime\nand device type. If a runtime needs downloading, the selected runner prepares\nit before the build. Use `--host "Build Mac"` to run on that specific host, or
+reports why. For a managed Simulator it first looks for an installed runtime
+and device type. If a runtime needs downloading, the selected runner prepares
+it before the build. A checkout-relative Xcode path resolves once the files
+arrive on the runner. Specify an absolute Xcode path to match it before
+dispatch. Use `--host "Build Mac"` to run on that specific host, or
 `--local` to build on the Mac where you ran the command.
 
 The checkout goes to the selected Mac. The command shows its output, copies the
@@ -345,8 +349,9 @@ cancels a pending request or stops the running operation.
 
 - **Files.** The command sends the Git checkout that contains the current
   directory, including uncommitted edits to tracked files and untracked files
-  that Git does not ignore. The same rules apply inside submodules. It sends them again
-  for every operation, and does not send the Git history. The host runs the
+  that Git does not ignore. The same rules apply inside submodules. The CLI
+  reads the working tree when a runner accepts the job, so edits made while
+  waiting are included. Each transfer omits the Git history. The host runs the
   operation in its copy of the current directory, so name the workspace,
   project, or package relative to that directory.
 - **Host settings.** The operation uses the host's storage, its saved Xcode, and

@@ -56,8 +56,7 @@ final class RemoteOperations {
         reply: @escaping @Sendable (HostLinkReply) async throws -> Void
     ) async throws {
         guard let storage else {
-            try await reply(.refused("\(HostPane.macName) has not prepared its storage."))
-            return
+            throw HostAvailability.unavailable("\(HostPane.macName) has not prepared its storage.")
         }
         // Dashboards choose what they call a repository, so each dashboard's repositories get folders of their own.
         let key = SHA256.hash(data: Data("\(dashboard.uuidString)/\(operation.repository)".utf8)).prefix(8)
@@ -91,8 +90,7 @@ final class RemoteOperations {
             // An operation that the host did not finish, as when it quit, left its checkout.
             try await Self.remove(folder)
         } catch {
-            try await reply(.refused(error.localizedDescription))
-            return
+            throw HostAvailability.unavailable(error.localizedDescription)
         }
         try await reply(.operation(.accepted(
             checkoutDirectory: checkout.path(percentEncoded: false), outputDirectory: output.path(percentEncoded: false)
@@ -346,8 +344,6 @@ extension HostSettingsModel {
         let reservation: HostExecutionPool.Reservation?
         do {
             guard !isPaused else { throw RemoteOperationFailure("Paused.") }
-            guard let storage = operations.storage else { throw RemoteOperationFailure("Storage unavailable.") }
-            try RemoteOperations.requireStorage(storage)
             try await operation.checkDestination(savedXcode: installation.developerDirectory(), allowRuntimeDownload: allowRuntimeDownload)
             reservation = try await pool.reserveAvailableSlot()
             busy = reservation == nil
@@ -466,7 +462,9 @@ extension RemoteOperation {
             guard result.terminationStatus.isSuccess else { throw RemoteOperationFailure(result.standardError) }
             return Data(result.standardOutput.utf8)
         }
-        if developer != nil { _ = try await xcrun(["--find", "xcodebuild"]) }
+        // A checkout-relative Xcode (including a symlink) only resolves after the files arrive.
+        if let developer, !developer.hasPrefix("/") { return }
+        _ = try await xcrun(["--find", "xcodebuild"])
         if let runtime = value("--simulator-runtime="), let type = value("--simulator-device-type=") {
             struct DeviceType: Decodable { let identifier: String }
             struct Runtime: Decodable {
@@ -484,6 +482,9 @@ extension RemoteOperation {
                     throw RemoteOperationFailure("The installed \(runtime) runtime cannot run \(type).")
                 }
             } else {
+                guard SimulatorConfiguration.downloadArguments(forRuntime: runtime) != nil else {
+                    throw RemoteOperationFailure("This Mac has no installed \(runtime) runtime and cannot download it by identifier.")
+                }
                 guard listing.devicetypes.contains(where: { $0.identifier == type }) else {
                     throw RemoteOperationFailure("This Xcode has no \(type) device type.")
                 }

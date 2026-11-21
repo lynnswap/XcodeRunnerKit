@@ -943,7 +943,7 @@ struct HostPairingTests {
     @Test func aHostDispatchesAnUncommittedCheckoutToItsNextAvailableRunner() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let (host, _, shown, endpoint, directory) = try await hostAndCheckout(at: root)
+        let (host, storage, shown, endpoint, directory) = try await hostAndCheckout(at: root)
         let worker = managedMac(named: "Runner", at: root.appending(path: "Runner"), operationTool: try operationTool(at: root))
         worker.storageDidBecomeAvailable(try worker.installation.initializeStorage())
         try await host.pool.configure(maximumConcurrentJobs: 1)
@@ -980,11 +980,21 @@ struct HostPairingTests {
         #expect(try String(contentsOf: output.appending(path: "Job/Results.xcresult/Info.plist"), encoding: .utf8) == "the results\n")
         try await waitUntil { try await worker.pool.status()?.activeJobCount == 0 }
 
+        // The host can reserve a slot, but its runner volume is no longer mounted.
+        try FileManager.default.removeItem(at: storage.directory)
+        let rerouted = Output()
+        let nextStatus = try await RemoteOperationClient.run(
+            "build", arguments: [], in: checkout, on: shown, at: endpoint, outputDirectory: root.appending(path: "Rerouted"),
+            automatic: true
+        ) { rerouted.append($0) }
+        #expect(nextStatus == 3)
+        #expect(rerouted.text.contains(worker.installation.homeDirectory.path(percentEncoded: false)))
+
         host.setPaused(true)
         let testing = Output()
         let test = Task {
             try await RemoteOperationClient.run(
-                "test", arguments: [], in: checkout, on: shown, at: endpoint, outputDirectory: output, automatic: true
+                ["test"], in: checkout, hosts: [shown], automatic: true, outputDirectory: output, endpoint: { _ in endpoint }
             ) { testing.append($0) }
         }
         try await waitUntil { testing.text.contains("started\n") }
@@ -1047,19 +1057,17 @@ struct HostPairingTests {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let (host, storage, shown, endpoint, directory) = try await hostAndCheckout(at: root)
-        try await host.pool.configure(maximumConcurrentJobs: 1)
         let checkout = try await Checkout.containing(directory)
         let outputDirectory = root.appending(path: "Output")
 
         let received = Output()
         let test = Task {
             try await RemoteOperationClient.run(
-                "test", arguments: [], in: checkout, on: shown, at: endpoint, outputDirectory: outputDirectory, automatic: true
+                "test", arguments: [], in: checkout, on: shown, at: endpoint, outputDirectory: outputDirectory
             ) { received.append($0) }
         }
         try await waitUntil { received.text.contains("started\n") }
         #expect(received.text.contains("folder: 0\n"))
-        #expect(try await host.pool.status()?.activeJobCount == 1)
 
         // A second operation on the repository gets a folder of its own while the first one runs.
         let overlapping = Output()
@@ -1072,7 +1080,7 @@ struct HostPairingTests {
         await #expect(throws: (any Error).self) { try await test.value }
         let stopped = root.appending(path: "Home/Library/Application Support/XcodeRunnerKit/stopped")
         try await waitUntil { FileManager.default.fileExists(atPath: stopped.path(percentEncoded: false)) }
-        try await waitUntil { try await host.pool.status()?.activeJobCount == 0 && remoteFolders(in: storage).isEmpty }
+        try await waitUntil { remoteFolders(in: storage).isEmpty }
 
         await host.management.shutDown()
     }
