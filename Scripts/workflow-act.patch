@@ -40,7 +40,8 @@
 +		if err := rc.checkWorkflowRef(ctx); err != nil {
 +			return err
 +		}
-@@ -736,0 +740,13 @@
+@@ -737 +740,29 @@
+-			return executor(ctx)
 +			if os.Getenv("XCODE_RUNNER_PLAN") == "1" && jobType == model.JobTypeDefault {
 +				rc.result("success")
 +				return nil
@@ -54,18 +55,34 @@
 +				ctx, cancel = context.WithTimeout(ctx, time.Duration(minutes)*time.Minute)
 +				defer cancel()
 +			}
-@@ -776 +792,3 @@
++			err = executor(ctx)
++			if jobType != model.JobTypeDefault {
++				if os.Getenv("XCODE_RUNNER_PLAN") == "1" {
++					if err == nil {
++						rc.result("success")
++					}
++					return err
++				}
++				if err != nil {
++					// A called workflow's result belongs to its job. Later stages still evaluate always() and failure().
++					rc.result("failure")
++					common.Logger(ctx).WithField("jobResult", "failure").Error(err)
++					return nil
++				}
++			}
++			return err
+@@ -776 +807,3 @@
 -	if err := rc.ExprEval.EvaluateYamlNode(ctx, &job.RawRunsOn); err != nil {
 +	entry := *job
 +	entry.RawRunsOn = copyWorkflowNode(job.RawRunsOn)
 +	if err := rc.ExprEval.EvaluateYamlNode(ctx, &entry.RawRunsOn); err != nil {
-@@ -781 +799 @@
+@@ -781 +814 @@
 -	return job.RunsOn()
 +	return entry.RunsOn()
-@@ -878 +896 @@
+@@ -878 +911 @@
 -		l.WithField("jobResult", "skipped").Debugf("Skipping job '%s' due to '%s'", job.Name, job.If.Value)
 +		l.WithField("jobResult", "skipped").Infof("Skipping job '%s' due to '%s'", job.Name, job.If.Value)
-@@ -886,6 +904,7 @@
+@@ -886,6 +919,7 @@
 -	img := rc.platformImage(ctx)
 -	if img == "" {
 -		for _, platformName := range rc.runsOnPlatformNames(ctx) {
@@ -161,15 +178,31 @@
 +	return e.nativeGroups.run(ctx, cmd)
 --- a/pkg/runner/job_executor.go
 +++ b/pkg/runner/job_executor.go
-@@ -176,0 +177 @@
+@@ -3,0 +4 @@
++	"github.com/nektos/act/pkg/exprparser"
+@@ -166,0 +168 @@
++	allowedFailure := false
+@@ -168 +170,10 @@
+-		jobResult = "failure"
++		if expr := rc.Run.Job().RawContinueOnError; expr != "" {
++			var err error
++			allowedFailure, err = EvalBool(ctx, rc.ExprEval, expr, exprparser.DefaultStatusCheckNone)
++			if err != nil {
++				logger.Errorf("invalid job continue-on-error: %v", err)
++			}
++		}
++		if !allowedFailure {
++			jobResult = "failure"
++		}
+@@ -176,0 +188 @@
 +	itemResult := "success"
-@@ -178 +179,2 @@
+@@ -178 +190,2 @@
 -	if jobResult != "success" {
 +	if !success {
 +		itemResult = "failure"
-@@ -182 +184 @@
+@@ -182 +195 @@
 -	logger.WithField("jobResult", jobResult).Infof("\U0001F3C1  Job %s", jobResultMessage)
-+	logger.WithField("jobResult", itemResult).Infof("\U0001F3C1  Job %s", jobResultMessage)
++	logger.WithField("jobResult", itemResult).WithField("allowedFailure", allowedFailure).Infof("\U0001F3C1  Job %s", jobResultMessage)
 --- a/pkg/runner/step.go
 +++ b/pkg/runner/step.go
 @@ -208 +208 @@
@@ -178,3 +211,7 @@
 @@ -226 +226 @@
 -			logger.WithFields(logrus.Fields{"executionTime": executionTime, "stepResult": stepResult.Outcome}).Infof("  \u274C  Failure - %s %s [%s]", stage, stepString, executionTime)
 +			logger.WithFields(logrus.Fields{"executionTime": executionTime, "stepResult": stepResult.Outcome, "stepConclusion": stepResult.Conclusion}).Infof("  \u274C  Failure - %s %s [%s]", stage, stepString, executionTime)
+--- a/pkg/model/workflow.go
++++ b/pkg/model/workflow.go
+@@ -196,0 +197 @@
++	RawContinueOnError string `yaml:"continue-on-error"`

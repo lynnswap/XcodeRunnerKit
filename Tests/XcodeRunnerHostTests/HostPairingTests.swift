@@ -951,13 +951,23 @@ struct HostPairingTests {
         try git("init", "--quiet", "-b", "feature", in: root)
         try git("commit", "--quiet", "--allow-empty", "-m", "Initial", in: root)
         try git("remote", "add", "origin", "git@github.com:owner/project.git", in: root)
-        try Data("jobs: {test: {runs-on: fast, steps: []}}".utf8).write(to: root.appending(path: "ci.yml"))
+        let workflows = root.appending(path: ".github/workflows")
+        try FileManager.default.createDirectory(at: workflows, withIntermediateDirectories: true)
+        let shared = "jobs: {test: {runs-on: fast, steps: []}}"
+        try Data(shared.utf8).write(to: workflows.appending(path: "shared.yml"))
+        try Data().write(to: workflows.appending(path: "unrelated.yml"))
+        let caller = "jobs: {test: {uses: ./.github/workflows/shared.yml}}"
+        try Data(caller.utf8).write(to: root.appending(path: "ci.yml"))
         let checkout = try await Checkout.containing(directory)
         let workflow = try await checkout.workflow(file: "../ci.yml", event: "push")
         #expect(workflow.file == "ci.yml")
         #expect(workflow.repository == "owner/project")
         #expect(workflow.ref == "refs/heads/feature")
-        #expect(workflow.definition.contains("runs-on: fast"))
+        #expect(workflow.localWorkflows == ["shared.yml": shared])
+        try Data("shared.yml\n".utf8).write(to: root.appending(path: ".gitignore"))
+        await #expect(throws: RemoteOperationFailure.self) {
+            try await checkout.workflow(file: "../ci.yml", event: "push")
+        }
     }
 
     @Test func aDashboardRunsABuildOfItsCheckoutOnAHost() async throws {

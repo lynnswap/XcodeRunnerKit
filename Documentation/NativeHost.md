@@ -603,7 +603,9 @@ On a paired dashboard, run the CLI inside XcodeHomeRunner.app from a Git checkou
 ```
 
 The default event is `workflow_dispatch`. Use `--event` to choose another event declared by the workflow.
-For a pull request, `--base` selects the target branch and defaults to origin's default branch.
+For a simulated pull request, `--base` selects the target branch and defaults to origin's default branch.
+The GitHub context uses the checkout's ref and HEAD. A GitHub-generated PR number or merge commit
+is available in a workflow dispatched by GitHub.
 The host reserves one free slot on a Mac with the engine installed. Its jobs run one at a time on that Mac
 using the same copy of the working tree, including tracked edits and unignored new files.
 The local Actions service supplies the checkout, evaluates job dependencies and runs the workflow steps.

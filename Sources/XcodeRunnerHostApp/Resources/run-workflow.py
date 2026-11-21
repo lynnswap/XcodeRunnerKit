@@ -3,6 +3,7 @@ from collections import deque
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
@@ -70,7 +71,7 @@ def run(engine, checkout, output, file, event, repository, sha, ref, base, prese
                     message = ('[' + name + '] ' if name else '') + body
                     if name:
                         job_id = record.get('jobID') or name
-                        identity = (job_id, json.dumps(record.get('matrix', {}), sort_keys=True))
+                        identity = (job_id, name, json.dumps(record.get('matrix', {}), sort_keys=True))
                         job_result = jobs.setdefault(identity, {'id': job_id, 'name': name, 'status': 'incomplete'})
                         if record.get('raw_output') and body:
                             step = record.get('step')
@@ -86,6 +87,8 @@ def run(engine, checkout, output, file, event, repository, sha, ref, base, prese
                                 job_result['message'] = '\n'.join(recent[identity][1])
                         if 'jobResult' in record:
                             job_result['status'] = record['jobResult']
+                            if record.get('allowedFailure'):
+                                job_result['allowedFailure'] = True
                             if job_result['status'] == 'success':
                                 job_result.pop('step', None)
                                 job_result.pop('message', None)
@@ -99,8 +102,8 @@ def run(engine, checkout, output, file, event, repository, sha, ref, base, prese
             status = child.wait()
             if plan and status and not failure:
                 print(f'The workflow planner exited with status {status}.', file=sys.stderr)
-            if not plan and not status and not any(j['status'] == 'success' for j in jobs.values()):
-                failure = 'No jobs succeeded for this event and ref.'
+            if not plan and not status and not jobs:
+                failure = 'No jobs were selected for this event and ref.'
                 status = 1
         finally:
             if child.poll() is None:
@@ -112,7 +115,10 @@ def run(engine, checkout, output, file, event, repository, sha, ref, base, prese
                     child.wait()
             child.stdout.close()
     if not plan:
-        summary = {'status': 'failed' if status else 'passed', 'runner': runner, 'jobs': list(jobs.values())}
+        outcome = 'failed' if status else 'passed'
+        if not status and jobs and all(j['status'] == 'skipped' for j in jobs.values()):
+            outcome = 'skipped'
+        summary = {'status': outcome, 'runner': runner, 'jobs': list(jobs.values())}
         if failure and not any(j['status'] == 'failure' for j in jobs.values()):
             summary['message'] = failure
         (job / 'summary.json').write_text(json.dumps(summary, ensure_ascii=False) + '\n')
@@ -164,7 +170,22 @@ def snapshot_git(source, destination, sha, ref, repository):
             git(source, 'pack-objects', '--stdout', input=b'\n'.join(missing) + b'\n', stdout=pack)
             pack.seek(0)
             git(destination, 'index-pack', '--stdin', stdin=pack, stdout=subprocess.DEVNULL)
-    git(destination, 'update-index', '-z', '--index-info', input=index)
+    # Preserve intent-to-add and sparse/assume-unchanged bits. Expand a split index into a standalone file
+    # and remove machine-local filesystem monitor and untracked-cache extensions from this private copy.
+    index_file = git(source, 'rev-parse', '--path-format=absolute', '--git-path', 'index',
+                     stdout=subprocess.PIPE, text=True).stdout.strip()
+    standalone = Path(destination) / '.git/index'
+    if Path(index_file).is_file():
+        shutil.copyfile(index_file, standalone)
+        shared = git(source, 'rev-parse', '--shared-index-path', stdout=subprocess.PIPE, text=True).stdout.strip()
+        if shared:
+            shared = Path(source) / shared
+            shutil.copyfile(shared, standalone.parent / shared.name)
+        subprocess.run(['git', '-C', source, 'update-index', '--no-split-index', '--no-fsmonitor',
+                        '--no-untracked-cache', '--force-write-index'],
+                       env={**env, 'GIT_INDEX_FILE': str(standalone)}, check=True)
+        if shared:
+            (standalone.parent / shared.name).unlink(missing_ok=True)
     subprocess.run(['/usr/bin/tar', '-cf', str(Path(destination) / 'metadata.tar'), '--no-mac-metadata',
                     '--no-xattrs', '-C', destination, '.git'], check=True)
 

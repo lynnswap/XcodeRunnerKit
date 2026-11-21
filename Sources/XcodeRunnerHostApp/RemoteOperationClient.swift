@@ -126,17 +126,40 @@ struct Checkout: Equatable, Sendable {
         }
         let definition = try String(contentsOf: url, encoding: .utf8)
         var localWorkflows: [String: String] = [:]
+        let file = String(url.path(percentEncoded: false).dropFirst(prefix.count))
+        let listed = try await Self.git(["--literal-pathspecs", "ls-files", "-z", "--cached", "--others",
+                                         "--exclude-standard", "--", file, ".github/workflows"], in: root)
+        let allowed = listed.split(separator: "\0").map(String.init)
+        guard allowed.contains(file) else { throw RemoteOperationFailure("The selected workflow is excluded from the checkout.") }
         if definition.contains("./.github/workflows/") {
-            let folder = root.appending(path: ".github/workflows")
-            for item in try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
-            where ["yml", "yaml"].contains(item.pathExtension) {
-                let target = item.resolvingSymlinksInPath()
-                guard target.pathComponents.starts(with: root.resolvingSymlinksInPath().pathComponents) else { continue }
-                localWorkflows[item.lastPathComponent] = try String(contentsOf: target, encoding: .utf8)
-            }
+            // Reusable workflow references are literal job.uses strings. Ship only their transitive definitions.
+            let references = try await Subprocess.run(.path("/usr/bin/ruby"), arguments: .init(["-ryaml", "-rjson", "-e", #"""
+                root, entry = ARGV
+                allowed = JSON.parse(STDIN.read)
+                queue, seen, definitions = [entry], {}, {}
+                until queue.empty?
+                  file = queue.pop
+                  next if seen[file]
+                  seen[file] = true
+                  text = File.read(File.join(root, file))
+                  definitions[File.basename(file)] = text unless file == entry
+                  (YAML.safe_load(text, aliases: true).fetch("jobs", {}) || {}).each_value do |job|
+                    path = job["uses"].to_s.delete_prefix("./")
+                    next unless job["uses"].to_s.start_with?("./.github/workflows/")
+                    raise "Unavailable local workflow: #{path}" unless allowed.include?(path) &&
+                      File.realpath(File.join(root, path)).start_with?(File.realpath(root) + "/")
+                    queue << path
+                  end
+                end
+                print JSON.generate(definitions)
+                """#, root.path, file]),
+                input: .string(String(decoding: try JSONEncoder().encode(allowed), as: UTF8.self)),
+                output: .string(limit: 1 << 24), error: .string(limit: 4096))
+            guard references.terminationStatus.isSuccess else { throw RemoteOperationFailure(references.standardError) }
+            localWorkflows = try JSONDecoder().decode([String: String].self, from: Data(references.standardOutput.utf8))
         }
         return WorkflowInvocation(
-            file: String(url.path(percentEncoded: false).dropFirst(prefix.count)), event: event, repository: repository,
+            file: file, event: event, repository: repository,
             sha: sha, ref: ref, base: base, definition: definition, localWorkflows: localWorkflows
         )
     }
@@ -606,6 +629,7 @@ struct WorkflowSummary: Codable {
         var id: String?
         let name: String
         let status: String
+        var allowedFailure: Bool?
         var step: String?
         var logLine: Int?
         var message: String?
@@ -642,7 +666,8 @@ struct WorkflowSummary: Codable {
         var lines = ["Workflow \(report.status) on \(report.runner) (\(count) jobs)."]
         if let message = report.message { lines.append(message) }
         for job in report.jobs {
-            lines.append("\(job.name): \(job.status)" + (job.step.map { " — " + $0 } ?? ""))
+            let status = job.allowedFailure == true ? "allowed failure" : job.status
+            lines.append("\(job.name): \(status)" + (job.step.map { " — " + $0 } ?? ""))
             if let message = job.message { lines.append(message) }
             if let line = job.logLine { lines.append("Details: " + log.path + ":\(line)") }
         }
