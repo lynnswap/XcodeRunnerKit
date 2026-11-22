@@ -26,13 +26,13 @@ log=$(mktemp)
 - Run the command on its own so that the exit status you see is its own. A nonzero exit means the run failed or was interrupted.
 - Exit 0 is a pass only if tests ran, because a selector that matches nothing also exits 0.
 
-Read the result bundle named in the log.
+If the dashboard has Xcode, read the result bundle named in the log.
 
 ```sh
 xcrun xcresulttool get test-results summary --path "/path/from/the/log/Results.xcresult"
 ```
 
-Report a pass only when the selected tests ran, `passedTests` is above zero and `failedTests` is zero. On a nonzero exit, read `testFailures` in the same summary. If the build failed before any test ran, read the end of the log instead.
+Report a pass only when the selected tests ran, `passedTests` is above zero and `failedTests` is zero. Without `xcresulttool`, check the named test’s outcome and the executed count at the end of the transferred log. On a nonzero exit, read `testFailures` in the summary. If the build failed before any test ran, read the end of the log instead.
 
 ## Run a whole workflow
 
