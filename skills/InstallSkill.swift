@@ -56,6 +56,10 @@ package struct InstallSkill: ParsableCommand {
 
         for root in roots {
             let directory = root.appending(path: "xcode-runner", directoryHint: .isDirectory)
+            var entry = stat()
+            if lstat(directory.path, &entry) == 0 && entry.st_mode & S_IFMT == S_IFLNK {
+                throw ValidationError("The skill directory is a symbolic link: \(directory.path)")
+            }
             let file = directory.appending(path: "SKILL.md")
             if uninstall {
                 guard unlink(file.path) == 0 else {

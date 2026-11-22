@@ -83,8 +83,8 @@ locally. Direct submissions work independently of GitHub runner registration.
 
 ## Run a workflow from a dashboard
 
-Install the bundled version of [act](https://github.com/nektos/act) on each Mac
-that will execute workflow files.
+On each Mac that will execute workflow files, open a checkout of XcodeRunnerKit
+and install its patched [act](https://github.com/nektos/act) engine.
 
 ```sh
 bash Scripts/install-workflow-engine.sh

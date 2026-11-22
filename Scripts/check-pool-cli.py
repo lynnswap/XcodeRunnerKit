@@ -79,6 +79,15 @@ def main():
         command("init", "--dest", skills, "--uninstall")
         assert not installed.exists() and neighbor.is_file()
 
+        shared = root / "dotfiles"
+        installed.parent.rename(shared)
+        installed.parent.symlink_to(shared, target_is_directory=True)
+        original = shared / "SKILL.md"
+        original.write_text("shared skill")
+        for flag in ("--force", "--uninstall"):
+            command("init", "--dest", skills, flag, success=False)
+            assert original.read_text() == "shared skill"
+
         pool = root / "pool"
 
         def status():

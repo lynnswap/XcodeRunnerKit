@@ -11,7 +11,7 @@ The standalone CLI runs builds and tests locally. Use the app helper for paired 
 
 ## Run selected tests
 
-Work from a checkout with an `origin` remote. Pass exactly one of `--package .`, `--workspace`, or `--project` as a relative path, plus a scheme and destination. Use the destination the repository specifies, and `platform=macOS` when it specifies none.
+Work from the Git checkout. Pass exactly one of `--package .`, `--workspace`, or `--project` as a relative path, plus a scheme and destination. Use the destination the repository specifies, and `platform=macOS` when it specifies none.
 
 ```sh
 log=$(mktemp)
@@ -40,11 +40,11 @@ Report a pass only when the selected tests ran, `passedTests` is above zero and 
 /Applications/XcodeHomeRunner.app/Contents/Helpers/xcode-runner workflow run .github/workflows/ci.yml --json
 ```
 
-The event defaults to `workflow_dispatch`. Add `--event pull_request --base <base>` when needed.
+The checkout needs an `origin` remote. The event defaults to `workflow_dispatch`. Add `--event pull_request --base <base>` when needed.
 
 The JSON gives the overall status (`passed`, `failed`, or `skipped`) and at most 12 jobs, failures first. The full summary, log, and local artifacts are saved under `XcodeRunnerOutput` at the paths the JSON lists. Read those files when you need a job or detail the JSON leaves out.
 
-Report skipped jobs as skipped.
+Report skipped jobs as skipped. If the run cannot start, report the error message. A `status` of `error` may have no job or artifact paths.
 
 ## Keep the defaults
 
