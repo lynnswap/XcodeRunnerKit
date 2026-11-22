@@ -63,6 +63,31 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="XcodeRunnerPoolCLI-") as temporary:
         root = Path(temporary)
+        skills = root / "skills"
+        expected = (Path(__file__).resolve().parents[1] / "skills/xcode-runner/SKILL.md").read_text()
+        installed = skills / "xcode-runner/SKILL.md"
+        assert command("init", "--print").stdout == expected
+        command("init", "--dest", skills)
+        assert installed.read_text() == expected
+        installed.write_text("user edits")
+        command("init", "--dest", skills, success=False)
+        assert installed.read_text() == "user edits"
+        command("init", "--dest", skills, "--force")
+        assert installed.read_text() == expected
+        neighbor = installed.with_name("notes.md")
+        neighbor.touch()
+        command("init", "--dest", skills, "--uninstall")
+        assert not installed.exists() and neighbor.is_file()
+
+        shared = root / "dotfiles"
+        installed.parent.rename(shared)
+        installed.parent.symlink_to(shared, target_is_directory=True)
+        original = shared / "SKILL.md"
+        original.write_text("shared skill")
+        for flag in ("--force", "--uninstall"):
+            command("init", "--dest", skills, flag, success=False)
+            assert original.read_text() == "shared skill"
+
         pool = root / "pool"
 
         def status():

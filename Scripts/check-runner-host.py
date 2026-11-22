@@ -20,6 +20,7 @@ app = Path(sys.argv[1]).resolve()
 executable = str(app/'Contents/MacOS/XcodeHomeRunner')
 cli = Path(sys.argv[2]).resolve()
 scripts = Path(__file__).resolve().parent
+assert subprocess.check_output([cli, 'init', '--print']) == (scripts.parent / 'skills/xcode-runner/SKILL.md').read_bytes()
 
 
 # Steps wait for the state they need. This limit only reports a process that hangs.
