@@ -32,7 +32,7 @@ If the dashboard has Xcode, read the result bundle named in the log.
 xcrun xcresulttool get test-results summary --path "/path/from/the/log/Results.xcresult"
 ```
 
-In the summary, check that the selected tests ran, `passedTests` is above zero and `failedTests` is zero. On failure, inspect `testFailures`. If the tool or bundle is unavailable, read the selected tests’ outcomes, executed count and first failure from the transferred log. Report an unverified selection if the log has no evidence that those tests ran.
+In the summary, check that the selected tests ran, `passedTests` is above zero and `failedTests` is zero. On failure, inspect `testFailures`. If the summary is unavailable or does not explain the result (including a build failure before any test runs), read the selected tests’ outcomes, executed count and first failure from the transferred log. Report an unverified selection if the log has no evidence that those tests ran.
 
 ## Run a whole workflow
 
