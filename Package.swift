@@ -30,8 +30,14 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v6), .defaultIsolation(nil)]
         ),
         .target(
+            name: "XcodeRunnerSkill",
+            dependencies: [.product(name: "ArgumentParser", package: "swift-argument-parser")],
+            path: "skills", resources: [.embedInCode("xcode-runner/SKILL.md")]
+        ),
+        .target(
             name: "XcodeRunnerCLI",
             dependencies: [
+                "XcodeRunnerSkill",
                 "XcodeRunnerKit", "XcodeRunnerHostSupport",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "MCP", package: "swift-sdk"),

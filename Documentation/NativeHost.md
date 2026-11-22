@@ -1,14 +1,13 @@
-# GitHub Actions host setup
+# XcodeHomeRunner
 
-XcodeHomeRunner is a macOS menu bar app that starts official GitHub Actions
-runners and manages their Xcode job limit.
+The **dashboard** is the menu bar app on the Mac where you work. A **host**
+accepts its requests and assigns each job to a **runner**. One Mac can be both
+host and runner. A dashboard Mac can submit jobs without running any itself.
 
-Use an Apple silicon Mac with macOS 26 or later and Xcode 27.1 or later.
-Run the setup as the macOS user that will run CI, and keep that user logged in.
-Jobs can read or change this user's files and host settings. Run only code the
-owner has reviewed, including build scripts, tests and workflow changes. Use a
-GitHub-hosted runner for unreviewed contributions. The same trust requirement
-applies when a dashboard sends a checkout directly to the Mac.
+Use an Apple silicon runner with macOS 26 or later and Xcode 27.1 or later.
+Keep the runner account logged in. Jobs execute with that user’s access to files
+and settings, including when a dashboard submits a checkout. Run builds, tests
+and workflows from sources you trust.
 
 ## Install
 
@@ -32,246 +31,16 @@ Replace `/path/to/JobData` with the folder for checkouts, build output, and the
 compiler cache. Omit that argument to use
 `~/Library/Application Support/XcodeRunnerKit/Storage`.
 
-The app contains the `xcode-runner` CLI. The installer links
-`~/Library/Application Support/XcodeRunnerKit/bin/xcode-runner` to the CLI in
-the installed app, so jobs, runner setup, and SSH sessions always use the CLI
-from the same build as the app. It also keeps the Mac awake with a `caffeinate`
-LaunchAgent while you are logged in.
-
-For an update, wait for running and queued CI jobs to finish, then run the new
-app's installer. It stops the current host and its runner services before
-replacing the app and its CLI.
-
-The build script archives `XcodeRunnerKit.xcworkspace` and exports it for
-Developer ID distribution with Xcode-managed signing. The app, CLI, and
-installers use the fixed `lynnpd.xcodehomerunner` identifiers for the bundle,
-LaunchAgent, and settings service, so a build with another bundle identifier
-must change all of them.
-
-The installer places the app in `~/Applications` and starts it through a user
-LaunchAgent. The LaunchAgent's process type is `Interactive`, so macOS applies
-no CPU or I/O limit to the host, its runners, or their builds, as it does to a
-job that names no type. An ad-hoc signature (`-`) is not accepted. Use the same
-team for updates so macOS can retain the app's access permissions.
-
-Opening the app on a Mac where the installer set up a host starts that host. On
-a Mac without a host, the app opens as a [dashboard](#show-a-host-on-another-mac)
-instead.
-
-Hosts installed before the app was renamed from XcodeRunnerHost are migrated by
-the same installer: it stops the `dev.lynnswap.XcodeRunnerHost` service, removes
-its LaunchAgent, and keeps the old app as `XcodeRunnerHost.previous.app`. Runner
-registrations and job data stay in place. GitHub login tokens are not carried
-over, because they belong to the old app's Keychain items.
-
-Hosts that signed in through a GitHub App created for that host, including
-hosts migrated from XcodeRunnerHost, keep their repository selection but must
-sign in again through the shared app. Follow [Connect GitHub](#connect-github)
-and install the shared app on the same repositories. You can then delete the
-app created for the host on GitHub; this also invalidates the client secret
-that earlier versions saved in Keychain.
-
-Complete Xcode's license acceptance and first-launch setup before starting jobs.
-Xcode installation and setup that requires administrator access remain manual.
-Jobs download a missing [managed Simulator runtime](../README.md#ios-simulators)
-when requested. If xcodebuild reports a missing Metal Toolchain, the runner
-downloads it and retries the operation once. Downloads use the job's selected
-Xcode, including `DEVELOPER_DIR`. Download progress appears in workflow output;
-Metal download output and both build attempts also remain in the job log. A
-failed download stops the job.
-
-## Connect GitHub
-
-Before registering a runner, open the repository's **Settings > Actions >
-General** on GitHub. For a public repository, choose **Require approval for all
-external contributors**. For a private repository, disable **Run workflows from
-fork pull requests**, or require approval for fork pull request workflows.
-Keep fork runs pending if the code has not been reviewed. Check workflows that
-use events such as `pull_request_target` separately. Those workflows run in the
-base repository's context and must only build code the owner trusts.
-
-The managing host reads these settings at each runner synchronization. If the
-settings permit automatic external fork runs or GitHub cannot confirm them, it
-reports the problem and skips new registrations for that repository. Existing
-runners continue taking jobs. For an existing installation, set the policy on
-GitHub before starting the host or registering additional runners. GitHub
-enforces this policy even when the app is signed out. When updating a group of
-Macs, update the managing host before asking it to register new runners.
-
-Hosts sign in through the shared
-[XcodeHomeRunner GitHub App](https://github.com/apps/xcodehomerunner), so you
-do not create a GitHub App. Click the hammer icon in the menu bar and open
-**Settings…**. The window's **Settings** pane has the Mac's roles, its GitHub
-sign-in, and its repositories.
-
-1. Under **GitHub**, choose **Connect GitHub…**. GitHub's device page opens,
-   and the pane shows a code. Enter the code on that page and authorize the app.
-2. Under **Repositories**, choose **Add Repositories on GitHub…**, install the
-   app, and select the repositories this Mac will run.
-3. Return to the window and choose the reload button beside **Repositories**.
-4. Switch on the repositories to manage and choose **Save** in the toolbar.
-
-Enter only codes shown in this window. Entering a code that someone else
-sent you gives them access to your repositories as you.
-
-A new host starts with **Maximum concurrent jobs** set to 4, so runners
-register without editing the execution settings first. Change the limit and the
-Simulator retention policy in this Mac's pane under **Runners**, then select
-**Save** in the toolbar. The button saves every value that was edited in the
-shown pane.
-
-The app saves login tokens in Keychain and refreshes expiring tokens
-automatically; it stores no client secret. To change repository access later,
-choose **Add Repositories on GitHub…**, then **Reload**. While the app is
-installed for your own account only, the button opens that installation's
-settings. To install the app for an organization as well, use the
-[app's page](https://github.com/apps/xcodehomerunner).
-
-Installing the app for organization repositories may need approval from an
-organization owner. The signed-in user also needs repository administration
-access to manage runners.
-
-### What the limit controls
-
-Set the limit to 24 to allow 24 XcodeRunnerKit builds or test runs across the Mac.
-The app registers 24 runners for each selected repository, so any one repository
-can use the full limit.
-GitHub's in-progress count also includes checkout, uploads, and jobs waiting
-for an Xcode slot.
-
-Lowering the limit lets running operations finish. Extra runner registrations
-stay in place. Deselecting a repository and choosing **Save** unregisters this
-Mac's runners for it from GitHub and deletes them. A busy runner is removed at a
-later synchronization, after its current job finishes, and **Settings** lists
-the repository until then. While the app is signed out or cannot access the
-repository, the removal waits. Other runners stay in place, such as those of a
-selected repository that the app can no longer access, those registered manually
-for a repository that was never selected, and those that GitHub no longer lists
-for the deselected repository.
-
-The same limit caps the total managed Simulators across Xcode versions,
-runtimes, and device types. The host removes idle devices above the limit.
-With **Remove after an idle period**, it also deletes devices after the chosen
-number of idle minutes, even below the limit. The default is 20 minutes. Choose
-**Keep indefinitely** to keep healthy idle devices booted without a time limit. Capacity limits,
-cancellation, abnormal termination, fresh-device requests, and explicit cleanup
-can still delete them. The saved policy applies to all runners using this host
-pool without restarting the host. Existing idle devices keep their original
-return time when the setting changes.
-Matching devices are reused in order of most recent return. If space is needed,
-the oldest returned idle devices are removed first.
-Devices in use finish before they are removed, so lowering the limit can
-temporarily leave more devices than the new limit. Runner registrations and
-GitHub's in-progress job count can still be higher.
-
-**Settings** shows the selected repositories and any errors applying that selection.
-Choose a Mac under **Runners** for its status, running and waiting Xcode jobs,
-runner service counts, and services that need attention. The host retries synchronization every
-five minutes while signed in. Pool and repository settings are saved separately; editing one does not
-apply pending changes in the other. **Disconnect** removes local login tokens and
-stops registration management; it leaves existing runner services running.
-
-A runner’s sidebar row shows whether it is idle or how many slots it is using.
-Its **Activity** charts show the last two minutes of observed CPU load and memory pressure.
-CPU load stacks system time (red) and user time (cyan). Memory pressure uses the kernel’s
-memory-status level for height and its current pressure state for color (green, orange, or red).
-Sampling happens on the runner Mac. Gaps indicate periods without observations.
-
-### Pause a Mac
-
-To use a Mac for something else for a while, turn off **Take new jobs** under
-**Overview** in its pane, or **Runner** under **Roles** in its own
-**Settings**, which is the same setting. The host stops each runner service once the
-runner has no job, and starts none, so the jobs that run finish. A job that a
-runner takes in the instant before its service stops is cancelled, as when the
-host quits. The runners stay registered and appear offline on GitHub, where
-their jobs wait or go to other runners with the same labels. A paused Mac also refuses a build or test
-that a dashboard sends with `--host`, and finishes one that it accepted before,
-also when that one still waits for a place in the job limit. **Settings** shows
-the Mac as **Paused**.
-
-Turning **Take new jobs** on starts the runner services again without
-registering anything. The setting is kept across restarts of the host, and the
-Mac's managing host and its dashboards can change it in their panes for the
-Mac.
-
-## Pair other Macs
-
-One host can list the other XcodeHomeRunner hosts on your local network under
-**Runners**. Install the app on each Mac first, then pair them:
-
-1. On the Mac to add, open **Settings…** and turn off **Host** under **Roles**.
-   The Mac waits five minutes for a host.
-2. On the managing Mac, the host, choose **Add Mac…** in **Settings**, select
-   the Mac, and choose **Continue**. Both Macs show a six-digit code.
-3. If the codes match, choose **Pair** on the managing Mac and **Allow** on the
-   added Mac. A different code means that another device answered, so choose
-   **Don't Allow**.
-
-Pairing lets the managing host run its dashboards' checkouts on the added Mac
-under the runner's macOS account. The added Mac needs no GitHub sign-in,
-Remote Login, or SSH key. Each Mac keeps
-the pairing key in its Keychain, and the key never crosses the network. The
-added Mac considers one request at a time. It stops waiting when you choose
-**Don't Allow** or when a request ends before the Macs pair; turn off **Host**
-again to retry. Pairing uses Bonjour, so macOS asks for local network access
-the first time you turn off **Host** or choose **Add Mac…**.
-If you declined, allow XcodeHomeRunner in **System Settings > Privacy &
-Security > Local Network**.
-
-A Mac that only shows a [dashboard](#show-a-host-on-another-mac) can add itself.
-Choose **Add Mac…** for the host in the dashboard, then **Set Up as a Runner…**
-under **This Mac**. The dashboard runs the app's installer for your account,
-with the default storage folder, and has the new host wait for a managing host.
-Select this Mac in the list, choose **Continue**, and choose **Pair** when the
-code shows: the dashboard tells this Mac's host the code, and the host allows
-the pairing if it shows the same one. The installed host keeps the Mac awake
-while you are logged in, as on every Mac with a host.
-
-A Mac has two roles, and can have both: a host signs in to GitHub and registers
-runners, for itself and for the Macs that it manages, and a runner runs jobs.
-A Mac that is no host is managed by one, and a host that manages Macs stays a
-host until they are removed. Each paired Mac's pane
-shows whether the managing Mac can connect to it and, while that Mac answers,
-its host status, runner services, Xcode job counts, job limit, Simulator
-retention, and storage folder. **Save** there changes that Mac's
-settings with the same checks as its own window; type the storage folder's path,
-because the managing Mac cannot browse the other Mac's folders. When the Mac
-does not answer, its pane hides these values and shows when they were last
-read. **Remove Mac…** ends the pairing on both Macs. Turning on **Host** on a
-managed Mac ends it there, after a confirmation; the managing Mac then
-shows that Mac as not found until you remove it.
-
-The managing Mac also registers runners on each paired Mac for the repositories
-selected in its **Settings**, up to that Mac's job limit, and removes them
-when you deselect a repository. It sends the paired Mac only short-lived
-registration tokens, never its GitHub sign-in, and removes registrations from
-GitHub itself. **Settings** on the managing Mac shows registration errors for the selected
-repositories and names the Mac in each error. A Mac that does not answer keeps
-its runners, and a deselected repository stays listed until that Mac answers
-and its runners are removed. A newly paired Mac gets its runners at the next
-synchronization, or when you change its job limit in its pane. While a Mac is
-managed, it does not register runners from its own sign-in; the runners that it
-registered before stay. **Remove Mac…** leaves the runners on that Mac.
+The installer puts the app in `~/Applications`, starts a user LaunchAgent,
+and links `~/Library/Application Support/XcodeRunnerKit/bin/xcode-runner` to
+the embedded CLI. The host stays awake while the runner account is logged in.
+Complete Xcode’s license acceptance and first-launch setup on each runner.
 
 ## Show a host on another Mac
 
-A Mac that runs no host can show a host, sign it in to GitHub, and change its
-settings. Copy `XcodeHomeRunner.app` to that Mac and open it without running the
-installer. Opened this way, the app is a dashboard: it creates no runner folders
-or execution pool, registers no runners, and keeps no GitHub sign-in. It keeps
-only its pairings, in that Mac's Keychain.
-
-The dashboard opens at login by default after its first launch. To change this
-for this Mac, choose **XcodeHomeRunner → Settings…** and use **Open dashboard at login**.
-The dashboard stays in the menu bar after its window closes. The menu of its
-hammer icon lists each host with its state and jobs; choose a host to open its
-**Settings** pane. With no paired hosts, choose **Add Mac…**. Choose **Quit
-XcodeHomeRunner** there to end it.
-
-A Mac with a host shows other hosts too, in its own window: choose **Show a
-Mac…** under **Hosts on Other Macs** in its **Settings** pane, and the sidebar
-lists that host's settings and runners after the Mac's own.
+Copy the signed app to the dashboard Mac’s Applications folder and open it.
+The installer is for a Mac that will host runners. Both Macs must be reachable
+on the local network and allow XcodeHomeRunner to use Bonjour.
 
 1. On the host, open **Settings…** and choose **Allow Dashboard…** under
    **Dashboards**. The host waits five minutes for a dashboard.
@@ -283,377 +52,135 @@ lists that host's settings and runners after the Mac's own.
    host. A different code means that another device answered, so choose
    **Don't Allow**.
 
-Each host has the panes of its own window: **Settings**, and under **Runners**
-the host by its name and the Macs that it manages. While the host answers, they
-show GitHub sign-in and repository selection in **Settings**. Each runner’s pane shows its status, runner services, Xcode job counts,
-job limit, Simulator retention, and storage folder. **Save** changes them with the same
-checks as the host's own window. After a changed job limit, the host registers
-its runners itself; for a host that another Mac manages, that Mac does at its
-next synchronization. When the host does not answer, the dashboard hides these
-values and shows when they were last read.
-
-To connect a host to GitHub from the dashboard, choose **Connect GitHub…** in
-its **Settings**. The host starts the sign-in, the dashboard shows the code,
-and GitHub's page opens in the dashboard's browser, as does **Add Repositories
-on GitHub…**. The host keeps the login tokens and sends the dashboard neither
-them nor anything that completes a sign-in. **Save** saves the repository
-selection on the host, which then registers and removes runners; the
-repositories show the progress. Changes made in the host's own window or on another dashboard
-appear within a few seconds.
-
-The dashboard reaches the Macs that a host manages through the host and does
-not pair with them. Their panes show what the host's own panes for them show,
-with the same controls, and a Mac that the host cannot reach appears that way.
-To have a host manage another Mac, choose **Add Mac…** in the host's
-**Settings**. The **File** menu's **Add Mac** has the same command for each
-host. The host looks for Macs that wait with **Host** turned off, and the dashboard shows the code: choose **Pair** on the
-dashboard and **Allow** on the Mac being added. **Remove Mac…** in a managed
-Mac's pane ends its pairing with the host.
-
-A dashboard does not take over a host. The host keeps its GitHub sign-in, the
-Macs it manages, and its managing Mac if it has one, and it accepts several
-dashboards. A host waits for either a managing Mac or a dashboard at a time, and
-refuses a request for the other.
-
-**Remove Mac…** on the dashboard ends the pairing on both Macs. **Remove…**
-under **Dashboards** on the host ends it there; the dashboard then shows the
-host as not found until you remove it. Dashboards find hosts with Bonjour on the
-local network, as pairing Macs does.
+The menu bar lists paired hosts. Open **Settings…** to manage GitHub and
+repositories, or select a runner in the sidebar for its jobs, CPU load, memory
+pressure, storage and Xcode settings. **Open dashboard at login** controls
+automatic launch on this Mac. Removing a dashboard pairing ends its access.
 
 ## Build or test on a host from another Mac
 
-A Mac that shows a host as a dashboard can run a build or test of a checkout on
-that host without GitHub. The repository needs no runners, GitHub App
-installation, or selection on the host, so a repository that should not register
-self-hosted runners can use the host too.
-
-Run `xcode-runner host runners` in the bundled CLI to see the runner Macs a host
-can send a working tree to. Each group includes the host itself. A host with
-no other paired Macs can still take jobs in its own Xcode slots. For example,
-`slots.available` of 3 and `slots.limit` of 3 means the Mac has room for three
-Xcode jobs. The figures are a snapshot. Dispatch checks the job's Xcode and
-destination and reserves a slot when it accepts the job.
-
-In the checkout on the dashboard's Mac, run the `xcode-runner` inside the app
-from the directory you want to build:
+Run the embedded CLI from the Git checkout on the dashboard.
 
 ```sh
-/Applications/XcodeHomeRunner.app/Contents/Helpers/xcode-runner test \
-  --package . --scheme PackageName
+runner=/Applications/XcodeHomeRunner.app/Contents/Helpers/xcode-runner
+"$runner" test --workspace App.xcworkspace --scheme App \
+  --destination 'platform=iOS Simulator,name=iPhone 17' -- '-only-testing:AppTests/ParserTests'
 ```
 
-For `build`, `build-for-testing`, and `test` the dashboard asks its paired hosts
-for an execution slot. Each host can take the job or forward it to a Mac it
-manages, even when the host's own runner is paused. The worker needs a pairing
-only with its managing host. Update the dashboard, host and workers to use
-automatic selection.
+The host dispatches `build`, `build-for-testing` and `test` to a Mac with a
+matching Xcode and destination. If all eligible slots are busy, the command
+waits. To inspect the available Macs, run `"$runner" host runners`.
 
-The host checks the requested Xcode and destination and reserves a free slot in
-the same pool that GitHub Actions jobs use. When every eligible Mac is busy,
-the command waits and checks again. If no Mac can take the job, the command
-reports why. For a managed Simulator it first looks for an installed runtime
-and device type. If a runtime needs downloading, the selected runner prepares
-it before the build. A checkout-relative Xcode path resolves once the files
-arrive on the runner. Specify an absolute Xcode path to match it before
-dispatch. Use `--host "Build Mac"` to run on that specific host, or
-`--local` to build on the Mac where you ran the command.
+The transfer includes tracked edits and unignored new files present when the
+job is accepted, including those in submodules. Name the project, workspace or
+package relative to the current directory. The runner copies the log and
+result bundle back to `XcodeRunnerOutput` on the dashboard. Pass
+`--output-directory` to change that location. Interrupt the CLI to cancel.
 
-The checkout goes to the selected Mac. The command shows its output, copies the
-results back and exits with the build or test status. Interrupting the command
-cancels a pending request or stops the running operation.
-
-- **Files.** The command sends the Git checkout that contains the current
-  directory, including uncommitted edits to tracked files and untracked files
-  that Git does not ignore. The same rules apply inside submodules. The CLI
-  reads the working tree when a runner accepts the job, so edits made while
-  waiting are included. Build and test transfers omit Git history. The host runs the
-  operation in its copy of the current directory, so name the workspace,
-  project, or package relative to that directory.
-- **Host settings.** The operation uses the host's storage, its saved Xcode, and
-  its build service, and the same execution pool as jobs from GitHub. Automatic
-  jobs take a free slot after jobs already queued on that Mac. An absolute path in an option, such as
-  `--developer-directory` or the source of a `--prefix-mapping`, names a file on
-  the host. The operation runs with the host app's environment, not with the
-  shell's.
-- **Results.** The log and result bundle are copied to `--output-directory` on
-  the dashboard's Mac, `XcodeRunnerOutput` by default. In the output and the
-  copied log, the host's copy of the checkout and its output folder appear as
-  the matching folders on the dashboard's Mac, so the paths in compiler messages
-  open there. The result bundle keeps the host's paths. The host removes its
-  copy of the checkout and the build products when the operation ends.
-- **Compiler cache.** Operations from dashboards share one cache on the host,
-  apart from the caches of the repositories that run jobs from GitHub. The host
-  unpacks every worktree of a repository at the same path, so a later operation
-  reuses the entries of earlier ones, also from another worktree.
-
-Use `--local` for `--derived-data`, `--compilation-cache`, `--pool-directory`,
-or `--build-service-path`. A remote job uses the executing Mac's folders and
-build service. `test-without-building` runs locally because remote Macs
-discard build products when the operation finishes.
-
-The command starts the app that contains it to reach the host, because macOS
-gives the pairings in the app's Keychain item to the app alone. It finds the
-host with Bonjour on the local network, as the dashboard does.
-
-## Commands for the host
-
-The `xcode-runner` inside the installed app reads and changes this Mac's host
-as its window does. Each command prints the host's answer as JSON, and exits
-with a failure and the host's reason when the host refuses or does not run.
-
-```sh
-xcode-runner host runners         # runner Macs and free Xcode slots, including the host itself
-xcode-runner host status          # state, jobs, runner services, labels, and settings
-xcode-runner host pause           # take no new jobs
-xcode-runner host resume
-xcode-runner host labels fast gpu # replace the runner labels; --none removes them
-xcode-runner host restart         # stop the host and start it again
-```
-
-`configure` changes what a Mac's pane saves with **Save**:
-
-```sh
-xcode-runner host configure --maximum-jobs 2 --simulator-retention 20   # minutes, or forever
-xcode-runner host configure --xcode /Applications/Xcode.app/Contents/Developer   # or system
-xcode-runner host configure --build-service /path/to/SWBBuildServiceBundle   # or none
-xcode-runner host configure --storage /path/to/JobData
-xcode-runner host configure --repositories 101 102   # IDs from github status; --no-repositories selects none
-```
-
-The repository selection is a command of its own: the host registers runners
-after a changed limit, and takes no selection while it does.
-
-On this Mac, `xcode-runner host settings` changes the same settings and lists
-their types and choices; see
-[Settings from CLI and MCP](#settings-from-cli-and-mcp). `configure` also
-reaches other Macs with `--host` and `--mac`, described below.
-
-Restarting stops the runner services with the jobs that they run. `restart` is
-refused unless the host last counted no Xcode job on the Mac; pass `--stop-jobs`
-to restart anyway. A job can start between that count and the restart.
-
-The controls under **GitHub** and **Repositories** are commands as well:
-
-```sh
-xcode-runner host github status         # sign-in, repositories, and their runners
-xcode-runner host github connect --wait # print the code and its page, then the result
-xcode-runner host github cancel         # end a sign-in that waits for its code
-xcode-runner host github reload         # read the app's repositories again
-xcode-runner host github disconnect
-```
-
-`connect` prints `signInCode` with the code and the page to enter it on, and
-opens no browser. With `--wait` it prints the sign-in's result once the code
-was entered, and fails if the sign-in ended without an account. It is refused
-while an account is connected. `reload` and `disconnect` fail with the host's
-`errorMessage` when GitHub or the Keychain refused. To select the
-repositories, update the `githubRepositories` scope under
-[Settings from CLI and MCP](#settings-from-cli-and-mcp).
-
-A host pairs with a dashboard or a managing Mac through commands too:
-
-```sh
-xcode-runner host pairing status               # paired Macs, and the Mac that asks with its code
-xcode-runner host pairing allow dashboard --wait
-xcode-runner host pairing confirm 123456       # the code that the other Mac shows
-xcode-runner host pairing remove "Dashboard Mac"
-```
-
-`allow` waits five minutes for a Mac to pair as `dashboard` or `manager`, and
-with `--wait` returns once a Mac asked and shows its code. Both Macs show the
-same code unless someone on the network changed the keys between them. In the
-app a person compares the codes. `confirm` takes the code that the other Mac
-shows and compares it with this Mac's: a different code refuses the request
-and ends the wait. The Macs are paired once the other Mac confirmed as well,
-which is when `confirm` returns. `refuse` and `cancel` end the wait, and
-`stop-management` forgets the managing Mac.
-
-A Mac without a host pairs its dashboard with a host that waits for one:
-
-```sh
-xcode-runner host pairing request "Build Mac"  # the host's name on the network
-xcode-runner host pairing status               # the hosts that this Mac's dashboard shows
-xcode-runner host pairing remove "Build Mac"
-```
-
-`request` finds the host and prints `code`, the code that this Mac shows for
-the pairing. It then reads the code that the host shows from standard input and
-pairs if the two are the same. So an agent pairs two Macs in four steps:
-
-1. On the host, `pairing allow dashboard`.
-2. On the other Mac, start `pairing request` and read the code that it prints.
-3. On the host, read its code with `pairing status`.
-4. Write the host's code to the standard input of `pairing request`.
-5. On the host, give it the other Mac's code with `pairing confirm`, which
-   returns once the Macs are paired.
-
-Each Mac gets the other's code, so each refuses a request that did not come
-from the Mac that the agent runs commands on. `pairing request` ends with a
-failure when the host refuses or stops waiting, also while it reads the code. A
-dashboard that is open lists the host once the command paired it.
-
-A host pairs with a Mac to manage, and lists and removes the Macs that it
-manages:
-
-```sh
-xcode-runner host macs status                # pairing details for the Macs this host manages
-xcode-runner host macs pair "Second Mac"     # prints the host's code, then reads the Mac's from standard input
-xcode-runner host macs remove "Second Mac"
-```
-
-On the Mac to manage, run `pairing allow manager` first, and give it the
-host's code with `pairing confirm`, as for a dashboard. `macs pair` reads the
-Mac's code from standard input and has the host pair if it is the host's own.
-These commands take `--host` as well, for a host that this Mac's dashboard
-shows.
-
-The status, `configure`, runner, and GitHub commands also act on other Macs:
-
-```sh
-xcode-runner host status --host "Build Mac"            # a host that this Mac's dashboard shows
-xcode-runner host pause --mac "Second Mac"             # a Mac that this Mac's host manages
-xcode-runner host labels fast --host "Build Mac" --mac "Second Mac"
-```
-
-`--host` names a host that this Mac's dashboard is paired with, and the command
-reaches it over that pairing, as a build with `--host` does. `--mac` names a
-Mac that the host manages, which the host reaches for the command as it does
-for a dashboard; the command prints what the host then lists for that Mac. The
-GitHub commands take `--host` only, since a managed Mac's runners are
-registered by its host.
-
-These commands send the host what a dashboard sends it, so what a command can
-do and when the host refuses are the same as in the app, and the pairing
-commands follow the conditions of the window's buttons. They need the
-`xcode-runner` at `Contents/Helpers` in the app, which
-`~/Library/Application Support/XcodeRunnerKit/bin/xcode-runner` is on a host.
-
-## Settings from CLI and MCP
-
-The GUI, CLI, and MCP server use the same settings operations. Read the catalog
-from an installed CLI:
-
-```sh
-xcode-runner host settings get
-xcode-runner host settings get --scope pool
-xcode-runner host settings update \
-  '{"scope":"pool","maximumConcurrentJobs":2,"simulatorRetention":{"mode":"forever"}}'
-```
-
-The runner labels and whether the Mac is paused are scopes too. The running
-host applies them, as its window does:
-
-```sh
-xcode-runner host settings update '{"scope":"runnerLabels","labels":["fast","gpu"]}'
-xcode-runner host settings update '{"scope":"paused","paused":true}'
-```
-
-Updates are partial and apply to one scope. Omitted fields retain their saved
-values. A new pool requires `maximumConcurrentJobs`. The catalog includes each
-setting's current value, type, constraints, choices, and application timing.
-Storage also reports the active directory separately from the requested one.
-Read failures are returned as `readError`; they are distinct from unset values.
-
-Start the MCP server with `xcode-runner mcp`. It uses stdio and exposes
-`get_settings` and `update_settings`. To run it on a remote host, configure your
-MCP client to launch SSH with this command:
-
-```sh
-ssh -T ci-host 'exec "$HOME/Library/Application Support/XcodeRunnerKit/bin/xcode-runner" mcp'
-```
-
-`get_settings` accepts an optional `scope`. Pass an update object directly to
-`update_settings`, for example:
-
-```json
-{"scope":"pool","simulatorRetention":{"mode":"idleTimeout","minutes":30}}
-```
-
-Available scopes and when they take effect:
-
-| Scope | Fields | Takes effect |
-| --- | --- | --- |
-| `pool` | `maximumConcurrentJobs`, `simulatorRetention` | Next admission or Simulator maintenance; active jobs continue |
-| `buildService` | `path` (absolute path or `null` to clear) | Next CLI operation |
-| `xcode` | `developerDirectory` (an Xcode's `Contents/Developer` path, or `null` for the system selection) | Next CLI operation that names no Xcode |
-| `storage` | `directory` (absolute path to an existing folder) | Next host launch, after migration succeeds |
-| `githubRepositories` | `selectedRepositoryIDs` | Saved by the running app, then runner registrations synchronize |
-| `runnerLabels` | `labels` (the runners' own labels; an empty list removes them) | Saved by the running app; runners get them at the next synchronization |
-| `paused` | `paused` (`true` or `false`) | Saved by the running app; no new jobs start after the ones that run |
-
-Updates of `githubRepositories`, `runnerLabels`, and `paused` need the
-installed app running, and the catalog reports each as not `editable` with an
-`unavailableReason` while it does not answer. Their saved values can still be
-read. Synchronizing runner registrations also requires sign-in; a saved
-selection with pending synchronization returns `savedWithErrors`. The catalog
-reports the selectable repository IDs. Credentials remain in the app's
-Keychain. The other scopes can be read and saved without the app.
-
-Pool fields are saved together under the pool lock. Saving a configuration can
-succeed even if subsequent Simulator cleanup or runner synchronization fails;
-the update then returns `state: "savedWithErrors"` and an `errors` list. Retrying
-cleanup does not require reverting the saved settings. Invalid input and failures
-before saving produce an error.
+The executing Mac supplies the Xcode, build service, pool and compiler cache.
+For a local DerivedData directory or `test-without-building`, run the CLI
+locally. Direct submissions work independently of GitHub runner registration.
 
 ## Run a workflow from a dashboard
 
-On each Mac that will run workflows, install the [act](https://github.com/nektos/act)
-engine from this checkout:
+Install the bundled version of [act](https://github.com/nektos/act) on each Mac
+that will execute workflow files.
 
 ```sh
 bash Scripts/install-workflow-engine.sh
 ```
 
-On a paired dashboard, run the CLI inside XcodeHomeRunner.app from a Git checkout with an origin remote:
+From a dashboard checkout with an `origin` remote, run the workflow by path.
 
 ```sh
-/Applications/XcodeHomeRunner.app/Contents/Helpers/xcode-runner workflow run .github/workflows/native-ci.yml
+/Applications/XcodeHomeRunner.app/Contents/Helpers/xcode-runner workflow run \
+  .github/workflows/native-ci.yml --event pull_request --base main --json
 ```
 
-The default event is `workflow_dispatch`. Use `--event` to choose another event declared by the workflow.
-For a simulated pull request, `--base` selects the target branch and defaults to origin's default branch.
-The GitHub context uses the checkout's ref and HEAD. A GitHub-generated PR number or merge commit
-is available in a workflow dispatched by GitHub.
-The host reserves one free slot on a Mac with the engine installed. Its jobs run one at a time on that Mac
-using the same copy of the working tree, including tracked edits and unignored new files.
-The local Actions service supplies the checkout, evaluates job dependencies and runs the workflow steps.
-It evaluates the workflow on candidate Macs to match job conditions, matrix labels, and the selected ref
-before sending the checkout. Conditions that reference `needs` can depend on values produced at runtime.
-The host defers a job when its condition, matrix, or runner label contains the word `needs`
-(case-insensitive). This also matches literal labels such as `needs-xcode`.
-While choosing a Mac, it assumes that job can succeed and evaluates its dependents under that assumption.
-A deferred job can discover a missing label at execution time. A dependent can require a label during
-routing even if it is eventually skipped. Spell local reusable workflow references as literal
-`./.github/workflows/<file>` paths.
-Jobs receive a shallow Git repository with the submitted HEAD and index.
-Each invocation has its own runner and artifact store. GitHub's cross-run concurrency groups and repository secrets are unavailable.
+The default event is `workflow_dispatch`. Choose an event the YAML declares.
+For `pull_request`, the base defaults to the remote’s default branch. The
+simulated event uses the submitted checkout. For a test of GitHub’s proposed
+merge tree, check out that tree before running the workflow.
 
-A native job can select the Mac by its configured runner labels, `macos-latest`, or the installed
-Xcode major version (for example, `xcode-27`). The workflow inherits the host's selected Xcode.
-The CLI reports job outcomes and the failed step, and returns the workflow exit status. Use `--json`
-for a compact result with local paths and the log line for each failed step. Both formats show up to twelve jobs, with failures first.
-`summary.json` contains every job, and `--verbose` streams the full transcript. The runner copies `workflow.log`
-and uploaded artifacts to `XcodeRunnerOutput/<run ID>/` on the dashboard. Use `--output-directory`
-to choose another folder. An artifact uploaded as a ZIP is kept in its original form.
+The host reserves one slot. Jobs run serially on that Mac using its runner
+labels, installed tools and selected Xcode. Local reusable workflows need a
+literal `./.github/workflows/<file>` reference. A label that depends on a
+previous job’s output may only be known once that job finishes. Each invocation
+has its own artifact store. Workflows that require repository secrets, GitHub’s
+full webhook payload or cross-run concurrency need GitHub Actions.
+
+Start with the exit status and compact result. It lists up to twelve jobs,
+failures first, with log locations for failed steps. Under
+`XcodeRunnerOutput/<run ID>/` on the dashboard, `summary.json` lists every
+job, `workflow.log` contains the transcript, and `artifacts/` holds uploads.
+Use `--verbose` when you need to watch each step.
+
+## Connect GitHub
+
+Connect a host to GitHub to let workflows on GitHub use its runners. For
+public repositories, set **Settings > Actions > General > Require approval for
+all external contributors**. For private repositories, disable fork PR
+workflows or require approval. Review the code before approving a run.
+Workflows such as `pull_request_target` also need to restrict the code they
+execute. The host checks the fork settings before registering new runners.
+Existing services can still take jobs.
+
+Open **Settings…** on the host or its paired dashboard.
+
+1. Under **GitHub**, choose **Connect GitHub…**. GitHub's device page opens,
+   and the pane shows a code. Enter the code on that page and authorize the app.
+2. Under **Repositories**, choose **Add Repositories on GitHub…**, install the
+   app, and select the repositories this Mac will run.
+3. Return to the window and choose the reload button beside **Repositories**.
+4. Switch on the repositories to manage and choose **Save** in the toolbar.
+
+Enter the device code shown by your own app. Runner management requires
+repository administration access and the [XcodeHomeRunner GitHub
+App](https://github.com/apps/xcodehomerunner) installation. The host keeps
+sign-in tokens in Keychain. Disconnecting pauses registration management.
+Existing runner services and their jobs continue.
+
+### What the limit controls
+
+In the runner’s pane, set **Maximum concurrent jobs** and choose **Save**.
+All repositories and direct jobs share that Mac’s Xcode slots. Each selected
+repository gets enough GitHub runner registrations to use the whole limit.
+GitHub also counts checkout, uploads and jobs waiting for Xcode, so its
+in-progress count can exceed the number of occupied slots.
+
+Lowering the limit lets running operations finish. Extra registrations may
+remain. Deselecting a repository removes its managed runners after active jobs
+finish and the host can reach both GitHub and the Mac. The limit also caps the
+runner’s [managed Simulators](../README.md#ios-simulators).
+
+### Pause a Mac
+
+Turn off **Take new jobs** in the runner pane to drain that Mac. Existing
+operations finish. A GitHub job accepted while a runner service is stopping
+can be cancelled. Turn the setting back on to resume the registered services.
+
+## Pair other Macs
+
+To add execution capacity, install a runner on the additional Mac and pair it
+with the managing host.
+
+1. On the Mac to add, open **Settings…** and turn off **Host** under **Roles**.
+   The Mac waits five minutes for a host.
+2. On the managing Mac, the host, choose **Add Mac…** in **Settings**, select
+   the Mac, and choose **Continue**. Both Macs show a six-digit code.
+3. If the codes match, choose **Pair** on the managing Mac and **Allow** on the
+   added Mac. A different code means that another device answered, so choose
+   **Don't Allow**.
+
+The host can forward work to the added Mac and register GitHub runners on it
+for the selected repositories. It sends short-lived registration tokens.
+Dashboards reach that Mac through the host. **Remove Mac…** ends the pairing
+and leaves existing registrations on that Mac.
 
 ## Configure a workflow
 
-Use labels that match your runners. New runners include `xcode-runnerkit`,
-the labels of their Mac, and the custom labels shared by existing managed
-runners. Labels assigned to only some runners, such as `ci-interactive`, need
-separate configuration.
-
-To run a job on one Mac of a setup, give that Mac a label in **Runner
-labels** under **Overview** in its pane, such as `xcode-27` for the Mac that has that Xcode, and
-add the label to `runs-on`. The Mac's runners get the labels of its list besides
-`xcode-runnerkit`: new runners when they are registered, and existing ones at
-the next synchronization. A change is synchronized at once, except one made in
-the own window of a Mac that another Mac manages, which that Mac applies at its
-next synchronization. A label that leaves the list is removed from the runners.
-Labels that you set on a runner on GitHub stay. The Mac's own window, its
-managing host, and a dashboard edit the list.
-
-A macOS package test job can use:
+For workflows dispatched by GitHub, match the host’s labels in `runs-on`.
+Set **Runner labels** in a runner’s pane to target specific tools or hardware.
 
 ```yaml
 jobs:
@@ -673,56 +200,13 @@ jobs:
             --destination 'platform=macOS,arch=arm64'
 ```
 
-Replace `PackageName` with your scheme. Use `--workspace` or `--project` for
-an app, or the [Simulator options](../README.md#ios-simulators) for iOS tests.
-
-Keep `"{0}"` quoted in the shell template: job-data paths can contain spaces.
-Use `exec` in shell wrappers so cancellation reaches `xcode-runner`.
-The host supplies the shared pool, compiler cache, and output directory;
-those flags are not needed in each workflow.
-
-The CLI uses GitHub's `GITHUB_REPOSITORY_ID` to select a repository-specific
-compiler cache. All runners and branches of that repository share the cache;
-other repository IDs use separate directories. Entries are reused between
-runners only with [`--map-source-directory`](../README.md#shared-compilation-cache),
-because each runner checks out at its own path. A missing or invalid ID fails the
-operation instead of sharing an unscoped cache. An explicit `--compilation-cache`
-uses that directory as given, so choose a repository-specific path when overriding
-the default.
-
-To select a custom build service for a Mac's jobs, enter its executable's path
-in **Build service** under **Xcode** in the Mac's pane and choose **Save** in
-the toolbar. With an empty field, jobs use the build service that
-their environment names, or the one in their Xcode. The pane says so when no
-file is at the saved path. From the CLI:
-
-```sh
-"$HOME/Library/Application Support/XcodeRunnerKit/bin/xcode-runner" \
-  host build-service configure \
-  --path /path/to/SWBBuildServiceBundle
-```
-
-The next job reads the saved path directly. No host restart or login-time
-environment setup is needed, and the saved path comes before a build service
-that the login session's environment names. A workflow can override it with
-`--build-service-path /path/to/SWBBuildServiceBundle`. Run
-`host build-service status --json` to inspect the saved selection, or
-`host build-service configure` without `--path` to clear the override.
-For the Homebrew package, the executable is
-`$(brew --prefix custom-xcode-build-service)/libexec/libexec/swift-build/SWBBuildService.bundle/SWBBuildServiceBundle`.
-
-To choose the Xcode for a Mac's jobs, select it under **Xcode** in the Mac's
-pane and choose **Save** in the toolbar. The pane lists the Xcode apps installed on that Mac,
-also when it is shown on the managing Mac or a dashboard. Jobs use the saved
-Xcode when they name none: `--developer-directory` and `DEVELOPER_DIR` come
-first, and with **System selection** jobs use the Xcode that `xcode-select`
-names. If the saved Xcode is removed, the pane says so, and jobs that name no
-Xcode fail until another one is saved. From the CLI or MCP:
-
-```sh
-xcode-runner host settings update \
-  '{"scope":"xcode","developerDirectory":"/Applications/Xcode.app/Contents/Developer"}'
-```
+Use `exec` in shell wrappers so cancellation reaches the CLI. The host supplies
+the pool, output directory and repository-scoped compiler cache. See
+[shared compilation cache](../README.md#shared-compilation-cache) for reuse
+across checkout paths. The runner’s **Xcode** settings select the developer
+directory and optional build service for subsequent jobs. An explicit
+`--developer-directory` or `DEVELOPER_DIR` takes precedence over the saved
+Xcode. **System selection** uses `xcode-select`.
 
 ### Private SwiftPM dependencies
 
@@ -746,9 +230,58 @@ Add these options to the Xcode command:
 
 Keep the inner quotes around the `git-ssh` path because it contains spaces.
 
-## Storage
+## Commands for the host
 
-The job-data folder contains:
+Use the CLI embedded in the installed app. For host administration,
+`--host` addresses a paired host and `--mac` addresses one of its runners.
+Use the identifiers returned by `host runners`.
+
+```sh
+xcode-runner host runners         # runner Macs and free Xcode slots, including the host itself
+xcode-runner host status          # state, jobs, runner services, labels, and settings
+xcode-runner host pause           # take no new jobs
+xcode-runner host resume
+xcode-runner host labels fast gpu # replace the runner labels; --none removes them
+xcode-runner host restart         # stop the host and start it again
+```
+
+`configure` changes what a Mac's pane saves with **Save**:
+
+```sh
+xcode-runner host configure --maximum-jobs 2 --simulator-retention 20   # minutes, or forever
+xcode-runner host configure --xcode /Applications/Xcode.app/Contents/Developer   # or system
+xcode-runner host configure --build-service /path/to/SWBBuildServiceBundle   # or none
+xcode-runner host configure --storage /path/to/JobData
+xcode-runner host configure --repositories 101 102   # IDs from github status; --no-repositories selects none
+```
+
+`host restart` normally requires an idle Mac. Use `host github --help` for
+sign-in and repository commands, `host pairing --help` for dashboard pairing,
+and `host macs --help` to manage other runner Macs. For CLI pairing, exchange
+the six-digit codes between the two trusted Macs and confirm the code shown
+by the other Mac on each side.
+
+## Settings from CLI and MCP
+
+```sh
+xcode-runner host settings get
+xcode-runner host settings update '{"scope":"pool","maximumConcurrentJobs":2}'
+```
+
+The catalog gives the current values, available choices and when each setting
+takes effect. Updates change only the supplied fields in one scope. The
+`githubRepositories`, `runnerLabels` and `paused` scopes require the running
+app. A `savedWithErrors` result means the setting was saved and a subsequent
+operation needs attention. Inspect `errors` for the failed operation.
+
+The stdio server `xcode-runner mcp` exposes `get_settings` and
+`update_settings`. To reach a remote host, configure the client to launch:
+
+```sh
+ssh -T ci-host 'exec "$HOME/Library/Application Support/XcodeRunnerKit/bin/xcode-runner" mcp'
+```
+
+## Storage
 
 | Directory | Contents |
 | --- | --- |
@@ -756,83 +289,37 @@ The job-data folder contains:
 | `CompilationCache/<repository-ID>` | Compiler cache shared by jobs of that repository |
 | `Build/<operation-UUID>` | DerivedData, logs, and result bundles |
 
-Compiler cache entries from before repository scoping stay in `CompilationCache`
-and are not imported into repository caches. The first build for each repository
-populates its own cache.
+Tools and service logs live under `~/Library/Application Support/XcodeRunnerKit`.
+Runner installations live under `~/Library/XcodeRunnerKit/runners`.
 
-Tools and service logs stay under
-`~/Library/Application Support/XcodeRunnerKit`. Runner installations stay under
-`~/Library/XcodeRunnerKit/runners`.
-
-To move job data, choose a folder in this Mac's pane under **Runners** >
-**Storage** and select **Save** in the toolbar. The change
-takes effect on the next host launch. Wait for running jobs and other users of
-that data to finish, then choose **Restart to Apply…** in the same section. It
-shows the Xcode jobs that are running and, once confirmed, stops the Mac's
-runner services and restarts its host. The button also appears in the Mac's pane
-on its managing Mac and on a dashboard, so the Mac does not have to be restarted
-at its own screen. A host that was not started by its LaunchAgent has no such
-button; restart it the way it was started.
-
-The host copies the data and keeps the originals. The destination must not
-already contain `Work`, `CompilationCache`, or `Build`. If the saved folder is
-temporarily missing, such as while an encrypted external volume mounts after
-login, the host shows **Waiting for storage** and retries every two seconds.
-Runner services start when storage preparation succeeds, without restarting the
-host. The host does not recreate the missing storage parent. Folder changes saved
-while waiting apply on the next host launch.
-
-Other storage failures show **Needs attention**. Read the storage error, restore
-access to the original folder or choose another destination, and restart.
-
-For removable storage, keep the volume mounted and approve the app's initial
-volume-access prompt. If you use custom `includeIf.gitdir` authentication rules,
-update them for the new physical work path before restarting.
+To move job data, choose the new folder in the runner’s **Storage** settings
+and save. Drain jobs, stop other tools using these files, then choose **Restart
+to Apply…**. The host copies existing data and keeps the original files. The
+destination must be free of `Work`, `CompilationCache` and `Build`. If a
+volume is missing at login the host waits for it to mount. For **Needs
+attention**, inspect the storage error and restore access before restarting.
 
 ## Updates and troubleshooting
 
-To update, repeat [the installation steps](#install). The installer keeps the
-previous app, including its CLI, as `XcodeHomeRunner.previous.app`.
-
-The Macs of a setup, dashboards included, can be updated one at a time. Paired
-Macs that run different versions keep working together and pair with each
-other. What only the newer version has fails by itself on the older Mac, with a
-message that names the Mac to update, and the Mac's status and other settings
-stay shown.
-
-A Mac that runs a version from before this was possible answers only Macs of
-its own version. Each Mac's pane for the other then shows **Runs another
-version** and names the Mac to update, and the sheet that adds a Mac lists such
-a waiting Mac without pairing with it. The pairing is kept, and the Macs connect again once
-that Mac is updated. Earlier
-versions installed the CLI separately with `install-host-tools.sh`; the first
-installation of an app that contains the CLI keeps that copy as
-`bin/xcode-runner.previous`.
-
-Inspect or restart the host with:
+Drain queued and running jobs before updating an installed host. Repeat the
+[installation](#install) with a build signed by the same team. The installer
+keeps `XcodeHomeRunner.previous.app`. To update a dashboard, replace its app.
+When a pane reports **Runs another version**, update the named Mac.
 
 ```sh
 launchctl print "gui/$(id -u)/lynnpd.xcodehomerunner"
-launchctl kickstart -k "gui/$(id -u)/lynnpd.xcodehomerunner"
 ```
 
-Logs are under `~/Library/Application Support/XcodeRunnerKit/logs`:
-
-- `runner-host.stdout.log` and `runner-host.stderr.log`: app startup and storage errors
-- `runners/<runner-name>.log`: runner service output
-
-GitHub's runner diagnostics are in each installation's `_diag` directory.
-Xcode logs and result bundles are in the job-data folder's `Build` directory.
-After a Mac reboot, log into the CI account to start its LaunchAgent.
+Check `logs/runner-host.stderr.log` and `logs/runner-host.stdout.log` under
+the support directory for startup errors. Per-service output is in
+`logs/runners/<runner-name>.log`. GitHub diagnostics live in the runner
+installation’s `_diag` folder.
 
 ## Existing GitHub Apps and runners
 
-To sign in through another GitHub App, set its Client ID and slug in
-`GitHubApp.xcodeHomeRunner` (`Sources/XcodeRunnerHostApp/GitHubApp.swift`) and
-build the app. The slug is the name after `github.com/apps/`. The app must
-enable **Device Flow** and grant repository **Administration: Read and write**
-and **Metadata: Read-only**. Disable its webhook and keep user token expiration
-enabled. It needs no client secret or private key.
+When migrating from XcodeRunnerHost or a per-host GitHub App, install the
+current app, sign in again and grant its shared GitHub App access to the same
+repositories. The installer preserves runner registrations and job data.
 
 For manual registration, download the official
 [macOS ARM64 runner v2.338.0](https://github.com/actions/runner/releases/tag/v2.338.0)
@@ -854,6 +341,4 @@ its jobs. Its work folder must already be the physical
 bash Scripts/enable-hosted-runner.sh "$HOME/Library/XcodeRunnerKit/runners/runner-name"
 ```
 
-This keeps the registration and credentials, removes the individual service,
-and lets the common host start the runner. Runners with an individual `.service`
-are otherwise left unchanged.
+This transfers the service to the host and keeps its registration and credentials.
