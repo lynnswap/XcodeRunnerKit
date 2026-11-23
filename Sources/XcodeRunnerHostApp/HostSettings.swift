@@ -274,6 +274,7 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
     /// Whether the Mac reports its build service. One that runs a version without the setting can have one saved.
     var reportsBuildService: Bool { buildServiceIsMissing != nil }
     let buildServiceError: String?
+    let packageRouting: PackageRouting?
     let jobOptions: HostJobOptions?
     let jobOptionsReadError: String?
     let canApplyPoolConfiguration: Bool
@@ -304,6 +305,7 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
         savedBuildService = settings.savedBuildService
         buildServiceIsMissing = settings.savedBuildServiceIsMissing
         buildServiceError = settings.buildServiceError
+        packageRouting = settings.github.packageRouting
         jobOptions = settings.jobOptions
         jobOptionsReadError = settings.jobOptionsReadError
         canApplyPoolConfiguration = settings.canApplyPoolConfiguration
@@ -371,7 +373,7 @@ final class HostSettingsModel: HostSettingsDisplay {
     /// The Macs that this host manages.
     let managedMacs: PairedMacs
     /// Answers a dashboard's requests about the Macs that this host manages.
-    @ObservationIgnored private(set) lazy var managedMacsRelay = ManagedMacsRelay(host: self)
+    let managedMacsRelay = ManagedMacsRelay()
     let settingsService: HostSettingsService
     /// Runs the builds and tests that dashboards send to this Mac.
     let operations: RemoteOperations
@@ -513,7 +515,7 @@ final class HostSettingsModel: HostSettingsDisplay {
         }
         // The Macs paired with this Mac read and change its settings through the owner of this Mac's window.
         self.management.settings = self
-        self.managedMacs.jobOptionsOwner = self
+        self.managedMacs.managingHost = self
         self.github.pairedMacs = self.managedMacs
         self.github.management = self.management
     }

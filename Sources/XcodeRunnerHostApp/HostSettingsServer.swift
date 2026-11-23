@@ -95,6 +95,8 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
             let reply = await settings.answer(request)
             let followUp: FollowUp = { await settings.finish(request, answeredWith: reply, registersRunners: true) }
             return (reply, followUp)
+        case .packageAccess(let change):
+            return (await github.changePackageAccess(change), nil)
         case .github(let request):
             let reply = await github.answer(request)
             // The selection is saved, and its runners are registered and removed after the answer.
@@ -102,7 +104,7 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
             let followUp: FollowUp = { await settings.github.synchronizeSavedSelection() }
             return (reply, followUp)
         case .macs(let request):
-            let answer = await settings.managedMacsRelay.answer(request, from: Self.commands)
+            let answer = await settings.managedMacsRelay.answer(request, from: Self.commands, on: settings)
             // The limit is saved, and runners are registered for it after the answer.
             guard answer.registrationsChanged else { return (answer.reply, nil) }
             let followUp: FollowUp = { await settings.github.synchronize() }

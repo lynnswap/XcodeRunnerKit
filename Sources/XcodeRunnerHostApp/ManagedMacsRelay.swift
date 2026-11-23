@@ -116,8 +116,6 @@ final class ManagedMacsRelay {
     /// sheet is open, and cannot always say that it closed.
     static let discoveryLifetime = Duration.seconds(10)
 
-    private unowned let host: HostSettingsModel
-    private var macs: PairedMacs { host.managedMacs }
     private let session = UUID()
     private var revision = 0
     private var pairing: Task<Void, Never>?
@@ -130,15 +128,14 @@ final class ManagedMacsRelay {
     private var discovery: Task<Void, Never>?
     private var lastDiscoveryRequest = ContinuousClock.now
 
-    init(host: HostSettingsModel) { self.host = host }
-
     /// What this host tells `dashboard` about its Macs now.
-    func report(for dashboard: HostPairing.ID) -> ManagedMacsReport {
+    func report(for dashboard: HostPairing.ID, on host: HostSettingsModel) -> ManagedMacsReport {
+        let macs = host.managedMacs
         revision += 1
         // A pairing from this host's own Add Mac sheet, or from another dashboard, shows its code there.
         let attempt = pairingAttempt?.dashboard == dashboard ? pairingAttempt?.id : nil
         let isPairing = attempt != nil && pairing != nil
-        let notices = [macs.message].compactMap { $0 } + macs.jobOptionsSyncErrors
+        let notices = [macs.message].compactMap { $0 } + macs.settingsSyncErrors
         return ManagedMacsReport(
             session: session, revision: revision,
             macs: macs.macs.map { mac in
@@ -159,15 +156,33 @@ final class ManagedMacsRelay {
     /// - Returns: The reply, and whether a Mac saved an edited job limit or runner labels, so that this host updates
     ///   its runners as it does after the change in its own pane for the Mac.
     func answer(
-        _ request: ManagedMacsRequest, from dashboard: HostPairing.ID
+        _ request: ManagedMacsRequest, from dashboard: HostPairing.ID, on host: HostSettingsModel
     ) async -> (reply: HostLinkReply, registrationsChanged: Bool) {
+        let macs = host.managedMacs
+
+        /// Changes a Mac's settings. When the Mac does not confirm the change, the dashboard shows what this host's own
+        /// pane for the Mac shows: the change may or may not have been applied.
+        func relay(_ request: HostSettingsRequest, to mac: HostPairing.ID) async throws {
+            do {
+                _ = try await macs.relay(request, to: mac)
+            } catch {
+                throw HostLinkError.refused(PairedMacSettings.changeFailure(error, on: macs.mac(mac)?.name ?? "The Mac"))
+            }
+        }
+
+        func requireCanAddMacs() throws {
+            guard host.canAddMacs else {
+                throw HostLinkError.refused("\(HostPane.macName) is managed by another Mac, so it cannot add Macs.")
+            }
+        }
+
         var registrationsChanged = false
         do {
             switch request {
             case .listRunners:
                 async let peers = macs.readRunnerSlots()
                 let own = RunnerMacStatus(name: host.management.name, slots: await host.readRunnerSlots())
-                var inventory = report(for: dashboard)
+                var inventory = report(for: dashboard, on: host)
                 inventory.runnerMacs = [own] + (await peers)
                 return (.macs(inventory), false)
             case .read(let refreshing):
@@ -195,7 +210,7 @@ final class ManagedMacsRelay {
             case .discover:
                 try requireCanAddMacs()
                 lastDiscoveryRequest = .now
-                discoverWhileAsked()
+                discoverWhileAsked(on: macs)
             case .pair(let waitingMac, let attempt):
                 try requireCanAddMacs()
                 guard attempt != cancelledAttempt else { break }
@@ -224,7 +239,7 @@ final class ManagedMacsRelay {
                 pairing?.cancel()
                 await pairing?.value
             }
-            return (.macs(report(for: dashboard)), registrationsChanged)
+            return (.macs(report(for: dashboard, on: host)), registrationsChanged)
         } catch {
             return (.refused(error.localizedDescription), false)
         }
@@ -236,24 +251,8 @@ final class ManagedMacsRelay {
         for task in tasks { await task?.value }
     }
 
-    /// Changes a Mac's settings. When the Mac does not confirm the change, the dashboard shows what this host's own
-    /// pane for the Mac shows: the change may or may not have been applied.
-    private func relay(_ request: HostSettingsRequest, to mac: HostPairing.ID) async throws {
-        do {
-            _ = try await macs.relay(request, to: mac)
-        } catch {
-            throw HostLinkError.refused(PairedMacSettings.changeFailure(error, on: macs.mac(mac)?.name ?? "The Mac"))
-        }
-    }
-
-    private func requireCanAddMacs() throws {
-        guard host.canAddMacs else {
-            throw HostLinkError.refused("\(HostPane.macName) is managed by another Mac, so it cannot add Macs.")
-        }
-    }
-
     /// Looks for waiting Macs for every dashboard that asks, alongside this host's own Add Mac sheet.
-    private func discoverWhileAsked() {
+    private func discoverWhileAsked(on macs: PairedMacs) {
         guard discovery == nil else { return }
         macs.discoverPairableMacs()
         discovery = Task {

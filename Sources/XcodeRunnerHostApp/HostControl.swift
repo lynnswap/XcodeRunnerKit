@@ -13,7 +13,7 @@ struct HostControl: AsyncParsableCommand {
         commandName: "xcode-runner host",
         abstract: "Manage the paired host and its runners, or the local service on an unpaired host Mac.",
         subcommands: [
-            Status.self, Runners.self, Configure.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self, Macs.self,
+            Status.self, Runners.self, Configure.self, Settings.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self, Macs.self,
         ]
     )
 
@@ -88,6 +88,39 @@ struct HostControl: AsyncParsableCommand {
             let host = try await mac.destination()
             for request in settingsRequests { try await HostControl.perform(request, host: host, mac: mac.mac) }
             if let selection { try await HostControl.perform(.github(.applySelection(selection)), on: host) }
+        }
+    }
+
+    struct Settings: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(subcommands: [PackageAccess.self])
+    }
+
+    struct PackageAccess: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Read or change the repositories jobs can fetch with the host’s GitHub sign-in.",
+            subcommands: [List.self, Add.self, Remove.self]
+        )
+
+        @MainActor static func perform(_ change: PackageAccessChange, target: LocalHostOption) async throws {
+            guard case .packageRepositories(let names) = try await HostControl.reply(to: .packageAccess(change), on: target.destination()) else {
+                throw HostControl.unexpectedAnswer
+            }
+            try HostControl.write(names)
+        }
+
+        struct List: AsyncParsableCommand {
+            @OptionGroup var target: LocalHostOption
+            func run() async throws { try await perform(.list, target: target) }
+        }
+        struct Add: AsyncParsableCommand {
+            @Argument(help: "GitHub dependency repository, as OWNER/REPO.") var repository: String
+            @OptionGroup var target: LocalHostOption
+            func run() async throws { try await perform(.add(repository), target: target) }
+        }
+        struct Remove: AsyncParsableCommand {
+            @Argument(help: "GitHub dependency repository, as OWNER/REPO.") var repository: String
+            @OptionGroup var target: LocalHostOption
+            func run() async throws { try await perform(.remove(repository), target: target) }
         }
     }
 
@@ -823,19 +856,27 @@ struct HostControl: AsyncParsableCommand {
 
 extension PairingRole: ExpressibleByArgument {}
 
-/// The Mac that a command reads or changes through its host.
-struct MacOption: ParsableArguments {
-    @Option(help: "A Mac that the host manages, by its name or ID. Without it, the host itself.")
-    var mac: String?
+struct LocalHostOption: ParsableArguments {
     @Flag(help: "Address the runner service on this Mac, even when this dashboard is paired.")
     var local = false
-
-    func validate() throws {
-        if local, mac != nil { throw ValidationError("Choose either --local or --mac.") }
-    }
 
     @MainActor func destination() throws -> PairedMac? {
         if local { return nil }
         return try HostControl.destination()
+    }
+}
+
+/// The Mac that a command reads or changes through its host.
+struct MacOption: ParsableArguments {
+    @Option(help: "A Mac that the host manages, by its name or ID. Without it, the host itself.")
+    var mac: String?
+    @OptionGroup var host: LocalHostOption
+
+    func validate() throws {
+        if host.local, mac != nil { throw ValidationError("Choose either --local or --mac.") }
+    }
+
+    @MainActor func destination() throws -> PairedMac? {
+        try host.destination()
     }
 }

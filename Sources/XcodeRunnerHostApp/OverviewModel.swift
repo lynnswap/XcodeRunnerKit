@@ -51,7 +51,7 @@ final class OverviewModel: PaneSaving {
     /// be told. Removing one of the host's Macs returns to this pane, where its notice stays visible.
     var notices: [String] {
         if case .thisMac(let settings) = source {
-            return settings.managedMacs.jobOptionsSyncErrors
+            return settings.managedMacs.settingsSyncErrors
         }
         guard case .host(let hosts, let host) = source else { return [] }
         return [hosts.message, hosts.answer(of: host.id)?.settings.githubError, hosts.macsManaged(by: host.id).message].compactMap { $0 }

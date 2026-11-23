@@ -26,6 +26,15 @@ final class PairedMacSettings {
     let hostDraft = HostSettingsDraft()
     let runnerSave = SettingsSave<RunnerSetting>()
     var jobOptionsSyncError: String?
+    var packageSyncError: String?
+    var packageListenerError: String?
+    /// Changes when a settings write finishes, including one whose acknowledgment was lost.
+    struct WriteRevision: Equatable, Sendable {
+        var packages: UInt64 = 0
+        var confirmedPackages: UInt64 = 0
+        var jobOptions: UInt64 = 0
+    }
+    var settingsWriteRevision = WriteRevision()
     var storageDirectoryInput = ""
     private(set) var isSaving = false
     private(set) var isSavingStorage = false
@@ -305,7 +314,7 @@ struct PairedRunnerMac: RunnerMac {
     }
 
     func install(_ request: RunnerProvisioner.InstallationRequest) async throws {
-        try await macs.synchronizeJobOptions(beforeRegistering: id)
+        try await macs.synchronizeSettings(beforeRegistering: id)
         try await change(.install(request))
     }
 
@@ -373,7 +382,11 @@ final class PairedMacs: MacList {
     private let browses: Bool
     private let version: Int
     private let openURL: @MainActor (URL) -> Bool
-    private(set) var macs: [PairedMac] = []
+    private(set) var macs: [PairedMac] = [] {
+        didSet { if packageServiceStarted { updatePackageListeners() } }
+    }
+    private var packageServiceStarted = false
+    private var packageListeners: [UUID: Task<Void, Never>] = [:]
     private(set) var statuses: [HostPairing.ID: Status] = [:]
     /// Kept while a Mac is not found, so that its pane can show when the settings were last read.
     private(set) var settings: [HostPairing.ID: PairedMacSettings] = [:]
@@ -391,8 +404,16 @@ final class PairedMacs: MacList {
     /// Whether this Mac is pairing with a Mac. One pairing shows its code at a time.
     private(set) var isPairing = false
     static let alreadyPairing = HostLinkError.refused("\(HostPane.macName) is already pairing with a Mac.")
-    @ObservationIgnored weak var jobOptionsOwner: HostSettingsModel?
-    private var jobOptionsUpdates: [HostPairing.ID: (endpoint: NWEndpoint, task: Task<HostSettingsReport, any Error>)] = [:]
+    @ObservationIgnored weak var managingHost: HostSettingsModel?
+    private enum SettingGroup: Hashable { case jobOptions, packages }
+    private struct SyncTarget: Hashable { let mac: UUID; let group: SettingGroup }
+    private struct SettingsRead: Sendable {
+        let report: HostSettingsReport
+        /// The writes that had finished before the remote read started, even when several callers share that read.
+        let revision: PairedMacSettings.WriteRevision?
+    }
+    private var updates: [SyncTarget: (endpoint: NWEndpoint, task: Task<SettingsRead, any Error>)] = [:]
+    private var writes: Set<SyncTarget> = []
     private var endpoints: [HostPairing.ID: NWEndpoint] = [:]
     func endpoint(for mac: PairedMac) -> NWEndpoint? { endpoints[mac.id] }
     /// Every management service found, by pairing ID. A Mac advertises its new pairing before this host saves it.
@@ -469,6 +490,10 @@ final class PairedMacs: MacList {
     /// Finds the paired Macs on the local network. Browsing waits for the first pairing, so a Mac that paired with
     /// no Macs does not ask for local network access.
     func start() {
+        if role == .manager, browses, managingHost != nil {
+            packageServiceStarted = true
+            updatePackageListeners()
+        }
         guard browses, browsing == nil, !macs.isEmpty, !hasLegacyHosts else { return }
         browsing = Task {
             await withTaskGroup { group in
@@ -491,10 +516,58 @@ final class PairedMacs: MacList {
         }
     }
 
+    private func updatePackageListeners() {
+        for id in packageListeners.keys where mac(id) == nil {
+            packageListeners.removeValue(forKey: id)?.cancel()
+        }
+        for mac in macs where packageListeners[mac.id] == nil {
+            let pairing = mac.pairing
+            settings[mac.id]?.packageListenerError = nil
+            packageListeners[mac.id] = Task {
+                do {
+                    try await HostLink.listen(
+                        key: pairing.symmetricKey, identity: pairing.id.uuidString,
+                        advertising: .bonjour(name: PackageFetch.serviceName(pairing.id), type: HostLink.managementService),
+                        ready: { _ in }, connected: { _ in }
+                    ) { request, reply, next in
+                        try await self.answerPackageRequest(request, from: pairing, reply: reply, next: next)
+                    }
+                } catch is CancellationError {
+                } catch {
+                    guard !Task.isCancelled, self.mac(pairing.id)?.pairing == pairing else { return }
+                    self.packageListeners[pairing.id] = nil
+                    self.settings[pairing.id]?.packageListenerError = "Could not serve packages: " + error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func answerPackageRequest(
+        _ request: HostLinkRequest, from pairing: HostPairing, reply send: @escaping @Sendable (HostLinkReply) async throws -> Void,
+        next: @escaping @Sendable () async throws -> HostLinkRequest
+    ) async throws {
+        let reply: @Sendable (HostLinkReply) async throws -> Void = { message in
+            try await HostLink.within(.seconds(PackageFetch.idleTimeout)) { try await send(message) }
+        }
+        guard let owner = managingHost, owner.management.manager == nil, mac(pairing.id)?.pairing == pairing else {
+            return try await reply(.refused("This Mac is no longer managed by this host."))
+        }
+        guard case .fetchPackage(let fetch) = request else {
+            return try await reply(.refused("Runners can only fetch approved packages here."))
+        }
+        do { try await owner.github.servePackage(fetch, reply: reply, next: next) }
+        catch {
+            try await reply(.refused(error.localizedDescription))
+            throw error
+        }
+    }
+
     func shutDown() async {
         isShuttingDown = true
-        let tasks = [browsing, pairableBrowsing].compactMap { $0 } + statusChecks.values
-        let updates = jobOptionsUpdates.values.map(\.task)
+        packageServiceStarted = false
+        let tasks = [browsing, pairableBrowsing].compactMap { $0 } + statusChecks.values + packageListeners.values
+        packageListeners.removeAll()
+        let updates = self.updates.values.map(\.task)
         statusChecks.removeAll()
         browsing = nil
         pairableBrowsing = nil
@@ -757,65 +830,200 @@ final class PairedMacs: MacList {
         }
     }
 
-    func synchronizeJobOptions(beforeRegistering id: HostPairing.ID) async throws {
+    func synchronizeSettings(beforeRegistering id: HostPairing.ID) async throws {
         guard let mac = mac(id), let endpoint = endpoints[id] else { throw HostLinkError.unreachable("The runner is offline.") }
         _ = try await synchronizedSettings(of: mac, at: endpoint)
     }
 
-    /// Recheck after each transfer: the host can be edited while a runner is receiving an older save.
     func synchronizedSettings(of mac: PairedMac, at endpoint: NWEndpoint, report: HostSettingsReport? = nil) async throws -> HostSettingsReport {
-        guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
-        guard let owner = jobOptionsOwner else {
+        guard let owner = managingHost else {
             if let report { return report }
             return try await requestSettings(.read, from: mac, at: endpoint)
         }
         var initial = report
-        while let update = jobOptionsUpdates[mac.id] {
+        var followedPackageRetry = false
+        while true {
+            let packagesApplied: Bool
+            do {
+                _ = try await synchronize(.packages, of: mac, at: endpoint, report: initial)
+                packagesApplied = true
+                if endpoints[mac.id] == endpoint { settings[mac.id]?.packageSyncError = nil }
+            } catch HostLinkError.timedOut {
+                // Both groups need the same settings read. A runner that never answered it cannot take this job.
+                throw HostLinkError.timedOut
+            } catch {
+                packagesApplied = false
+                if endpoints[mac.id] == endpoint { settings[mac.id]?.packageSyncError = error.localizedDescription }
+            }
+            initial = nil
+            // The other group may have changed while packages were synchronizing. Read a fresh report for this phase.
+            let read = try await synchronize(.jobOptions, of: mac, at: endpoint)
+            let current = read.report
+            guard endpoints[mac.id] == endpoint else { throw HostLinkError.unreachable("\(mac.name)'s address changed.") }
+            // A matching snapshot can predate a write still in flight. Join it before deciding what the job will use.
+            if !packagesApplied, !followedPackageRetry,
+               let retry = updates[SyncTarget(mac: mac.id, group: .packages)], retry.endpoint == endpoint {
+                followedPackageRetry = true
+                switch await retry.task.result {
+                case .success: continue
+                case .failure(let error): settings[mac.id]?.packageSyncError = error.localizedDescription
+                }
+                guard endpoints[mac.id] == endpoint else { throw HostLinkError.unreachable("\(mac.name)'s address changed.") }
+            }
+            let writers = writes.filter { $0.mac == mac.id && (packagesApplied || $0.group == .jobOptions) }
+                .compactMap { updates[$0]?.task }
+            if !writers.isEmpty {
+                for writer in writers { _ = await writer.result }
+                continue
+            }
+            let revision = settings[mac.id]?.settingsWriteRevision
+            // After a failure, a successful retry invalidates the old snapshot. Further refusals can be reported without delaying a public job.
+            let packagesChanged = packagesApplied ? read.revision?.packages != revision?.packages
+                : read.revision?.confirmedPackages != revision?.confirmedPackages
+            if read.revision?.jobOptions != revision?.jobOptions || packagesChanged {
+                continue
+            }
+            if try change(for: .jobOptions, in: current, owner: owner, mac: mac) != nil { continue }
+            if packagesApplied {
+                do {
+                    if try change(for: .packages, in: current, owner: owner, mac: mac) != nil { continue }
+                } catch { settings[mac.id]?.packageSyncError = error.localizedDescription }
+            }
+            return current
+        }
+    }
+
+    private func change(
+        for group: SettingGroup, in report: HostSettingsReport, owner: HostSettingsModel, mac: PairedMac
+    ) throws -> HostLinkRequest? {
+        switch group {
+        case .packages:
+            let desired = try owner.github.packageRepositories()
+            if report.packageRouting == .applied(desired) { return nil }
+            guard report.packageRouting != nil else {
+                if desired.isEmpty { return nil }
+                throw HostSettingsError("Update XcodeHomeRunner on \(mac.name) to fetch this host’s private packages.")
+            }
+            return .syncPackageRepositories(desired)
+        case .jobOptions:
+            guard let desired = owner.jobOptions?.enabledEntries else {
+                throw HostSettingsError(owner.jobOptionsReadError ?? "Could not read the host's job defaults.")
+            }
+            if let error = report.jobOptionsReadError { throw HostSettingsError(error) }
+            if report.jobOptions == desired { return nil }
+            guard report.jobOptions != nil else {
+                if desired == HostJobOptions() { return nil }
+                throw HostSettingsError("Update XcodeHomeRunner on \(mac.name) to receive this host’s job defaults.")
+            }
+            return .syncJobOptions(desired)
+        }
+    }
+
+    /// Each setting has its own acknowledgment. A package save can finish even if a job-defaults write is pending.
+    private func synchronize(
+        _ group: SettingGroup, of mac: PairedMac, at endpoint: NWEndpoint, report: HostSettingsReport? = nil
+    ) async throws -> SettingsRead {
+        guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
+        guard let owner = managingHost else {
+            let revision = settings[mac.id]?.settingsWriteRevision
+            let current = if let report { report } else { try await requestSettings(.read, from: mac, at: endpoint) }
+            return SettingsRead(report: current, revision: revision)
+        }
+        let target = SyncTarget(mac: mac.id, group: group)
+        var initial = report
+        while let update = updates[target] {
+            guard endpoints[mac.id] == endpoint else { throw HostLinkError.unreachable("\(mac.name)'s address changed.") }
             if update.endpoint == endpoint { return try await update.task.value }
-            // The former endpoint may already have received its write. Finish it before reading the new endpoint.
             _ = await update.task.result
             initial = nil
         }
         guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
         let update = Task {
-            defer { jobOptionsUpdates[mac.id] = nil }
-            var report: HostSettingsReport = if let initial { initial } else { try await requestSettings(.read, from: mac, at: endpoint) }
-            while true {
+            defer { updates[target] = nil }
+            var revision = settings[mac.id]?.settingsWriteRevision
+            var report = if let initial { initial } else { try await requestSettings(.read, from: mac, at: endpoint) }
+            guard endpoints[mac.id] == endpoint else { throw HostLinkError.unreachable("\(mac.name)'s address changed.") }
+            while let request = try change(for: group, in: report, owner: owner, mac: mac) {
                 guard endpoints[mac.id] == endpoint else { throw HostLinkError.unreachable("\(mac.name)'s address changed.") }
-                guard let desired = owner.jobOptions?.enabledEntries else {
-                    throw HostSettingsError(owner.jobOptionsReadError ?? "Could not read the host's job defaults.")
+                let reply: HostLinkReply
+                do {
+                    revision = settings[mac.id]?.settingsWriteRevision
+                    writes.insert(target)
+                    defer {
+                        writes.remove(target)
+                        switch group {
+                        case .packages: settings[mac.id]?.settingsWriteRevision.packages &+= 1
+                        case .jobOptions: settings[mac.id]?.settingsWriteRevision.jobOptions &+= 1
+                        }
+                    }
+                    reply = try await send(request, to: mac, at: endpoint)
+                } catch HostLinkError.timedOut where group == .packages {
+                    throw HostSettingsError("The runner did not confirm its package routes in time.")
                 }
-                if let error = report.jobOptionsReadError { throw HostSettingsError(error) }
-                if report.jobOptions == desired { break }
-                guard report.jobOptions != nil else {
-                    if desired == HostJobOptions() { break }
-                    throw HostSettingsError("Update XcodeHomeRunner on \(mac.name) to receive this host’s job defaults.")
-                }
-                let reply = try await send(.syncJobOptions(desired), to: mac, at: endpoint)
                 if case .refused(let reason) = reply { throw HostLinkError.refused(reason) }
-                guard case .settings(let saved) = reply, saved.jobOptions == desired else { throw HostLinkError.unexpectedReply }
+                guard case .settings(let saved) = reply else { throw HostLinkError.unexpectedReply }
+                switch request {
+                case .syncPackageRepositories(let names) where saved.packageRouting == .applied(names):
+                    settings[mac.id]?.settingsWriteRevision.confirmedPackages &+= 1
+                case .syncJobOptions(let options) where saved.jobOptions == options: break
+                default: throw HostLinkError.unexpectedReply
+                }
                 report = saved
             }
-            return report
+            return SettingsRead(report: report, revision: revision)
         }
-        jobOptionsUpdates[mac.id] = (endpoint, update)
+        updates[target] = (endpoint, update)
         return try await update.value
     }
 
-    var jobOptionsSyncErrors: [String] {
-        macs.compactMap { mac in settings[mac.id]?.jobOptionsSyncError.map { "\(mac.name): \($0)" } }
+    var settingsSyncErrors: [String] {
+        var seen: Set<String> = []
+        return macs.flatMap { mac in
+            let state = settings[mac.id]
+            return [state?.jobOptionsSyncError, state?.packageSyncError, state?.packageListenerError].compactMap { $0 }.map { "\(mac.name): \($0)" }
+        }.filter { seen.insert($0).inserted }
+    }
+
+    /// A save targets a paired Mac. Once discovery moves it, verify at the replacement address once.
+    /// An acknowledgment survives a disconnect. Later discoveries retry any outstanding changes.
+    private func deliver(_ group: SettingGroup, to mac: PairedMac, at first: NWEndpoint) async throws {
+        do { _ = try await synchronize(group, of: mac, at: first) }
+        catch {
+            guard let current = endpoints[mac.id], current != first else { throw error }
+        }
+        guard let replacement = endpoints[mac.id], replacement != first else { return }
+        _ = try await synchronize(group, of: mac, at: replacement)
+        if let current = endpoints[mac.id], current != replacement {
+            throw HostLinkError.unreachable("\(mac.name)'s address changed again before its settings could be confirmed.")
+        }
     }
 
     /// Disconnected runners receive the current settings when their regular status checks resume.
     func distributeJobOptions() async {
         for mac in macs {
             guard let endpoint = endpoints[mac.id] else { continue }
-            var syncError: String?
             do {
-                _ = try await synchronizedSettings(of: mac, at: endpoint)
-            } catch { syncError = error.localizedDescription }
-            if endpoints[mac.id] == endpoint { settings[mac.id]?.jobOptionsSyncError = syncError }
+                try await deliver(.jobOptions, to: mac, at: endpoint)
+                settings[mac.id]?.jobOptionsSyncError = nil
+            } catch { settings[mac.id]?.jobOptionsSyncError = error.localizedDescription }
         }
+    }
+
+    /// Returns only failures from this save of the package grants.
+    func distributePackages() async -> [String] {
+        var errors: [String] = []
+        for mac in macs {
+            guard let endpoint = endpoints[mac.id] else { continue }
+            do {
+                try await deliver(.packages, to: mac, at: endpoint)
+                settings[mac.id]?.packageSyncError = nil
+            } catch {
+                guard self.mac(mac.id) != nil else { continue }
+                settings[mac.id]?.packageSyncError = error.localizedDescription
+                errors.append("\(mac.name): \(error.localizedDescription)")
+            }
+        }
+        return errors
     }
 
     /// Reads the settings of the Mac at `endpoint`, which also shows whether it accepts this Mac. Browsing calls this
@@ -842,7 +1050,7 @@ final class PairedMacs: MacList {
         var github: GitHubReport?
         var managed: ManagedMacsReport?
         do {
-            let overlapsFormerEndpoint = jobOptionsUpdates[id].map { $0.endpoint != endpoint } ?? false
+            let overlapsFormerEndpoint = updates.contains { $0.key.mac == id && $0.value.endpoint != endpoint }
             let read = try await requestSettings(.read, from: mac, at: endpoint)
             report = read
             if role == .manager {
@@ -1207,6 +1415,7 @@ final class PairedMacs: MacList {
     }
 
     private func checkFoundMacs() async {
+        if packageServiceStarted { updatePackageListeners() }
         await withTaskGroup { group in
             for id in endpoints.keys {
                 group.addTask { await self.refresh(id) }
@@ -1244,7 +1453,7 @@ extension HostLinkRequest {
         switch self {
         case .settings(.read), .github(.read):
             HostLink.requestTimeout
-        case .settings, .syncJobOptions, .github:
+        case .settings, .syncJobOptions, .syncPackageRepositories, .github, .packageAccess, .fetchPackage, .packageData, .packageEnd:
             PairedMacs.changeTimeout
         case .macs(let request):
             // The host reads or changes one of its Macs before it answers, within its own time limits.

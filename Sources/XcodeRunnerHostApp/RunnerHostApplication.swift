@@ -18,6 +18,9 @@ struct HostOptions: ParsableCommand {
     @Flag(help: .hidden) var settingsService = false
     /// The embedded app has access to its pairing in the Keychain. The CLI needs only the managing host's ID.
     @Option(help: .hidden) var jobOptionsOwner: String?
+    @Option(help: .hidden) var fetchPackage: String?
+    @Option(help: .hidden) var packageManager: String?
+    @Option(help: .hidden) var packageRoot: String?
 
     @Option(help: .hidden) var serviceDirectory: String?
     @Option(help: .hidden) var parentProcessID: Int32?
@@ -81,6 +84,19 @@ public enum RunnerHostApplication {
     @MainActor public static func main() {
         do {
             let options = try HostOptions.parse(HostOptions.ownArguments(in: Array(CommandLine.arguments.dropFirst())))
+            if let json = options.fetchPackage {
+                guard let id = options.packageManager, let manager = UUID(uuidString: id), let root = options.packageRoot else {
+                    throw ValidationError("A package fetch requires its managing host and installation.")
+                }
+                let fetch = try JSONDecoder().decode(PackageFetch.self, from: Data(json.utf8))
+                Task {
+                    do {
+                        try await fetch.run(manager: manager, root: URL(filePath: root), input: .standardInput, output: .standardOutput)
+                        Darwin.exit(EXIT_SUCCESS)
+                    } catch { HostOptions.exit(withError: error) }
+                }
+                dispatchMain()
+            }
             if let root = options.jobOptionsOwner {
                 let store = KeychainSecretStore.managingHost(hostRoot: URL(filePath: root))
                 let pairing = try store.read().map { try JSONDecoder().decode(HostManagement.Record.self, from: $0) }
@@ -316,12 +332,13 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             ])
         }
         super.init()
+        settings.github.enablePackageAccess(on: installation)
         if settingsService {
-            settings.github.enablePackageAccess(on: installation)
             settingsServer = HostSettingsServer(settings: settings)
             // Only the installed LaunchAgent starts the host with its settings service, and launchd starts that host
             // again after it exits unsuccessfully.
-            settings.restartHost = { [unowned self] in
+            settings.restartHost = { [weak self] in
+                guard let self else { return }
                 restartsAfterStopping = true
                 beginShutdown()
             }
@@ -349,6 +366,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         }
         storagePreparation = Task {
             do {
+                await settings.github.preparePackageAccess()
+                try Task.checkCancellation()
                 let storage = try await installation.waitForStorageForLaunch { @MainActor error in
                     guard !Task.isCancelled else { return }
                     if self.settings.hostState != .waitingForStorage {
@@ -356,8 +375,6 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                     }
                     self.settings.storageDidBecomeUnavailable(error)
                 }
-                try Task.checkCancellation()
-                await settings.github.preparePackageAccess()
                 try Task.checkCancellation()
                 environment = installation.environment(for: storage, hostExecutable: executable)
                 settings.storageDidBecomeAvailable(storage)

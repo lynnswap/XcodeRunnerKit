@@ -168,9 +168,186 @@ struct HostPairingTests {
 
         #expect(macs.status(of: mac.id) == .online)
         #expect(worker.jobOptions?.environment == [])
-        #expect(macs.jobOptionsSyncErrors.isEmpty)
+        #expect(macs.settingsSyncErrors.isEmpty)
         old.task.cancel()
         replacement.task.cancel()
+        await worker.management.shutDown()
+        await macs.shutDown()
+    }
+
+    @Test func packageGrantFollowsTheRunnerWhenItsEndpointChanges() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manager = managedMac(at: root.appending(path: "Manager"))
+        let worker = managedMac(at: root.appending(path: "Worker"))
+        let macs = manager.managedMacs
+        let mac = try await pair(macs, with: worker.management)
+        let requested = AsyncStream<Void>.makeStream()
+        let release = AsyncStream<Void>.makeStream()
+        let old = try await listener(key: mac.pairing.symmetricKey, identity: mac.id.uuidString) { request, reply, _ in
+            switch request {
+            case .syncPackageRepositories:
+                requested.continuation.yield(())
+                for await _ in release.stream {}
+                try await reply(.refused("Former endpoint"))
+            case .syncJobOptions:
+                Issue.record("The former endpoint received another write after the Mac moved.")
+                try await reply(.refused("Former endpoint"))
+            default: try await reply(await worker.answer(.read))
+            }
+        }
+        defer { old.task.cancel() }
+        await macs.checkStatus(of: mac.id, at: old.endpoint)
+        try manager.saveJobOptions([.environment: [.init(name: "LANG", value: "en")]])
+        let save = Task { await manager.github.changePackageAccess(.add("owner/Library")) }
+        var arrivals = requested.stream.makeAsyncIterator()
+        _ = await arrivals.next()
+
+        let replacement = try await listener(key: mac.pairing.symmetricKey, identity: mac.id.uuidString) { request, reply, _ in
+            release.continuation.finish()
+            switch request {
+            case .syncPackageRepositories: try await reply(.refused("Package configuration is read-only"))
+            case .syncJobOptions(let options):
+                try await worker.applyJobOptions(options, from: mac.id)
+                try await reply(await worker.answer(.read))
+            default: try await reply(await worker.answer(.read))
+            }
+        }
+        defer { replacement.task.cancel() }
+        await macs.checkStatus(of: mac.id, at: replacement.endpoint)
+        guard case .refused(let message) = await save.value else {
+            Issue.record("The save must report the replacement runner's failure.")
+            return
+        }
+        #expect(message.contains("Package access was saved."))
+        #expect(message.contains("Package configuration is read-only"))
+        await worker.management.shutDown()
+        await macs.shutDown()
+    }
+
+    @Test(arguments: [false, true])
+    func dispatchReconcilesChangesMadeDuringEitherSettingsWrite(initialPackageReadFails: Bool) async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manager = managedMac(at: root.appending(path: "Manager"))
+        let worker = managedMac(at: root.appending(path: "Worker"))
+        worker.github.enablePackageAccess(on: worker.installation)
+        let macs = manager.managedMacs
+        let mac = try await pair(macs, with: worker.management)
+        let grant = ["owner/Library"]
+        let first: HostJobOptions.Edits = [.environment: [.init(name: "LANG", value: "en")]]
+        let second: HostJobOptions.Edits = [.environment: [.init(name: "LANG", value: "fr")]]
+        try manager.saveJobOptions(first)
+        @Sendable @MainActor func answer(_ request: HostLinkRequest) async throws -> HostLinkReply {
+            switch request {
+            case .syncJobOptions(let options):
+                try worker.applyJobOptions(options, from: mac.id)
+                if options.environment == first[.environment] {
+                    try JSONEncoder().encode(grant).write(to: manager.installation.packageRepositories, options: .atomic)
+                }
+            case .syncPackageRepositories(let names):
+                try manager.saveJobOptions(second)
+                try await worker.github.routePackages(names, from: mac.id)
+            default: break
+            }
+            return await worker.answer(.read)
+        }
+        let refuseRead = Mutex(false)
+        let holdRead = Mutex(false)
+        let concurrentReads = Mutex<Int?>(nil)
+        let firstRead = AsyncStream<Void>.makeStream()
+        let resumeRead = AsyncStream<Void>.makeStream()
+        let captured = AsyncStream<Void>.makeStream()
+        let release = AsyncStream<Void>.makeStream()
+        let runner = try await listener(key: mac.pairing.symmetricKey, identity: mac.id.uuidString) { request, reply, _ in
+            if case .settings(.read) = request, refuseRead.withLock({ value in
+                let refuse = value
+                value = false
+                return refuse
+            }) { return try await reply(.refused("Package routing temporarily unavailable")) }
+            let snapshot = try await answer(request)
+            if case .settings(.read) = request, concurrentReads.withLock({ value in
+                guard let count = value else { return false }
+                value = count + 1
+                return count == 0
+            }) {
+                firstRead.continuation.yield(())
+                for await _ in resumeRead.stream {}
+            }
+            if case .settings(.read) = request, holdRead.withLock({ value in
+                let hold = value
+                value = false
+                return hold
+            }) {
+                captured.continuation.yield(())
+                for await _ in release.stream {}
+            }
+            try await reply(snapshot)
+        }
+        defer { runner.task.cancel() }
+        await macs.checkStatus(of: mac.id, at: runner.endpoint)
+        #expect(worker.jobOptions?.environment == second[.environment])
+        #expect(worker.github.packageRouting == .applied(grant))
+
+        // While the job-defaults read is in transit, deliver a removal and save a new grant of the same repository.
+        let report = initialPackageReadFails ? nil : HostSettingsReport(worker)
+        refuseRead.withLock { $0 = initialPackageReadFails }
+        holdRead.withLock { $0 = true }
+        let dispatch = Task { try await macs.synchronizedSettings(of: mac, at: runner.endpoint, report: report) }
+        var snapshots = captured.stream.makeAsyncIterator()
+        _ = await snapshots.next()
+        _ = await manager.github.changePackageAccess(.remove(grant[0]))
+        #expect(worker.github.packageRouting == .applied([]))
+        try JSONEncoder().encode(grant).write(to: manager.installation.packageRepositories, options: .atomic)
+        release.continuation.finish()
+        _ = try await dispatch.value
+        #expect(worker.github.packageRouting == .applied(grant))
+
+        // Concurrent dispatches can share the same read when no write overlaps it.
+        concurrentReads.withLock { $0 = 0 }
+        let one = Task { try await macs.synchronizedSettings(of: mac, at: runner.endpoint) }
+        var reads = firstRead.stream.makeAsyncIterator()
+        _ = await reads.next()
+        let started = AsyncStream<Void>.makeStream()
+        let two = Task {
+            started.continuation.yield(())
+            return try await macs.synchronizedSettings(of: mac, at: runner.endpoint)
+        }
+        var callers = started.stream.makeAsyncIterator()
+        _ = await callers.next()
+        resumeRead.continuation.finish()
+        let reports = try await [one.value, two.value]
+        // The first read is shared. Each caller can then read defaults once.
+        #expect(concurrentReads.withLock { ($0 ?? 0) <= 3 })
+        #expect(reports.allSatisfy { $0.packageRouting == .applied(grant) })
+        await worker.github.shutDown()
+        await worker.management.shutDown()
+        await macs.shutDown()
+    }
+
+    @Test func dispatchSkipsARunnerAfterOneUnansweredSettingsRead() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manager = managedMac(at: root.appending(path: "Manager"))
+        let worker = managedMac(at: root.appending(path: "Worker"))
+        let macs = manager.managedMacs
+        let mac = try await pair(macs, with: worker.management)
+        let unanswered = Mutex<Int?>(nil)
+        let runner = try await listener(key: mac.pairing.symmetricKey, identity: mac.id.uuidString) { _, reply, _ in
+            if unanswered.withLock({ count in
+                guard let current = count else { return false }
+                count = current + 1
+                return true
+            }) { return }
+            try await reply(await worker.answer(.read))
+        }
+        defer { runner.task.cancel() }
+        await macs.checkStatus(of: mac.id, at: runner.endpoint)
+        unanswered.withLock { $0 = 0 }
+        await #expect(throws: HostLinkError.timedOut) {
+            try await macs.synchronizedSettings(of: mac, at: runner.endpoint)
+        }
+        #expect(unanswered.withLock { $0 } == 1)
         await worker.management.shutDown()
         await macs.shutDown()
     }
@@ -306,6 +483,113 @@ struct HostPairingTests {
         #expect(settings.readAt == readAt)
 
         await macs.shutDown()
+    }
+
+    @Test func managedRunnerFetchesOnlyPackagesGrantedByItsHost() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = managedMac(named: "Host", at: root)
+        let runner = managedMac(at: root.appending(path: "Runner"))
+        runner.github.enablePackageAccess(on: runner.installation)
+        let mac = try await pair(host.managedMacs, with: runner.management)
+        try await waitUntil { runner.management.managementPort != nil }
+        await host.managedMacs.checkStatus(of: mac.id, at: try local(runner.management.managementPort))
+        let name = "owner/Library"
+        _ = await host.github.changePackageAccess(.add(name.lowercased()))
+        guard case .packageRepositories([name]) = await host.github.changePackageAccess(.add(name)) else {
+            Issue.record("The manager could not save the package grant.")
+            return
+        }
+        #expect(runner.github.packageRouting == .applied([name]))
+        #expect(try runner.github.packageRepositories().isEmpty)
+
+        // Hold the last bytes until the runner has received the start of the Git response.
+        let result = root.appending(path: "response")
+        let relay = Process()
+        relay.executableURL = URL(filePath: "/usr/bin/python3")
+        relay.arguments = ["-I", "-c", """
+            from http.server import BaseHTTPRequestHandler, HTTPServer
+            import os, sys, time
+            class Git(BaseHTTPRequestHandler):
+                def log_message(self, *args): pass
+                def do_POST(self):
+                    body = self.rfile.read(int(self.headers['Content-Length']))
+                    valid = (self.path == '/owner/Library.git/git-upload-pack' and
+                             self.headers['Authorization'] == 'Bearer test' and self.headers['Git-Protocol'] == 'version=2')
+                    self.send_response(200 if valid else 403)
+                    self.send_header('Content-Type', 'application/x-git-upload-pack-result')
+                    self.end_headers()
+                    self.wfile.write(body[:256])
+                    self.wfile.flush()
+                    deadline = time.monotonic() + 10
+                    while os.stat(sys.argv[1]).st_size < 256:
+                        if time.monotonic() > deadline: return
+                        time.sleep(.02)
+                    self.wfile.write(body[256:])
+            server = HTTPServer(('127.0.0.1', 0), Git)
+            print(server.server_port, flush=True)
+            server.timeout = 30
+            server.handle_request()
+            """, result.path(percentEncoded: false)]
+        let portPipe = Pipe()
+        relay.standardOutput = portPipe
+        try relay.run()
+        defer { if relay.isRunning { relay.terminate() } }
+        portPipe.fileHandleForWriting.closeFile()
+        let portText = String(decoding: portPipe.fileHandleForReading.availableData, as: UTF8.self)
+        let port = try #require(UInt16(portText.trimmingCharacters(in: .whitespacesAndNewlines)))
+        let config = host.installation.packageGitConfiguration.deletingPathExtension().appendingPathExtension("json")
+        try JSONSerialization.data(withJSONObject: ["port": Int(port), "authorization": "Bearer test"]).write(to: config)
+
+        let (server, endpoint) = try await listener(key: mac.pairing.symmetricKey, identity: mac.id.uuidString) {
+            request, reply, next in
+            try await host.managedMacs.answerPackageRequest(request, from: mac.pairing, reply: reply, next: next)
+        }
+        defer { server.cancel() }
+        let body = Data((0..<(96 * 1024)).map { UInt8(truncatingIfNeeded: $0) })
+        let source = root.appending(path: "request")
+        try body.write(to: source)
+        try Data().write(to: result)
+        let input = try FileHandle(forReadingFrom: source)
+        let output = try FileHandle(forWritingTo: result)
+        defer { try? input.close(); try? output.close() }
+        let fetch = PackageFetch(repository: name, operation: .uploadPack, protocolV2: true, gzip: false)
+        try await fetch.transfer(to: endpoint, manager: mac.pairing, input: input, output: output)
+        let received = try Data(contentsOf: result)
+        let newline = try #require(received.firstIndex(of: 10))
+        let headers = try JSONDecoder().decode(PackageFetch.Response.self, from: received[..<newline])
+        #expect(headers.status == 200)
+        #expect(received.suffix(from: newline + 1) == body)
+
+        // A failed reload stops the relay. The manager must see that the runner needs its routes again.
+        try Data("invalid".utf8).write(to: runner.installation.hostRoot.appending(path: "managed-package-repositories.json"))
+        await runner.github.preparePackageAccess()
+        guard case .failed = runner.github.packageRouting else {
+            Issue.record("An unreadable routing file must be reported to the manager.")
+            return
+        }
+
+        guard case .packageRepositories([]) = await host.github.changePackageAccess(.remove(name)) else {
+            Issue.record("The manager could not remove the package grant.")
+            return
+        }
+        await runner.github.preparePackageAccess()
+        #expect(runner.github.packageRouting == .applied([]))
+        let denied = await #expect(throws: HostSettingsError.self) {
+            try await fetch.transfer(to: endpoint, manager: mac.pairing, input: input, output: output)
+        }
+        #expect(denied?.message.contains("not allowed") == true)
+
+        // A reconnect still restores the package grants when the runner cannot read its independent job defaults.
+        try runner.applyJobOptions(HostJobOptions(), from: mac.id)
+        try Data("damaged".utf8).write(to: runner.installation.hostRoot.appending(path: "JobDefaults/options.json"))
+        runner.refreshJobOptions()
+        try JSONEncoder().encode([name]).write(to: host.installation.packageRepositories, options: .atomic)
+        await host.managedMacs.checkStatus(of: mac.id, at: try local(runner.management.managementPort))
+        #expect(runner.github.packageRouting == .applied([name]))
+        await runner.github.shutDown()
+        await runner.management.shutDown()
+        await host.managedMacs.shutDown()
     }
 
     @Test func damagedJobDefaultsDoNotPreventEndingManagement() async throws {
@@ -836,6 +1120,25 @@ struct HostPairingTests {
         await dashboard.shutDown()
     }
 
+    @Test func discoveryStopsAfterTheHostSettingsAreReleased() async {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let macs: PairedMacs
+        let relay: ManagedMacsRelay
+        weak var releasedHost: HostSettingsModel?
+        do {
+            let host = managedMac(at: root)
+            releasedHost = host
+            macs = host.managedMacs
+            relay = host.managedMacsRelay
+            _ = await relay.answer(.discover, from: UUID(), on: host)
+        }
+        #expect(releasedHost == nil)
+        #expect(macs.isDiscovering)
+        await relay.shutDown()
+        #expect(!macs.isDiscovering)
+    }
+
     @Test func aDashboardReachesAHostsMacsThroughTheHost() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -933,9 +1236,9 @@ struct HostPairingTests {
         #expect(other.pairingWindow?.request?.requesterName == "Host")
         // Only the dashboard that started the pairing gets its code and confirms it.
         let anotherDashboard = UUID()
-        let attempt = try #require(host.managedMacsRelay.report(for: shown.id).pairingAttempt)
-        #expect(host.managedMacsRelay.report(for: anotherDashboard).codeConfirmation == nil)
-        _ = await host.managedMacsRelay.answer(.confirmCode(attempt: attempt), from: anotherDashboard)
+        let attempt = try #require(host.managedMacsRelay.report(for: shown.id, on: host).pairingAttempt)
+        #expect(host.managedMacsRelay.report(for: anotherDashboard, on: host).codeConfirmation == nil)
+        _ = await host.managedMacsRelay.answer(.confirmCode(attempt: attempt), from: anotherDashboard, on: host)
         #expect(host.managedMacs.codeConfirmation?.isConfirmed == false)
         macs.confirmCode()
         other.allowPairing()

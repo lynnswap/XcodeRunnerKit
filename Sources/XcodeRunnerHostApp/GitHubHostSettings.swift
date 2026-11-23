@@ -32,9 +32,11 @@ extension GitHubHostConfiguration {
 @MainActor @Observable
 final class GitHubHostSettings {
     let app: GitHubApp
+    private let installation: HostInstallation
     private let record: URL
     private let authentication: GitHubAuthentication
     @ObservationIgnored private var packageAccess: GitHubPackageAccess?
+    @ObservationIgnored private var packageUpdate: Task<Void, Never>?
 
     private let client: GitHubClient
     private let provisioner: RunnerProvisioner
@@ -75,6 +77,7 @@ final class GitHubHostSettings {
         client: GitHubClient = .init(), authentication: GitHubAuthentication? = nil, provisioner: RunnerProvisioner? = nil,
         openURL: @escaping @MainActor (URL) -> Bool = { NSWorkspace.shared.open($0) }
     ) {
+        self.installation = installation
         self.app = app
         self.pool = pool
         self.client = client
@@ -101,15 +104,103 @@ final class GitHubHostSettings {
         return combined.values.sorted { $0.fullName.localizedStandardCompare($1.fullName) == .orderedAscending }
     }
 
+    private struct ManagedPackages: Codable {
+        let manager: UUID
+        let repositories: [String]
+    }
+
+    private var routesFile: URL { installation.hostRoot.appending(path: "managed-package-repositories.json") }
+    private var managedPackageRelay: GitHubPackageAccess.Relay?
+    var packageRouting: PackageRouting {
+        if let packageAccessError { return .failed(packageAccessError) }
+        return managedPackageRelay?.routing ?? .applied([])
+    }
+
+    func packageRepositories() throws -> [String] {
+        try GitHubPackageAccess.repositories(in: installation.packageRepositories)
+    }
+
+    func changePackageAccess(_ change: PackageAccessChange) async -> HostLinkReply {
+        do {
+            guard management?.manager == nil else { throw HostSettingsError("Edit package access on the managing host.") }
+            var names = try packageRepositories()
+            switch change {
+            case .list: return .packageRepositories(names)
+            case .add(let name):
+                guard PackageFetch.validRepository(name) else { throw HostSettingsError("Enter a GitHub repository as OWNER/REPO.") }
+                names.removeAll { $0.caseInsensitiveCompare(name) == .orderedSame }
+                names.append(name)
+            case .remove(let name):
+                names.removeAll { $0.caseInsensitiveCompare(name) == .orderedSame }
+            }
+            names.sort()
+            try FileManager.default.createDirectory(at: installation.hostRoot, withIntermediateDirectories: true)
+            try JSONEncoder().encode(names).write(to: installation.packageRepositories, options: .atomic)
+            await preparePackageAccess()
+            let deliveryErrors = await pairedMacs?.distributePackages() ?? []
+            let errors = [packageAccessError].compactMap { $0 } + deliveryErrors
+            if !errors.isEmpty { throw HostSettingsError("Package access was saved. " + errors.joined(separator: " ")) }
+            return .packageRepositories(names)
+        } catch { return .refused(error.localizedDescription) }
+    }
+
+    func routePackages(_ names: [String], from manager: UUID) async throws {
+        guard management?.manager?.id == manager else { throw HostSettingsError("This Mac has another managing host.") }
+        try FileManager.default.createDirectory(at: installation.hostRoot, withIntermediateDirectories: true)
+        try JSONEncoder().encode(ManagedPackages(manager: manager, repositories: names)).write(to: routesFile, options: .atomic)
+        await preparePackageAccess()
+        if let packageAccessError { throw HostSettingsError(packageAccessError) }
+    }
+
+    func packageManagerChanged() {
+        managedPackageRelay = nil
+        Task { await preparePackageAccess() }
+    }
+
     func enablePackageAccess(on installation: HostInstallation) {
         packageAccess = GitHubPackageAccess(installation: installation, authentication: authentication)
     }
 
+    /// A refresh owns the relay until it has either published its routes or finished cleaning up a failure.
+    private func withPackageAccess(_ operation: @escaping @MainActor (GitHubPackageAccess) async -> Void) async {
+        while let pending = packageUpdate { await pending.value }
+        guard let packageAccess, !isShuttingDown else { return }
+        let update = Task {
+            defer { packageUpdate = nil }
+            await operation(packageAccess)
+        }
+        packageUpdate = update
+        await update.value
+    }
+
     func preparePackageAccess() async {
-        guard let packageAccess, !isShuttingDown, !Task.isCancelled else { return }
+        guard !Task.isCancelled else { return }
+        await withPackageAccess { await self.preparePackageAccess(using: $0) }
+    }
+
+    private func stopLocalPackageAccess() async {
+        await withPackageAccess { access in
+            if self.management?.manager == nil, self.account == nil { await access.stop() }
+        }
+    }
+
+    private func preparePackageAccess(using packageAccess: GitHubPackageAccess) async {
         let previousError = packageAccessError
         do {
+            if let manager = management?.manager {
+                let saved: ManagedPackages?
+                do { saved = try JSONDecoder().decode(ManagedPackages.self, from: Data(contentsOf: routesFile)) }
+                catch CocoaError.fileReadNoSuchFile { saved = nil }
+                let names = saved?.manager == manager.id ? saved?.repositories ?? [] : []
+                let relay = try await packageAccess.update(manager: manager.id, repositories: names)
+                if management?.manager?.id == manager.id { managedPackageRelay = relay }
+                packageAccessError = nil
+                if errorMessage == previousError { errorMessage = nil }
+                return
+            }
+            managedPackageRelay = nil
             let signedIn = if hasRestored { account != nil } else { try await authentication.account() != nil }
+            guard management?.manager == nil, !isShuttingDown else { return }
             if signedIn {
                 try await packageAccess.update()
             } else {
@@ -118,6 +209,7 @@ final class GitHubHostSettings {
             packageAccessError = nil
             if errorMessage == previousError { errorMessage = nil }
         } catch {
+            managedPackageRelay = nil
             await packageAccess.stop()
             packageAccessError = "Could not configure private packages: \(error.localizedDescription)"
             if errorMessage == nil || errorMessage == previousError { errorMessage = packageAccessError }
@@ -205,7 +297,7 @@ final class GitHubHostSettings {
         do {
             try await authentication.signOut(confirmedLogin: confirmedLogin)
             account = nil
-            await packageAccess?.stop()
+            await stopLocalPackageAccess()
             repositories = []
             installations = []
             runnerStatuses = []
@@ -544,7 +636,7 @@ final class GitHubHostSettings {
             switch error {
             case .notSignedIn, .response(status: 401, message: _), .authorization:
                 account = nil
-                await packageAccess?.stop()
+                await stopLocalPackageAccess()
             default: break
             }
         }
@@ -553,6 +645,7 @@ final class GitHubHostSettings {
 
     func shutDown() async {
         isShuttingDown = true
+        await packageUpdate?.value
         await packageAccess?.stop()
         packageAccess = nil
         cancelConnection()
@@ -565,5 +658,43 @@ final class GitHubHostSettings {
         guard openURL(url) else {
             throw CocoaError(.fileReadUnknown, userInfo: [NSLocalizedDescriptionKey: "Could not open your browser."])
         }
+    }
+}
+
+extension GitHubHostSettings {
+    /// Only a current managed runner can open this connection. The local relay rechecks the grant on each Git request.
+    func servePackage(
+        _ fetch: PackageFetch, reply: @escaping @Sendable (HostLinkReply) async throws -> Void,
+        next: @escaping @Sendable () async throws -> HostLinkRequest
+    ) async throws {
+        if let packageAccess, !(await packageAccess.isRunning) { await preparePackageAccess() }
+        guard management?.manager == nil, PackageFetch.validRepository(fetch.repository),
+              try packageRepositories().contains(where: { $0.caseInsensitiveCompare(fetch.repository) == .orderedSame }) else {
+            throw HostSettingsError("The host has not allowed this package repository.")
+        }
+        struct Relay: Decodable { let port: UInt16; let authorization: String }
+        let file = installation.packageGitConfiguration.deletingPathExtension().appendingPathExtension("json")
+        let relay: Relay
+        do { relay = try JSONDecoder().decode(Relay.self, from: Data(contentsOf: file)) }
+        catch CocoaError.fileReadNoSuchFile {
+            throw HostSettingsError(packageAccessError ?? "Sign in to GitHub on the managing host to fetch private packages.")
+        }
+        let base = URL(string: "http://127.0.0.1:\(relay.port)")!
+        let repository = base.appending(path: fetch.repository + ".git")
+        let discovery = fetch.operation == .refs
+        let url = discovery ? repository.appending(path: "info/refs").appending(queryItems: [
+            URLQueryItem(name: "service", value: "git-upload-pack")
+        ]) : repository.appending(path: "git-upload-pack")
+        var request = URLRequest(url: url, timeoutInterval: PackageFetch.idleTimeout)
+        request.setValue(relay.authorization, forHTTPHeaderField: "Authorization")
+        if fetch.protocolV2 { request.setValue("version=2", forHTTPHeaderField: "Git-Protocol") }
+        if !discovery {
+            request.httpMethod = "POST"
+            request.setValue("application/x-git-upload-pack-request", forHTTPHeaderField: "Content-Type")
+            if fetch.gzip { request.setValue("gzip", forHTTPHeaderField: "Content-Encoding") }
+        }
+        try await reply(.completed)
+        request.httpBody = try await fetch.receiveBody(next: next)
+        try await fetch.sendResponse(to: request, reply: reply)
     }
 }
