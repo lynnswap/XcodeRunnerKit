@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import XcodeRunnerHostSupport
 
 /// The Settings pane: a Mac's roles, GitHub sign-in, repositories, and pairings with other Macs.
 @MainActor
@@ -40,6 +41,11 @@ struct OverviewView: View {
                 }
                 .disabled(model.isWaitingForGitHub)
                 if github.managerName == nil {
+                    if model.jobOptions != nil {
+                        JobOptionsSection(model: model, kind: .buildSettings)
+                        JobOptionsSection(model: model, kind: .environment)
+                    }
+                    if let error = model.jobOptionsError { ErrorText(error) }
                     Section("Pairing") {
                         Button("Add Mac…") { model.addManagedMac() }
                             .disabled(!model.canAddManagedMac)
@@ -206,6 +212,59 @@ struct OverviewView: View {
             Text("Hosts on Other Macs")
         } footer: {
             Text("The sidebar lists a host that this Mac paired with, with its settings and runners, as a dashboard does. On that Mac, choose Allow Dashboard… under Dashboards first.")
+        }
+    }
+}
+
+@MainActor
+private struct JobOptionsSection: View {
+    let model: OverviewModel
+    let kind: HostJobOptions.Kind
+    @State private var selection: HostJobOptions.Entry.ID?
+
+    var body: some View {
+        let rows = Binding(get: { model[jobOptions: kind] }, set: { model[jobOptions: kind] = $0 })
+        Section {
+            VStack(alignment: .leading, spacing: 4) {
+                Table(rows, selection: $selection) {
+                    TableColumn("Enabled") { entry in
+                        Toggle("Enabled", isOn: entry.isEnabled)
+                            .toggleStyle(.checkbox).labelsHidden()
+                    }
+                    .width(56)
+                    TableColumn("Name") { entry in
+                        TextField("Name", text: entry.name).textFieldStyle(.plain)
+                    }
+                    TableColumn("Value") { entry in
+                        TextField("Value", text: entry.value).textFieldStyle(.plain)
+                    }
+                }
+                .frame(height: CGFloat(min(max(rows.wrappedValue.count, 1), 6)) * 26 + 32)
+                HStack {
+                    Button("Add", systemImage: "plus") {
+                        let entry = HostJobOptions.Entry()
+                        rows.wrappedValue.append(entry)
+                        selection = entry.id
+                    }
+                    Button("Remove", systemImage: "minus") {
+                        rows.wrappedValue.removeAll { $0.id == selection }
+                        selection = nil
+                    }
+                    .disabled(selection == nil)
+                }
+                .labelStyle(.iconOnly)
+            }
+            .disabled(model.isSavingJobOptions)
+        } header: {
+            switch kind {
+            case .buildSettings: Text("Build Settings")
+            case .environment: Text("Environment Variables")
+            }
+        } footer: {
+            switch kind {
+            case .buildSettings: Text("Default xcodebuild settings for jobs on this host and its runners.")
+            case .environment: Text("Default xcodebuild environment for jobs on this host and its runners.")
+            }
         }
     }
 }

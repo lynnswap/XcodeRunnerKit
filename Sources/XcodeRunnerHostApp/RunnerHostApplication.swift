@@ -16,6 +16,8 @@ struct HostOptions: ParsableCommand {
     /// Runs the menu bar host. The installed LaunchAgent passes this; opening the app without it shows a dashboard.
     @Flag(help: .hidden) var host = false
     @Flag(help: .hidden) var settingsService = false
+    /// The embedded app has access to its pairing in the Keychain. The CLI needs only the managing host's ID.
+    @Option(help: .hidden) var jobOptionsOwner: String?
 
     @Option(help: .hidden) var serviceDirectory: String?
     @Option(help: .hidden) var parentProcessID: Int32?
@@ -83,6 +85,12 @@ public enum RunnerHostApplication {
     @MainActor public static func main() {
         do {
             let options = try HostOptions.parse(HostOptions.ownArguments(in: Array(CommandLine.arguments.dropFirst())))
+            if let root = options.jobOptionsOwner {
+                let store = KeychainSecretStore.managingHost(hostRoot: URL(filePath: root))
+                let pairing = try store.read().map { try JSONDecoder().decode(HostManagement.Record.self, from: $0) }
+                try FileHandle.standardOutput.write(contentsOf: JSONEncoder().encode(pairing?.manager?.id))
+                return
+            }
             if let directory = options.serviceDirectory {
                 guard let parent = options.parentProcessID, let ownership = options.ownershipDescriptor,
                       getpgrp() == getpid() else {
@@ -356,7 +364,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 try Task.checkCancellation()
                 await settings.github.preparePackageAccess()
                 try Task.checkCancellation()
-                environment = installation.environment(for: storage)
+                environment = installation.environment(for: storage, hostExecutable: executable)
                 settings.storageDidBecomeAvailable(storage)
                 settings.hostState = .running
                 startRunnerMonitoring()

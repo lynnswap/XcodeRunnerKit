@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import XcodeRunnerHostSupport
 import Network
 import Security
 
@@ -29,6 +30,7 @@ enum HostLinkRequest: Codable, Sendable {
     /// Reads this runner's activity, or a runner reached through its managing host.
     case activity(mac: HostPairing.ID?, after: RunnerMetricSample.SampleClock?)
     case settings(HostSettingsRequest)
+    case syncJobOptions(HostJobOptions)
     case github(GitHubRequest)
     case macs(ManagedMacsRequest)
     case runners(RunnerRequest)
@@ -48,6 +50,7 @@ enum HostSettingsRequest: Codable, Sendable {
     /// Saves the build service that the Mac's jobs use when they name none, as the path of its executable, or `nil`
     /// to save none.
     case saveBuildService(path: String?)
+    case saveJobOptions(HostJobOptions.Edits)
     /// Saves the labels that the Mac's runners get besides `xcode-runnerkit`. Whoever registers the Mac's runners
     /// puts them on the runners afterwards.
     case saveRunnerLabels([String])
@@ -348,7 +351,7 @@ enum HostLink {
     /// - A new value in a reply or a report is optional.
     /// - A state that a report names is a type that keeps a raw value it does not know, as `HostState` does. Enums
     ///   that reports carry gain no cases.
-    static let version = 14
+    static let version = 15
     /// The oldest version whose messages this version reads. A Mac that runs an earlier one is shown as running
     /// another version, and the Macs do not pair. Versions before 7 answered only their own version.
     ///

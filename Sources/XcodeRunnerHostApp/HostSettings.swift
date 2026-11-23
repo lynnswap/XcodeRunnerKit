@@ -274,6 +274,8 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
     /// Whether the Mac reports its build service. One that runs a version without the setting can have one saved.
     var reportsBuildService: Bool { buildServiceIsMissing != nil }
     let buildServiceError: String?
+    let jobOptions: HostJobOptions?
+    let jobOptionsReadError: String?
     let canApplyPoolConfiguration: Bool
     let canEditStorage: Bool
     let canRestart: Bool
@@ -302,6 +304,8 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
         savedBuildService = settings.savedBuildService
         buildServiceIsMissing = settings.savedBuildServiceIsMissing
         buildServiceError = settings.buildServiceError
+        jobOptions = settings.jobOptions
+        jobOptionsReadError = settings.jobOptionsReadError
         canApplyPoolConfiguration = settings.canApplyPoolConfiguration
         canEditStorage = settings.canEditStorage
         canRestart = settings.canRestart
@@ -349,6 +353,7 @@ final class HostSettingsModel: HostSettingsDisplay {
     private(set) var isSaving = false
     private(set) var hasLoadedPoolStatus = false
     var poolDraft = PoolSettingsDraft()
+    var jobOptionEdits: HostJobOptions.Edits = [:]
     private(set) var activeStorageDirectory: URL?
     private(set) var storageError: String?
     private(set) var storageSaveError: String?
@@ -370,6 +375,49 @@ final class HostSettingsModel: HostSettingsDisplay {
     private(set) var isSavingBuildService = false
     /// The path of the build service's executable, or an empty string to save none.
     var buildServiceInput = ""
+    private(set) var jobOptions: HostJobOptions?
+    private(set) var jobOptionsReadError: String?
+
+    /// A pairing change immediately selects the new owner's defaults, even on read-only storage.
+    func refreshJobOptions() {
+        do { _ = try optionsForJobs() }
+        catch {
+            jobOptions = nil
+            jobOptionsReadError = error.localizedDescription
+        }
+    }
+
+    func optionsForJobs() throws -> HostJobOptions {
+        let options = try installation.jobOptionsRecord().options(managedBy: management.manager?.id)
+        jobOptions = options
+        jobOptionsReadError = nil
+        return options
+    }
+
+    func saveJobOptions(_ edits: HostJobOptions.Edits) throws {
+        guard management.manager == nil else { throw HostSettingsError("Edit job defaults on the managing host.") }
+        var record = try installation.jobOptionsRecord()
+        record.manager = nil
+        record.inherited = HostJobOptions()
+        for (kind, entries) in edits {
+            record.local[kind] = entries
+            _ = try record.local.values(for: kind)
+        }
+        try installation.saveJobOptionsRecord(record)
+        jobOptions = record.local
+        jobOptionsReadError = nil
+    }
+
+    func applyJobOptions(_ options: HostJobOptions, from manager: UUID) throws {
+        guard management.manager?.id == manager else { throw HostSettingsError("Only the managing host can supply job defaults.") }
+        var record = try installation.jobOptionsRecord()
+        record.manager = manager
+        record.inherited = options
+        try installation.saveJobOptionsRecord(record)
+        jobOptions = options
+        jobOptionsReadError = nil
+    }
+
     /// The installed Xcodes are listed again after this long, because listing them reads every Xcode's version.
     private static let xcodeListLifetime = Duration.seconds(30)
     private var xcodesListedAt: ContinuousClock.Instant?
@@ -408,6 +456,7 @@ final class HostSettingsModel: HostSettingsDisplay {
         } catch {
             storageSaveError = "Could not read the saved storage folder: \(error.localizedDescription)"
         }
+        refreshJobOptions()
         refreshXcodes()
         refreshBuildService()
         do {
@@ -418,6 +467,7 @@ final class HostSettingsModel: HostSettingsDisplay {
         }
         // The Macs paired with this Mac read and change its settings through the owner of this Mac's window.
         self.management.settings = self
+        self.managedMacs.jobOptionsOwner = self
         self.github.pairedMacs = self.managedMacs
         self.github.management = self.management
     }
@@ -704,6 +754,7 @@ final class HostSettingsModel: HostSettingsDisplay {
     }
 
     func refreshPoolStatus() async {
+        if jobOptionsReadError != nil { refreshJobOptions() }
         refreshStorageSelection()
         refreshXcodes()
         refreshBuildService()
@@ -849,6 +900,9 @@ final class HostSettingsModel: HostSettingsDisplay {
             case .saveStorage(let directory): try await savePairedMacStorage(directory)
             case .saveXcode(let developerDirectory): try saveDeveloperDirectory(developerDirectory)
             case .saveBuildService(let path): try saveBuildService(path)
+            case .saveJobOptions(let options):
+                try saveJobOptions(options)
+                await managedMacs.distributeJobOptions()
             case .setPaused(let isPaused): try savePaused(isPaused)
             case .saveRunnerLabels(let labels): try saveRunnerLabels(labels)
             case .restart: try acceptRestart()

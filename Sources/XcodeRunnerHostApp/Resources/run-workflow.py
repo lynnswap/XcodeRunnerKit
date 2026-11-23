@@ -24,7 +24,7 @@ def run(engine, checkout, output, file, event, repository, sha, ref, base, prese
         home.mkdir()
         env = {'PATH': str(Path(engine).parent) + ':/usr/bin:/bin:/usr/sbin:/sbin',
                'HOME': str(home), 'LANG': 'en_US.UTF-8', 'TMPDIR': tempfile.gettempdir()}
-        for key in ('DEVELOPER_DIR', 'XCODE_RUNNER_HOST_ROOT', 'XCODE_RUNNER_HOST_STORAGE_DIRECTORY'):
+        for key in ('DEVELOPER_DIR', 'XCODE_RUNNER_HOST_ROOT', 'XCODE_RUNNER_HOST_STORAGE_DIRECTORY', 'XCODE_RUNNER_HOST_EXECUTABLE'):
             if key in os.environ:
                 env[key] = os.environ[key]
         # Forward only the host's package configuration into this isolated Actions environment.

@@ -63,6 +63,9 @@ struct XcodeRunnerKitTests {
             source: .package(root), scheme: "Scheme with spaces", outputDirectory: root.appending(path: "output")
         )
         request.environment["TEST_VALUE"] = "environment value"
+        request.compilationCache = CompilationCache(directory: root.appending(path: "CAS"))
+        request.arguments = ["SWIFT_ENABLE_PREFIX_MAPPING=from job arguments"]
+        request.buildSettings["SWIFT_ENABLE_PREFIX_MAPPING"] = "from explicit settings"
         let result = try await XcodeRunner(executableURL: executable).run(.build, request: request)
         let log = try String(contentsOf: result.logURL, encoding: .utf8)
         #expect(result.succeeded)
@@ -70,6 +73,8 @@ struct XcodeRunnerKitTests {
         #expect(log.contains(root.path(percentEncoded: false)))
         #expect(log.contains("stderr marker"))
         #expect(log.contains("environment value"))
+        #expect(log.split(separator: "\n").filter { $0.hasPrefix("SWIFT_ENABLE_PREFIX_MAPPING=") }
+            == ["SWIFT_ENABLE_PREFIX_MAPPING=YES", "SWIFT_ENABLE_PREFIX_MAPPING=from job arguments", "SWIFT_ENABLE_PREFIX_MAPPING=from explicit settings"])
     }
 
     @Test(arguments: [false, true])

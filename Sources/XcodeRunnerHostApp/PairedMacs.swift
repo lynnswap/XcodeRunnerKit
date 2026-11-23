@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import XcodeRunnerHostSupport
 import Network
 import Observation
 
@@ -22,6 +23,8 @@ final class PairedMacSettings {
     /// When `report` was read.
     private(set) var readAt: Date?
     var poolDraft = PoolSettingsDraft()
+    var jobOptionEdits: HostJobOptions.Edits = [:]
+    var jobOptionsSyncError: String?
     var storageDirectoryInput = ""
     private(set) var isSaving = false
     private(set) var isSavingStorage = false
@@ -34,6 +37,7 @@ final class PairedMacSettings {
     /// The path of the build service's executable, or an empty string to save none.
     var buildServiceInput = ""
     private(set) var isSavingBuildService = false
+    private(set) var isSavingJobOptions = false
     private(set) var buildServiceSaveError: String?
     /// The labels being edited for the Mac's runners, separated by commas.
     var runnerLabelsInput = ""
@@ -59,7 +63,7 @@ final class PairedMacSettings {
     var canApplyPoolConfiguration: Bool { report?.canApplyPoolConfiguration == true && !isSaving }
 
     var isChanging: Bool {
-        isSaving || isSavingStorage || isSavingXcode || isSavingBuildService || isSavingRunnerLabels || isChangingPause || isRestarting
+        isSaving || isSavingStorage || isSavingXcode || isSavingBuildService || isSavingJobOptions || isSavingRunnerLabels || isChangingPause || isRestarting
             || isChangingGitHub
     }
 
@@ -194,6 +198,16 @@ final class PairedMacSettings {
         }
     }
 
+    func saveJobOptions(send: () async throws -> HostSettingsReport) async throws {
+        isSavingJobOptions = true
+        beginChange()
+        defer {
+            isSavingJobOptions = false
+            endChange()
+        }
+        show(try await send())
+    }
+
     /// Saves the edited labels for the Mac's runners.
     ///
     /// - Parameter send: Sends the labels to the Mac named `macName` and returns the settings it answers with.
@@ -290,6 +304,7 @@ struct PairedRunnerMac: RunnerMac {
     }
 
     func install(_ request: RunnerProvisioner.InstallationRequest) async throws {
+        try await macs.synchronizeJobOptions(beforeRegistering: id)
         try await change(.install(request))
     }
 
@@ -375,6 +390,8 @@ final class PairedMacs: MacList {
     /// Whether this Mac is pairing with a Mac. One pairing shows its code at a time.
     private(set) var isPairing = false
     static let alreadyPairing = HostLinkError.refused("\(HostPane.macName) is already pairing with a Mac.")
+    @ObservationIgnored weak var jobOptionsOwner: HostSettingsModel?
+    private var jobOptionsUpdates: [HostPairing.ID: Task<HostSettingsReport, any Error>] = [:]
     private var endpoints: [HostPairing.ID: NWEndpoint] = [:]
     func endpoint(for mac: PairedMac) -> NWEndpoint? { endpoints[mac.id] }
     /// Every management service found, by pairing ID. A Mac advertises its new pairing before this host saves it.
@@ -715,6 +732,57 @@ final class PairedMacs: MacList {
         }
     }
 
+    func synchronizeJobOptions(beforeRegistering id: HostPairing.ID) async throws {
+        guard let mac = mac(id), let endpoint = endpoints[id] else { throw HostLinkError.unreachable("The runner is offline.") }
+        _ = try await synchronizedSettings(of: mac, at: endpoint)
+    }
+
+    /// Recheck after each transfer: the host can be edited while a runner is receiving an older save.
+    func synchronizedSettings(of mac: PairedMac, at endpoint: NWEndpoint, report: HostSettingsReport? = nil) async throws -> HostSettingsReport {
+        guard let owner = jobOptionsOwner else {
+            if let report { return report }
+            return try await requestSettings(.read, from: mac, at: endpoint)
+        }
+        if let update = jobOptionsUpdates[mac.id] { return try await update.value }
+        let update = Task {
+            defer { jobOptionsUpdates[mac.id] = nil }
+            var report: HostSettingsReport = if let report { report } else { try await requestSettings(.read, from: mac, at: endpoint) }
+            while true {
+                guard let desired = owner.jobOptions?.enabledEntries else {
+                    throw HostSettingsError(owner.jobOptionsReadError ?? "Could not read the host's job defaults.")
+                }
+                if let error = report.jobOptionsReadError { throw HostSettingsError(error) }
+                if report.jobOptions == desired { break }
+                guard report.jobOptions != nil else {
+                    if desired == HostJobOptions() { break }
+                    throw HostSettingsError("Update XcodeHomeRunner on \(mac.name) to receive this host’s job defaults.")
+                }
+                let reply = try await send(.syncJobOptions(desired), to: mac, at: endpoint)
+                if case .refused(let reason) = reply { throw HostLinkError.refused(reason) }
+                guard case .settings(let saved) = reply, saved.jobOptions == desired else { throw HostLinkError.unexpectedReply }
+                report = saved
+            }
+            return report
+        }
+        jobOptionsUpdates[mac.id] = update
+        return try await update.value
+    }
+
+    var jobOptionsSyncErrors: [String] {
+        macs.compactMap { mac in settings[mac.id]?.jobOptionsSyncError.map { "\(mac.name): \($0)" } }
+    }
+
+    /// Disconnected runners receive the current settings when their regular status checks resume.
+    func distributeJobOptions() async {
+        for mac in macs {
+            guard let endpoint = endpoints[mac.id] else { continue }
+            do {
+                _ = try await synchronizedSettings(of: mac, at: endpoint)
+                settings[mac.id]?.jobOptionsSyncError = nil
+            } catch { settings[mac.id]?.jobOptionsSyncError = error.localizedDescription }
+        }
+    }
+
     /// Reads the settings of the Mac at `endpoint`, which also shows whether it accepts this Mac. Browsing calls this
     /// when a paired Mac is found.
     func checkStatus(of id: HostPairing.ID, at endpoint: NWEndpoint) async {
@@ -729,7 +797,15 @@ final class PairedMacs: MacList {
         var github: GitHubReport?
         var managed: ManagedMacsReport?
         do {
-            report = try await requestSettings(.read, from: mac, at: endpoint)
+            let read = try await requestSettings(.read, from: mac, at: endpoint)
+            report = read
+            if role == .manager {
+                // An older runner can still be managed when it cannot apply build defaults.
+                do {
+                    report = try await synchronizedSettings(of: mac, at: endpoint, report: read)
+                    settings[id]?.jobOptionsSyncError = nil
+                } catch { settings[id]?.jobOptionsSyncError = error.localizedDescription }
+            }
             // A dashboard shows the host's GitHub settings and the Macs it manages too. A managing host has its own.
             if role == .dashboard {
                 github = try await requestGitHub(.read, from: mac, at: endpoint)
@@ -785,6 +861,13 @@ final class PairedMacs: MacList {
         guard let mac = mac(id), let settings = settings[id] else { return }
         await settings.saveXcodeSelection(on: mac.name) { developerDirectory in
             try await self.requestSettings(.saveXcode(developerDirectory: developerDirectory), from: mac)
+        }
+    }
+
+    func saveJobOptions(_ edits: HostJobOptions.Edits, of id: HostPairing.ID) async throws {
+        guard let mac = mac(id), let settings = settings[id] else { throw HostLinkError.unexpectedReply }
+        try await settings.saveJobOptions {
+            try await self.requestSettings(.saveJobOptions(edits), from: mac)
         }
     }
 
@@ -1114,7 +1197,7 @@ extension HostLinkRequest {
         switch self {
         case .settings(.read), .github(.read):
             HostLink.requestTimeout
-        case .settings, .github:
+        case .settings, .syncJobOptions, .github:
             PairedMacs.changeTimeout
         case .macs(let request):
             // The host reads or changes one of its Macs before it answers, within its own time limits.

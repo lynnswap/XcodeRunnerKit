@@ -1,8 +1,35 @@
 import Foundation
 import Testing
+import XcodeRunnerKit
 @testable import XcodeRunnerHostSupport
 
 struct HostInstallationTests {
+    @Test func hostedJobsUseEnabledDefaultsAndKeepExplicitOverrides() throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root)
+        let environment = installation.environment(for: .init(directory: root))
+        #expect(try HostInstallation.hostedConfiguration(environment: environment)?.jobOptions.options(managedBy: nil) == HostJobOptions())
+        let entries: [HostJobOptions.Entry] = [
+            .init(name: "FIRST", value: "one = two"),
+            .init(name: "SECOND", value: "host"),
+            .init(name: "DISABLED", value: "unused", isEnabled: false),
+        ]
+        var record = try installation.jobOptionsRecord()
+        record.local.buildSettings = entries + [.init(name: "THIRD", value: "host")]
+        record.local.environment = entries
+        try installation.saveJobOptionsRecord(record)
+        var request = XcodeBuildRequest(source: .package(root), scheme: "Fixture", destination: .specifier("platform=macOS"), outputDirectory: root)
+        request.arguments = ["THIRD=from command line"]
+        request.buildSettings["FIRST"] = "job"
+        request.environment["SECOND"] = ""
+        let hosted = try #require(try HostInstallation.hostedConfiguration(environment: environment))
+        try hosted.jobOptions.options(managedBy: nil).apply(to: &request)
+        #expect(request.arguments == ["FIRST=one = two", "SECOND=host", "THIRD=host", "THIRD=from command line"])
+        #expect(request.buildSettings == ["FIRST": "job"])
+        #expect(request.environment == ["FIRST": "one = two", "SECOND": ""])
+    }
+
     @Test func buildServiceConfigurationPreservesAnExecutableAliasAndCanBeCleared() throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

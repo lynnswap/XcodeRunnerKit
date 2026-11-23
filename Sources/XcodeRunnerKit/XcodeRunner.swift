@@ -155,7 +155,7 @@ public struct XcodeRunner: Sendable {
             if let buildServiceExecutableURL {
                 environment["SWBBUILDSERVICE_PATH"] = buildServiceExecutableURL.path(percentEncoded: false)
             }
-            var buildSettings = request.buildSettings
+            var cacheSettings: [String: String] = [:]
             var commandSource = request.source
             var commandDerivedData = derived
             if let cache = request.compilationCache {
@@ -166,15 +166,18 @@ public struct XcodeRunner: Sendable {
                 try FileManager.default.createDirectory(at: derived, withIntermediateDirectories: request.derivedDataDirectory != nil)
                 commandSource = try request.source.canonicalized()
                 commandDerivedData = try derived.compilerCanonicalURL()
-                buildSettings = cache.buildSettings(sourceDirectory: commandSource.workingDirectory, derivedDataDirectory: commandDerivedData)
-                    .merging(buildSettings) { _, caller in caller }
+                cacheSettings = cache.buildSettings(sourceDirectory: commandSource.workingDirectory, derivedDataDirectory: commandDerivedData)
+            }
+            // xcodebuild uses the last assignment: shared-cache defaults, host and job arguments, then --setting.
+            func assignments(_ settings: [String: String]) -> [String] {
+                settings.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
             }
             let arguments = [action.rawValue] + commandSource.arguments + [
                 "-scheme", request.scheme,
                 "-destination", destination,
                 "-derivedDataPath", commandDerivedData.path(percentEncoded: false),
                 "-resultBundlePath", bundleURL.path(percentEncoded: false),
-            ] + request.arguments + buildSettings.sorted(by: { $0.key < $1.key }).map { "\($0.key)=\($0.value)" }
+            ] + assignments(cacheSettings) + request.arguments + assignments(request.buildSettings)
 
             var options = PlatformOptions()
             options.createSession = true

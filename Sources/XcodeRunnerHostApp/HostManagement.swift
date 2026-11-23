@@ -137,9 +137,22 @@ final class HostManagement {
                             return
                         }
                         try await reply(.runnerSlots(await settings.readRunnerSlots()))
+                    case .syncJobOptions(let options):
+                        guard role == .manager, let settings = await self.settings else {
+                            try await reply(.refused("Only the managing host can supply job defaults."))
+                            return
+                        }
+                        do {
+                            try await settings.applyJobOptions(options, from: pairing.id)
+                            try await reply(.settings(await HostSettingsReport(settings)))
+                        } catch { try await reply(.refused(error.localizedDescription)) }
                     case .settings(let request):
                         guard let settings = await self.settings else {
                             try await reply(.refused("\(self.name) cannot share its settings."))
+                            return
+                        }
+                        if case .saveJobOptions = request, role != .dashboard {
+                            try await reply(.refused("Edit job defaults on the managing host."))
                             return
                         }
                         let answer = await settings.answer(request)
@@ -380,6 +393,7 @@ final class HostManagement {
         if open.role == .manager, let previous = manager { stopListening(to: previous.id) }
         manager = record.manager
         dashboards = record.dashboards
+        if open.role == .manager { settings?.refreshJobOptions() }
         listen(to: pairing, as: open.role)
     }
 
@@ -406,8 +420,10 @@ final class HostManagement {
             errorMessage = "Could not remove the pairing: \(error.localizedDescription)"
             return .failure(error)
         }
+        let managerChanged = manager?.id != record.manager?.id
         manager = record.manager
         dashboards = record.dashboards
+        if managerChanged { settings?.refreshJobOptions() }
         errorMessage = nil
         return .success(())
     }

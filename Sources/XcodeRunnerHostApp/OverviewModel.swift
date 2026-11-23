@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import XcodeRunnerHostSupport
 
 /// What the Settings pane shows and does for a Mac: this Mac in its own window, or a host on a dashboard. It has the
 /// Mac's roles, GitHub sign-in, repositories, and pairings.
@@ -67,6 +68,9 @@ final class OverviewModel: PaneSaving {
     /// What a dashboard's last requests to the host left to tell: a refusal, or a Mac that was removed but could not
     /// be told. Removing one of the host's Macs returns to this pane, where its notice stays visible.
     var notices: [String] {
+        if case .thisMac(let settings) = source {
+            return settings.managedMacs.jobOptionsSyncErrors
+        }
         guard case .host(let hosts, let host) = source, let answer = hosts.answer(of: host.id) else { return [] }
         return [answer.settings.githubError, hosts.macsManaged(by: host.id).message].compactMap { $0 }
     }
@@ -143,39 +147,102 @@ final class OverviewModel: PaneSaving {
         }
     }
 
-    /// Whether the pane has a repository selection to apply. A managed Mac and a Mac without a sign-in show none.
-    var canSave: Bool {
-        guard let github, github.accountLogin != nil, github.managerName == nil else { return false }
-        return canApplySelection && !isWaitingForGitHub && !isSaving
+    var jobOptions: HostJobOptions? {
+        switch source {
+        case .thisMac(let settings): settings.management.manager == nil ? settings.jobOptions : nil
+        case .host(let hosts, let host): hosts.answer(of: host.id)?.report.jobOptions
+        }
     }
 
-    /// Whether the selection is being applied from this pane. A host on a dashboard says that it saves only in its
-    /// next answer.
+    private var jobOptionEdits: HostJobOptions.Edits {
+        get {
+            switch source {
+            case .thisMac(let settings): settings.jobOptionEdits
+            case .host(let hosts, let host): hosts.settings(of: host.id)?.jobOptionEdits ?? [:]
+            }
+        }
+        set {
+            switch source {
+            case .thisMac(let settings): settings.jobOptionEdits = newValue
+            case .host(let hosts, let host): hosts.settings(of: host.id)?.jobOptionEdits = newValue
+            }
+        }
+    }
+
+    subscript(jobOptions kind: HostJobOptions.Kind) -> [HostJobOptions.Entry] {
+        get { jobOptionEdits[kind] ?? jobOptions?[kind] ?? [] }
+        set {
+            jobOptionEdits[kind] = newValue == jobOptions?[kind] ? nil : newValue
+            jobOptionsSaveError = nil
+        }
+    }
+
+    private var jobOptionsSaveError: String?
+    var jobOptionsError: String? {
+        if let jobOptionsSaveError { return jobOptionsSaveError }
+        switch source {
+        case .thisMac(let settings): return settings.jobOptionsReadError
+        case .host(let hosts, let host): return hosts.answer(of: host.id)?.report.jobOptionsReadError
+        }
+    }
+
+    private var canSaveSelection: Bool {
+        guard let github, github.accountLogin != nil, github.managerName == nil else { return false }
+        return canApplySelection && !isWaitingForGitHub
+    }
+
+    private var canSaveOptions: Bool { jobOptions != nil && !jobOptionEdits.isEmpty }
+    var canSave: Bool { !isSaving && (canSaveOptions || canSaveSelection) }
+
     private var isApplyingSelection = false
+    private(set) var isSavingJobOptions = false
+    var isSaving: Bool { isApplyingSelection || isSavingJobOptions || github?.isSavingSelection == true }
 
-    var isSaving: Bool { isApplyingSelection || github?.isSavingSelection == true }
-
-    var saveProgress: (completed: Int, total: Int) { (0, 1) }
+    private var saveCount = 0
+    var saveProgress: (completed: Int, total: Int) {
+        (max(0, saveCount - (isSavingJobOptions ? 1 : 0) - (isApplyingSelection ? 1 : 0)), saveCount)
+    }
 
     var hasEdits: Bool {
+        if canSaveOptions { return true }
         guard let github, github.accountLogin != nil, github.managerName == nil else { return false }
         return selection != github.savedRepositoryIDs
     }
 
     func revert() {
         if let github { selection = github.savedRepositoryIDs }
+        jobOptionEdits = [:]
+        jobOptionsSaveError = nil
     }
 
-    /// Applies the repository selection, which registers and removes runners.
     func save() {
         guard canSave else { return }
-        isApplyingSelection = true
+        isApplyingSelection = canSaveSelection
+        isSavingJobOptions = canSaveOptions
+        saveCount = (isSavingJobOptions ? 1 : 0) + (isApplyingSelection ? 1 : 0)
         Task {
-            switch source {
-            case .thisMac(let settings): await settings.github.applyRepositorySelection()
-            case .host(let hosts, let host): await hosts.applyRepositorySelection(of: host.id)
+            if isSavingJobOptions {
+                let edits = jobOptionEdits
+                do {
+                    switch source {
+                    case .thisMac(let settings):
+                        try settings.saveJobOptions(edits)
+                        await settings.managedMacs.distributeJobOptions()
+                    case .host(let hosts, let host):
+                        try await hosts.saveJobOptions(edits, of: host.id)
+                    }
+                    if jobOptionEdits == edits { jobOptionEdits = [:] }
+                    jobOptionsSaveError = nil
+                } catch { jobOptionsSaveError = error.localizedDescription }
             }
-            isApplyingSelection = false
+            isSavingJobOptions = false
+            if isApplyingSelection {
+                switch source {
+                case .thisMac(let settings): await settings.github.applyRepositorySelection()
+                case .host(let hosts, let host): await hosts.applyRepositorySelection(of: host.id)
+                }
+                isApplyingSelection = false
+            }
         }
     }
 

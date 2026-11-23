@@ -614,6 +614,7 @@ struct HostControl: AsyncParsableCommand {
         guard let mac else { return try await perform(.settings(request), on: host) }
         try write(try await managed(mac, on: host) { id in
             switch request {
+            case .saveJobOptions: throw HostSettingsError("Job defaults belong to the managing host.")
             case .read: .read(refreshing: id)
             case .configurePool(let changes): .configurePool(changes, mac: id)
             case .saveStorage(let directory): .saveStorage(directory: directory, mac: id)
@@ -737,7 +738,7 @@ struct HostControl: AsyncParsableCommand {
     @MainActor static func managed(
         _ mac: String, on host: String?,
         over bridge: (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = HostSettingsBridge.request,
-        _ request: (HostPairing.ID) -> ManagedMacsRequest
+        _ request: (HostPairing.ID) throws -> ManagedMacsRequest
     ) async throws -> ManagedMacsReport.Mac {
         guard case .macs(let list) = try await reply(to: .macs(.read(refreshing: nil)), on: host, over: bridge) else {
             throw unexpectedAnswer

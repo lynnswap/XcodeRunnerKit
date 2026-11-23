@@ -7,6 +7,32 @@ package struct HostSettingsError: Error, LocalizedError, Sendable {
     package var errorDescription: String? { message }
 }
 
+extension HostJobOptions {
+    package func values(for kind: Kind) throws -> [String: String] {
+        var result: [String: String] = [:]
+        for entry in self[kind] where entry.isEnabled {
+            let name = kind == .buildSettings ? entry.name.trimmingCharacters(in: .whitespacesAndNewlines) : entry.name
+            guard !name.isEmpty, !name.contains("="), !name.utf8.contains(0),
+                  !entry.value.utf8.contains(0) else {
+                throw HostSettingsError("Enter a name for each enabled row. Names cannot contain =, and names and values cannot contain a null character.")
+            }
+            if kind == .buildSettings, name.hasPrefix("-") {
+                throw HostSettingsError("A build setting name cannot begin with a dash.")
+            }
+            guard result.updateValue(entry.value, forKey: name) == nil else {
+                throw HostSettingsError("Enable only one row named \(name) in the same table.")
+            }
+        }
+        return result
+    }
+
+    package func apply(to request: inout XcodeBuildRequest) throws {
+        let defaults = try values(for: .buildSettings).sorted { $0.key < $1.key }
+        request.arguments.insert(contentsOf: defaults.map { "\($0.key)=\($0.value)" }, at: 0)
+        request.environment = try values(for: .environment).merging(request.environment) { _, job in job }
+    }
+}
+
 package enum HostSettingValue: Codable, Sendable, Equatable {
     case null, bool(Bool), integer(Int), string(String), array([HostSettingValue]), object([String: HostSettingValue])
 

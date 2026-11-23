@@ -13,6 +13,53 @@ extension URL {
     }
 }
 
+/// Defaults for xcodebuild jobs on a host and its managed runners.
+package struct HostJobOptions: Codable, Equatable, Sendable {
+    package struct Entry: Codable, Equatable, Identifiable, Sendable {
+        package let id: UUID
+        package var isEnabled: Bool
+        package var name: String
+        package var value: String
+
+        package init(name: String = "", value: String = "", isEnabled: Bool = true) {
+            self.id = UUID()
+            self.name = name
+            self.value = value
+            self.isEnabled = isEnabled
+        }
+    }
+
+    package enum Kind: String, Codable, Sendable { case buildSettings, environment }
+
+    package typealias Edits = [Kind: [Entry]]
+
+    package var buildSettings: [Entry] = []
+    package var environment: [Entry] = []
+    package init() {}
+
+    package subscript(kind: Kind) -> [Entry] {
+        get {
+            switch kind {
+            case .buildSettings: buildSettings
+            case .environment: environment
+            }
+        }
+        set {
+            switch kind {
+            case .buildSettings: buildSettings = newValue
+            case .environment: environment = newValue
+            }
+        }
+    }
+
+    package var enabledEntries: Self {
+        var result = Self()
+        result.buildSettings = buildSettings.filter(\.isEnabled)
+        result.environment = environment.filter(\.isEnabled)
+        return result
+    }
+}
+
 package struct HostInstallation: Sendable {
     package let homeDirectory: URL
 
@@ -40,6 +87,38 @@ package struct HostInstallation: Sendable {
     private var storageRecord: URL { hostRoot.appending(path: "storage-directory") }
     private var buildServiceRecord: URL { hostRoot.appending(path: "build-service-path") }
     private var developerDirectoryRecord: URL { Self.developerDirectoryRecord(hostRoot: hostRoot) }
+
+    /// The CLI reads the effective values for each job, including jobs taken directly from GitHub.
+    package struct JobOptionsRecord: Codable, Sendable {
+        package var local = HostJobOptions()
+        package var manager: UUID?
+        package var inherited = HostJobOptions()
+        package func options(managedBy owner: UUID?) -> HostJobOptions {
+            guard let owner else { return local }
+            return owner == manager ? inherited : HostJobOptions()
+        }
+
+        package var hasEnabledEntries: Bool {
+            [local, inherited].contains { $0.buildSettings.contains(where: \.isEnabled) || $0.environment.contains(where: \.isEnabled) }
+        }
+    }
+
+    package func jobOptionsRecord() throws -> JobOptionsRecord { try Self.jobOptionsRecord(hostRoot: hostRoot) }
+
+    private static func jobOptionsRecord(hostRoot: URL) throws -> JobOptionsRecord {
+        do {
+            let data = try Data(contentsOf: hostRoot.appending(path: "JobDefaults/options.json"))
+            return try JSONDecoder().decode(JobOptionsRecord.self, from: data)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            return JobOptionsRecord()
+        }
+    }
+
+    package func saveJobOptionsRecord(_ record: JobOptionsRecord) throws {
+        let directory = hostRoot.appending(path: "JobDefaults", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try JSONEncoder().encode(record).write(to: directory.appending(path: "options.json"), options: .atomic)
+    }
 
     /// The Xcode that hosted operations use when they name none, as its `Contents/Developer` directory.
     package func developerDirectory() throws -> URL? {
@@ -286,11 +365,12 @@ package struct HostInstallation: Sendable {
     package var packageRepositories: URL { hostRoot.appending(path: "github-package-repositories.json") }
     package var packageGitConfiguration: URL { hostRoot.appending(path: "github-packages.gitconfig") }
 
-    package func environment(for storage: Storage) -> [String: String] {
+    package func environment(for storage: Storage, hostExecutable: URL? = nil) -> [String: String] {
         var values = [
             "XCODE_RUNNER_HOST_STORAGE_DIRECTORY": storage.directory.path(percentEncoded: false),
             "XCODE_RUNNER_HOST_ROOT": hostRoot.path(percentEncoded: false),
         ]
+        values["XCODE_RUNNER_HOST_EXECUTABLE"] = hostExecutable?.path(percentEncoded: false)
         for prefix in ["", "TEST_RUNNER_"] {
             let countKey = prefix + "GIT_CONFIG_COUNT"
             let count = Int(ProcessInfo.processInfo.environment[countKey] ?? "0") ?? 0
@@ -303,13 +383,14 @@ package struct HostInstallation: Sendable {
 
     package static func hostedConfiguration(
         environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> (storage: Storage, poolDirectory: URL, buildServiceExecutableURL: URL?, developerDirectory: URL?, isWorkflow: Bool, usesPackageAccess: Bool)? {
+    ) throws -> (storage: Storage, poolDirectory: URL, buildServiceExecutableURL: URL?, developerDirectory: URL?, hostRoot: URL, jobOptions: JobOptionsRecord, isWorkflow: Bool, usesPackageAccess: Bool)? {
         guard let hosted = try hostedLocations(environment) else { return nil }
         return (
             Storage(directory: hosted.storageDirectory),
             hosted.poolDirectory,
             try buildServiceExecutableURL(hostRoot: hosted.hostRoot),
             try developerDirectory(hostRoot: hosted.hostRoot),
+            hosted.hostRoot, try jobOptionsRecord(hostRoot: hosted.hostRoot),
             hosted.isWorkflow,
             FileManager.default.fileExists(atPath: hosted.hostRoot.appending(path: "github-packages.gitconfig").path)
         )
