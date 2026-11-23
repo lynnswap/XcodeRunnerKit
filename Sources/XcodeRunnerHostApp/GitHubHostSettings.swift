@@ -34,6 +34,8 @@ final class GitHubHostSettings {
     let app: GitHubApp
     private let record: URL
     private let authentication: GitHubAuthentication
+    @ObservationIgnored private var packageAccess: GitHubPackageAccess?
+
     private let client: GitHubClient
     private let provisioner: RunnerProvisioner
     private let pool: HostExecutionPool
@@ -53,6 +55,7 @@ final class GitHubHostSettings {
     private var installations: [GitHubInstallation] = []
     private(set) var runnerStatuses: [RepositoryRunnerStatus] = []
     private(set) var deviceAuthorization: GitHubDeviceAuthorization?
+    private var packageAccessError: String?
     private(set) var errorMessage: String?
     private(set) var isConnecting = false
     private(set) var isSynchronizing = false
@@ -96,6 +99,29 @@ final class GitHubHostSettings {
         var combined: [Int: GitHubRepository] = [:]
         for repository in configuration.repositories + repositories { combined[repository.id] = repository }
         return combined.values.sorted { $0.fullName.localizedStandardCompare($1.fullName) == .orderedAscending }
+    }
+
+    func enablePackageAccess(on installation: HostInstallation) {
+        packageAccess = GitHubPackageAccess(installation: installation, authentication: authentication)
+    }
+
+    func preparePackageAccess() async {
+        guard let packageAccess, !isShuttingDown, !Task.isCancelled else { return }
+        let previousError = packageAccessError
+        do {
+            let signedIn = if hasRestored { account != nil } else { try await authentication.account() != nil }
+            if signedIn {
+                try await packageAccess.update()
+            } else {
+                await packageAccess.stop()
+            }
+            packageAccessError = nil
+            if errorMessage == previousError { errorMessage = nil }
+        } catch {
+            await packageAccess.stop()
+            packageAccessError = "Could not configure private packages: \(error.localizedDescription)"
+            if errorMessage == nil || errorMessage == previousError { errorMessage = packageAccessError }
+        }
     }
 
     func restore() async {
@@ -178,6 +204,7 @@ final class GitHubHostSettings {
         do {
             try await authentication.signOut(confirmedLogin: confirmedLogin)
             account = nil
+            await packageAccess?.stop()
             repositories = []
             installations = []
             runnerStatuses = []
@@ -194,13 +221,14 @@ final class GitHubHostSettings {
         guard !isLoadingRepositories else { return }
         isLoadingRepositories = true
         defer { isLoadingRepositories = false }
+        await preparePackageAccess()
         do {
             show(try await authenticated { token in
                 try await client.listInstallations(accessToken: token)
             })
-            errorMessage = nil
+            errorMessage = packageAccessError
         } catch is CancellationError {
-        } catch { handleGitHubFailure(error, operation: "load repositories") }
+        } catch { await handleGitHubFailure(error, operation: "load repositories") }
     }
 
     /// Shows what GitHub listed for the app's installations.
@@ -361,6 +389,7 @@ final class GitHubHostSettings {
             pairedProvisioners = pairedProvisioners.filter { id, _ in paired.contains { $0.id == id } }
             let statuses = try await authenticated { token in
                 let access = try await client.listInstallations(accessToken: token)
+                try Task.checkCancellation()
                 show(access)
                 let available = access.repositories
                 let current = Dictionary(uniqueKeysWithValues: available.map { ($0.id, $0) })
@@ -403,7 +432,7 @@ final class GitHubHostSettings {
                 return RepositoryRunnerStatus.combining(macs) + inaccessible
             }
             runnerStatuses = statuses.filter { !$0.hasFinishedRemoval }
-            errorMessage = nil
+            errorMessage = packageAccessError
             let finished = Set(statuses.filter(\.hasFinishedRemoval).map(\.id))
             if !finished.isEmpty {
                 var next = configuration
@@ -412,7 +441,7 @@ final class GitHubHostSettings {
                 configuration = next
             }
         } catch is CancellationError {
-        } catch { handleGitHubFailure(error, operation: "synchronize runners") }
+        } catch { await handleGitHubFailure(error, operation: "synchronize runners") }
     }
 
     /// Reconciles one Mac's runners. A Mac without a job limit only removes the runners of unlinked repositories.
@@ -507,11 +536,12 @@ final class GitHubHostSettings {
         }
     }
 
-    private func handleGitHubFailure(_ error: any Error, operation: String) {
+    private func handleGitHubFailure(_ error: any Error, operation: String) async {
         if let error = error as? GitHubError {
             switch error {
             case .notSignedIn, .response(status: 401, message: _), .authorization:
                 account = nil
+                await packageAccess?.stop()
             default: break
             }
         }
@@ -520,6 +550,8 @@ final class GitHubHostSettings {
 
     func shutDown() async {
         isShuttingDown = true
+        await packageAccess?.stop()
+        packageAccess = nil
         cancelConnection()
         synchronizationTask?.cancel()
         await connectionTask?.value

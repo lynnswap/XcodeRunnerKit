@@ -312,6 +312,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         }
         super.init()
         if settingsService {
+            settings.github.enablePackageAccess(on: installation)
             settingsServer = HostSettingsServer(settings: settings)
             // Only the installed LaunchAgent starts the host with its settings service, and launchd starts that host
             // again after it exits unsuccessfully.
@@ -353,6 +354,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                     self.settings.storageDidBecomeUnavailable(error)
                 }
                 try Task.checkCancellation()
+                await settings.github.preparePackageAccess()
+                try Task.checkCancellation()
                 environment = installation.environment(for: storage)
                 settings.storageDidBecomeAvailable(storage)
                 settings.hostState = .running
@@ -361,6 +364,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 try Task.checkCancellation()
                 githubMonitoring = Task {
                     while !Task.isCancelled {
+                        await settings.github.preparePackageAccess()
+                        guard !Task.isCancelled else { break }
                         if !settings.isSaving { await settings.github.synchronize() }
                         do { try await Task.sleep(for: .seconds(300)) }
                         catch { break }

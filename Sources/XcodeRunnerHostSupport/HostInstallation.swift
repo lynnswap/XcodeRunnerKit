@@ -283,23 +283,35 @@ package struct HostInstallation: Sendable {
         }
     }
 
+    package var packageRepositories: URL { hostRoot.appending(path: "github-package-repositories.json") }
+    package var packageGitConfiguration: URL { hostRoot.appending(path: "github-packages.gitconfig") }
+
     package func environment(for storage: Storage) -> [String: String] {
-        [
+        var values = [
             "XCODE_RUNNER_HOST_STORAGE_DIRECTORY": storage.directory.path(percentEncoded: false),
             "XCODE_RUNNER_HOST_ROOT": hostRoot.path(percentEncoded: false),
         ]
+        for prefix in ["", "TEST_RUNNER_"] {
+            let countKey = prefix + "GIT_CONFIG_COUNT"
+            let count = Int(ProcessInfo.processInfo.environment[countKey] ?? "0") ?? 0
+            values[countKey] = String(count + 1)
+            values[prefix + "GIT_CONFIG_KEY_\(count)"] = "include.path"
+            values[prefix + "GIT_CONFIG_VALUE_\(count)"] = packageGitConfiguration.path
+        }
+        return values
     }
 
     package static func hostedConfiguration(
         environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> (storage: Storage, poolDirectory: URL, buildServiceExecutableURL: URL?, developerDirectory: URL?, isWorkflow: Bool)? {
+    ) throws -> (storage: Storage, poolDirectory: URL, buildServiceExecutableURL: URL?, developerDirectory: URL?, isWorkflow: Bool, usesPackageAccess: Bool)? {
         guard let hosted = try hostedLocations(environment) else { return nil }
         return (
             Storage(directory: hosted.storageDirectory),
             hosted.poolDirectory,
             try buildServiceExecutableURL(hostRoot: hosted.hostRoot),
             try developerDirectory(hostRoot: hosted.hostRoot),
-            hosted.isWorkflow
+            hosted.isWorkflow,
+            FileManager.default.fileExists(atPath: hosted.hostRoot.appending(path: "github-packages.gitconfig").path)
         )
     }
 

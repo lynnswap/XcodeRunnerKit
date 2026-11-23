@@ -210,25 +210,27 @@ Xcode. **System selection** uses `xcode-select`.
 
 ### Private SwiftPM dependencies
 
-For each private dependency, run this on a controller with `gh` authenticated:
+Install the XcodeHomeRunner GitHub App on the dependency repositories and grant
+**Contents: read**. On the runner Mac, sign in to the app and list the private
+packages that jobs may fetch, using the owner and repository spelling in the
+package URLs, in
+`~/Library/Application Support/XcodeRunnerKit/github-package-repositories.json`.
 
-```sh
-python3 Scripts/configure-private-dependency.py CI_HOST OWNER/Dependency
+```json
+["my-org/PrivateLibrary", "my-org/DesignKit"]
 ```
 
-The helper creates a read-only deploy key on the CI Mac and configures a SwiftPM
-mirror. The workflow's own `GITHUB_TOKEN` does not provide access to other private
-repositories.
+Choose **Reload** under **Repositories** to apply the list. Keep the ordinary
+GitHub HTTPS package URLs in the project. Jobs on this signed-in Mac receive
+the Git configuration automatically. Adding a dependency to this list
+does not register a GitHub Actions runner for it.
 
-Add these options to the Xcode command:
-
-```sh
---environment "SWIFTPM_MIRROR_CONFIG=$XCODE_RUNNER_HOST_ROOT/mirrors.json" \
---environment "GIT_SSH_COMMAND='$XCODE_RUNNER_HOST_ROOT/bin/git-ssh'" \
---environment GIT_TERMINAL_PROMPT=0
-```
-
-Keep the inner quotes around the `git-ssh` path because it contains spaces.
+The host authenticates Git fetches to GitHub through a read-only relay bound to
+its loopback interface. A job can read the listed packages. The GitHub user
+token stays with the host. Each runner using these credentials needs its own
+authorized sign-in. A dashboard submits its checkout without credentials. Only allow trusted jobs
+to run under the host’s macOS account. Those jobs share its files and can read
+the approved package sources.
 
 ## Commands for the host
 
