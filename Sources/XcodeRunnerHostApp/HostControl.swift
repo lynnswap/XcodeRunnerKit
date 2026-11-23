@@ -480,7 +480,7 @@ struct HostControl: AsyncParsableCommand {
         }
 
         @MainActor func run() async throws {
-            let paired = HostControl.runsHost ? nil : try RemoteOperationClient.pairedHost(installation: HostInstallation())
+            let paired = try RemoteOperationClient.pairedHost(installation: HostInstallation())
             guard HostControl.runsHost || paired != nil else { return try HostControl.write([Group]()) }
             let name = paired?.name ?? HostPane.macName
             do {

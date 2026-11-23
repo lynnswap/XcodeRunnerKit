@@ -95,7 +95,8 @@ runner=/Applications/XcodeHomeRunner.app/Contents/Helpers/xcode-runner
 
 The host dispatches `build`, `build-for-testing` and `test` to a Mac with a
 matching Xcode and destination. If all eligible slots are busy, the command
-waits. To inspect the available Macs, run `"$runner" host runners`.
+waits. Run `"$runner" host runners` to see that host’s runner Macs and free slots,
+including when the dashboard Mac is itself a managed runner.
 
 The transfer includes tracked edits and unignored new files present when the
 job is accepted, including those in submodules. Name the project, workspace or
