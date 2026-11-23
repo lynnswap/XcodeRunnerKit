@@ -290,6 +290,9 @@ xcode-runner host configure --storage /path/to/JobData
 xcode-runner host configure --repositories 101 102   # IDs from github status; --no-repositories selects none
 ```
 
+When using `host configure --local --repositories`, get the local repository IDs from
+`xcode-runner host settings get --scope githubRepositories`.
+
 `host restart` normally requires an idle Mac. Use `host github --help` for
 sign-in and repository commands, `host pairing --help` for dashboard pairing,
 and `host macs --help` to manage other runner Macs. For CLI pairing, exchange
