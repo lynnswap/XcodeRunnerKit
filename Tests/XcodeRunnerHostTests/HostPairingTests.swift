@@ -333,6 +333,13 @@ struct HostPairingTests {
         #expect(headers.status == 200)
         #expect(received.suffix(from: newline + 1) == body)
 
+        // A failed reload stops the relay. The manager must see that the runner needs its routes again.
+        try Data("invalid".utf8).write(to: runner.installation.hostRoot.appending(path: "managed-package-repositories.json"))
+        await runner.github.preparePackageAccess()
+        #expect(runner.github.managedPackageRepositories.isEmpty)
+        await host.managedMacs.checkStatus(of: mac.id, at: try local(runner.management.managementPort))
+        #expect(runner.github.managedPackageRepositories == [name])
+
         guard case .packageRepositories([]) = await host.github.changePackageAccess(.remove(name)) else {
             Issue.record("The manager could not remove the package grant.")
             return

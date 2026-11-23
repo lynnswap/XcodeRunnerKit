@@ -140,7 +140,11 @@ struct PackageFetch: Codable, Sendable {
     }
 
     func transfer(to endpoint: NWEndpoint, manager: HostPairing, input: FileHandle, output: FileHandle) async throws {
-        try await HostLink.exchange(with: endpoint, key: manager.symmetricKey, identity: manager.id.uuidString) { exchange in
+        try await HostLink.exchange(with: endpoint, key: manager.symmetricKey, identity: manager.id.uuidString) { connection in
+            let exchange = HostLink.Exchange(
+                send: { message in try await HostLink.within(.seconds(120)) { try await connection.send(message) } },
+                receive: { try await HostLink.within(.seconds(120), connection.receive) }
+            )
             try await HostLink.within(HostLink.requestTimeout) {
                 try await exchange.send(.fetchPackage(self))
                 let reply = try await exchange.receive()

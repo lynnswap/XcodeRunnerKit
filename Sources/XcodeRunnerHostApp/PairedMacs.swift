@@ -792,15 +792,24 @@ final class PairedMacs: MacList {
     }
 
     /// Recheck after each transfer: the host can be edited while a runner is receiving an older save.
-    func synchronizedSettings(of mac: PairedMac, at endpoint: NWEndpoint, report: HostSettingsReport? = nil) async throws -> HostSettingsReport {
+    func synchronizedSettings(of mac: PairedMac, at endpoint: NWEndpoint, report initialReport: HostSettingsReport? = nil) async throws -> HostSettingsReport {
         guard let owner = jobOptionsOwner else {
-            if let report { return report }
+            if let initialReport { return initialReport }
             return try await requestSettings(.read, from: mac, at: endpoint)
         }
         if let update = jobOptionsUpdates[mac.id] { return try await update.value }
         let update = Task {
             defer { jobOptionsUpdates[mac.id] = nil }
-            var report: HostSettingsReport = if let report { report } else { try await requestSettings(.read, from: mac, at: endpoint) }
+            var report: HostSettingsReport
+            if let initial = initialReport {
+                report = initial
+            } else {
+                do { report = try await requestSettings(.read, from: mac, at: endpoint) }
+                catch {
+                    settings[mac.id]?.packageSyncError = error.localizedDescription
+                    throw error
+                }
+            }
             while true {
                 do {
                     let repositories = try owner.github.packageRepositories()

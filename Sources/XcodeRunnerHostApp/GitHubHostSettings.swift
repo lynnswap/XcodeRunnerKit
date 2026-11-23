@@ -181,6 +181,7 @@ final class GitHubHostSettings {
             packageAccessError = nil
             if errorMessage == previousError { errorMessage = nil }
         } catch {
+            managedPackageRepositories = []
             await packageAccess.stop()
             packageAccessError = "Could not configure private packages: \(error.localizedDescription)"
             if errorMessage == nil || errorMessage == previousError { errorMessage = packageAccessError }
