@@ -355,10 +355,6 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 }
                 try Task.checkCancellation()
                 environment = installation.environment(for: storage)
-                if environment["SWIFTPM_MIRROR_CONFIG"] != nil {
-                    await settings.github.restore()
-                    try Task.checkCancellation()
-                }
                 settings.storageDidBecomeAvailable(storage)
                 settings.hostState = .running
                 startRunnerMonitoring()

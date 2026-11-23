@@ -219,11 +219,9 @@ packages that jobs may fetch in
 ["my-org/PrivateLibrary", "my-org/DesignKit"]
 ```
 
-Restart the host after creating this file so its running services inherit the
-package settings. For later changes to the list, choose **Reload** under
-**Repositories**. Keep the ordinary
+Choose **Reload** under **Repositories** to apply the list. Keep the ordinary
 GitHub HTTPS package URLs in the project. Jobs on this signed-in Mac receive
-the SwiftPM and Git settings automatically. Adding a dependency to this list
+the Git configuration automatically. Adding a dependency to this list
 does not register a GitHub Actions runner for it.
 
 The host authenticates Git fetches to GitHub through a read-only relay bound to

@@ -131,6 +131,9 @@ struct BuildOptions: ParsableArguments {
         request.environment = try Self.assignments(environment)
         request.buildSettings = try Self.assignments(settings)
         request.arguments = additionalArguments
+        if host?.usesPackageAccess == true, !additionalArguments.contains("-scmProvider") {
+            request.arguments += ["-scmProvider", "system"]
+        }
         // The host's saved Xcode is for operations that name none, in an option or in DEVELOPER_DIR.
         let inheritsXcode = request.environment["DEVELOPER_DIR"] != nil
             || ProcessInfo.processInfo.environment["DEVELOPER_DIR"] != nil

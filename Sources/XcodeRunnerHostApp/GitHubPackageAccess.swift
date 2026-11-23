@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XcodeRunnerHostSupport
 
@@ -30,7 +31,9 @@ actor GitHubPackageAccess {
             throw error
         }
         let approved = Set(allowed.map { $0.lowercased() })
-        let names = repositories.filter { $0.isPrivate == true && approved.contains($0.fullName.lowercased()) }.map(\.fullName)
+        let accessible = repositories.filter { $0.isPrivate == true && approved.contains($0.fullName.lowercased()) }
+        let canonical = Set(accessible.map { $0.fullName.lowercased() })
+        let names = Set(accessible.map(\.fullName) + allowed.filter { canonical.contains($0.lowercased()) } + canonical.sorted())
         guard !names.isEmpty else { stop(); return }
         if process?.isRunning != true {
             stop()
@@ -43,6 +46,9 @@ actor GitHubPackageAccess {
             child.currentDirectoryURL = URL(filePath: "/")
             child.environment = ["PATH": "/usr/bin:/bin"]
             let commands = Pipe()
+            guard fcntl(commands.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
             let replies = Pipe()
             child.standardInput = commands
             child.standardOutput = replies

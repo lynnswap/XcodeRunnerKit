@@ -12,9 +12,9 @@ struct GitHubHostSettingsTests {
     }
 
     @Test func hostedPackagesUseOnlyApprovedPrivateRepositories() async throws {
-        struct Mirrors: Decodable {
-            struct Entry: Decodable { let original: String; let mirror: URL }
-            let object: [Entry]
+        struct RelaySettings: Decodable {
+            let origin: URL
+            let repositories: [String]
         }
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -31,17 +31,15 @@ struct GitHubHostSettingsTests {
             .init(id: 3, fullName: "owner/LibraryTools", isPrivate: true),
         ])
         do {
-            let path = try #require(installation.environment(for: storage)["SWIFTPM_MIRROR_CONFIG"])
-            let mirrors = try JSONDecoder().decode(Mirrors.self, from: Data(contentsOf: URL(filePath: path)))
-            let urls = Set(mirrors.object.map(\.original))
-            #expect(urls == Set(["Library", "library"].flatMap { name in
-                ["https://github.com/owner/\(name)", "https://github.com/owner/\(name).git"]
-            }))
-            let mirror = try #require(mirrors.object.first?.mirror)
-            let (_, response) = try await URLSession.shared.data(from: mirror.appending(path: "info/refs"))
-            #expect((response as? HTTPURLResponse)?.statusCode == 403)
+            let config = installation.packageGitConfiguration.deletingPathExtension().appendingPathExtension("json")
+            let settings = try JSONDecoder().decode(RelaySettings.self, from: Data(contentsOf: config))
+            #expect(Set(settings.repositories.map { $0.lowercased() }) == ["owner/library"])
+            let url = settings.origin.appending(path: "owner/Library.git/info/refs")
+                .appending(queryItems: [URLQueryItem(name: "service", value: "git-upload-pack")])
+            let (_, response) = try await URLSession.shared.data(from: url)
+            #expect((response as? HTTPURLResponse)?.statusCode == 401)
             try await relay.update(repositories: [])
-            #expect(!FileManager.default.fileExists(atPath: path))
+            #expect(!FileManager.default.fileExists(atPath: config.path))
             #expect(!FileManager.default.fileExists(atPath: installation.packageGitConfiguration.path))
         } catch {
             await relay.stop()

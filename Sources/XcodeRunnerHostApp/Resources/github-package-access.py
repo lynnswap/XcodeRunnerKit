@@ -9,7 +9,9 @@ import queue
 from pathlib import Path
 import re
 import secrets
+import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -40,7 +42,7 @@ class Packages(http.server.BaseHTTPRequestHandler):
 
     def serve_git(self):
         if not hmac.compare_digest(self.headers.get("Authorization", "").encode(), self.server.authorization.encode()):
-            self.send_error(403)
+            self.send_error(401)
             return
         url = urlsplit(self.path)
         match = GIT_PATH.fullmatch(url.path)
@@ -107,10 +109,33 @@ def write_atomic(path, content):
 
 def publish(config, port, authorization, names):
     origin = f"http://127.0.0.1:{port}/"
-    write_atomic(config, f'[http "{origin}"]\n\textraHeader = Authorization: {authorization}\n')
-    mirrors = [{"original": "https://github.com/" + spelling + suffix, "mirror": origin + name + ".git"}
-               for name in sorted(names) for spelling in sorted({name, name.lower()}) for suffix in ("", ".git")]
-    write_atomic(config.with_suffix(".json"), json.dumps({"version": 1, "object": mirrors}) + "\n")
+    # Git compares insteadOf prefixes. The remote helper compares the complete repository name.
+    helper = shlex.join(["/usr/bin/python3", "-I", str(Path(__file__).resolve()), "--remote", str(config)])
+    lines = [f'[http "{origin}"]', f'    extraHeader = Authorization: {authorization}',
+             '[alias]', '    remote-xcode-package = ' + json.dumps('!' + helper),
+             '[protocol "xcode-package"]', '    allow = always']
+    # Keep the original HTTPS URL in .git/config and in SwiftPM's bare repository cache.
+    for owner in sorted({name.split("/")[0] for name in names}):
+        github = f"https://github.com/{owner}/"
+        lines.extend([f'[url "xcode-package::{github}"]', f'    insteadOf = {github}',
+                      f'[url "{github}"]', f'    pushInsteadOf = {github}'])
+    write_atomic(config.with_suffix(".json"), json.dumps({"origin": origin, "repositories": sorted(names)}))
+    write_atomic(config, "\n".join(lines) + "\n")
+
+
+def remote(config, name, url):
+    # Use Git's own HTTP transport for both routes, including the caller's normal GitHub credentials.
+    settings = json.loads(config.with_suffix(".json").read_text())
+    parsed = urlsplit(url)
+    repository = parsed.path.strip("/").removesuffix(".git").lower()
+    allowed = {n.lower(): n for n in settings["repositories"]}
+    if parsed.netloc == "github.com" and not parsed.query and not parsed.fragment and repository in allowed:
+        # Explicit push URLs bypass pushInsteadOf. Leave a remote with a matching explicit push URL to Git.
+        push_urls = subprocess.run(["git", "config", "--get-all", "remote." + name + ".pushurl"],
+                                   stdout=subprocess.PIPE, text=True, check=False).stdout.splitlines()
+        if url not in push_urls:
+            os.execlp("git", "git", "remote-http", name, settings["origin"] + allowed[repository] + ".git")
+    os.execlp("git", "git", "remote-https", name, url)
 
 
 def main(config):
@@ -134,4 +159,7 @@ def main(config):
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]))
+    if sys.argv[1] == "--remote":
+        remote(Path(sys.argv[2]), *sys.argv[3:])
+    else:
+        main(Path(sys.argv[1]))
