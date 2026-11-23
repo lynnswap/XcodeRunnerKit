@@ -145,7 +145,10 @@ class Packages(http.server.BaseHTTPRequestHandler):
                    "protocolV2": "Git-Protocol" in headers, "gzip": "Content-Encoding" in headers}
         command = [self.server.app, "--fetch-package", json.dumps(request),
                    "--package-manager", self.server.manager, "--package-root", str(self.server.config.parent)]
-        with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
+        self.connection.settimeout(120)
+        with tempfile.TemporaryFile() as errors, subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors
+        ) as child:
             try:
                 if body is not None:
                     for chunk in body:
@@ -155,7 +158,15 @@ class Packages(http.server.BaseHTTPRequestHandler):
                 pass
             first = child.stdout.readline()
             if not first:
-                self.send_error(502, "The managing host could not fetch this repository")
+                child.wait()
+                errors.seek(0)
+                reason = next((line for line in errors if line.startswith(b"Error: ")),
+                              b"The managing host could not fetch this repository.\n")
+                self.send_response(502)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(reason)))
+                self.end_headers()
+                self.wfile.write(reason)
                 return
             metadata = json.loads(first)
             length = metadata.get("length")

@@ -27,6 +27,7 @@ final class PairedMacSettings {
     let runnerSave = SettingsSave<RunnerSetting>()
     var jobOptionsSyncError: String?
     var packageSyncError: String?
+    var packageListenerError: String?
     /// Changes when a settings write finishes, including one whose acknowledgment was lost.
     struct WriteRevision: Equatable, Sendable {
         var packages: UInt64 = 0
@@ -521,6 +522,7 @@ final class PairedMacs: MacList {
         }
         for mac in macs where packageListeners[mac.id] == nil {
             let pairing = mac.pairing
+            settings[mac.id]?.packageListenerError = nil
             packageListeners[mac.id] = Task {
                 do {
                     try await HostLink.listen(
@@ -532,18 +534,21 @@ final class PairedMacs: MacList {
                     }
                 } catch is CancellationError {
                 } catch {
-                    guard self.mac(pairing.id) != nil else { return }
+                    guard !Task.isCancelled, self.mac(pairing.id)?.pairing == pairing else { return }
                     self.packageListeners[pairing.id] = nil
-                    self.message = "Could not serve packages to " + pairing.name + ": " + error.localizedDescription
+                    self.settings[pairing.id]?.packageListenerError = "Could not serve packages: " + error.localizedDescription
                 }
             }
         }
     }
 
     func answerPackageRequest(
-        _ request: HostLinkRequest, from pairing: HostPairing, reply: @escaping @Sendable (HostLinkReply) async throws -> Void,
+        _ request: HostLinkRequest, from pairing: HostPairing, reply send: @escaping @Sendable (HostLinkReply) async throws -> Void,
         next: @escaping @Sendable () async throws -> HostLinkRequest
     ) async throws {
+        let reply: @Sendable (HostLinkReply) async throws -> Void = { message in
+            try await HostLink.within(.seconds(PackageFetch.idleTimeout)) { try await send(message) }
+        }
         guard let owner = managingHost, owner.management.manager == nil, mac(pairing.id)?.pairing == pairing else {
             return try await reply(.refused("This Mac is no longer managed by this host."))
         }
@@ -970,7 +975,7 @@ final class PairedMacs: MacList {
         var seen: Set<String> = []
         return macs.flatMap { mac in
             let state = settings[mac.id]
-            return [state?.jobOptionsSyncError, state?.packageSyncError].compactMap { $0 }.map { "\(mac.name): \($0)" }
+            return [state?.jobOptionsSyncError, state?.packageSyncError, state?.packageListenerError].compactMap { $0 }.map { "\(mac.name): \($0)" }
         }.filter { seen.insert($0).inserted }
     }
 
@@ -1405,6 +1410,7 @@ final class PairedMacs: MacList {
     }
 
     private func checkFoundMacs() async {
+        if packageServiceStarted { updatePackageListeners() }
         await withTaskGroup { group in
             for id in endpoints.keys {
                 group.addTask { await self.refresh(id) }
