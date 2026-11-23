@@ -74,6 +74,15 @@ enum GitHubRequest: Codable, Sendable {
     case reloadRepositories
     /// Saves the selection. The host then registers and removes runners, which later reads report.
     case applySelection(Set<Int>)
+    /// Reconciles the host's current saved selection without writing repositories from a dashboard's last read.
+    case retryRunnerRegistration
+
+    var updatesRunnerRegistrations: Bool {
+        switch self {
+        case .applySelection, .retryRunnerRegistration: true
+        default: false
+        }
+    }
 }
 
 /// Reads or changes a managed Mac's runner folders. The managing host compares them with GitHub and makes the GitHub
@@ -351,7 +360,7 @@ enum HostLink {
     /// - A new value in a reply or a report is optional.
     /// - A state that a report names is a type that keeps a raw value it does not know, as `HostState` does. Enums
     ///   that reports carry gain no cases.
-    static let version = 15
+    static let version = 16
     /// The oldest version whose messages this version reads. A Mac that runs an earlier one is shown as running
     /// another version, and the Macs do not pair. Versions before 7 answered only their own version.
     ///
@@ -430,7 +439,10 @@ enum HostLink {
         let connection = NetworkConnection(to: endpoint, using: clientParameters(key: key, identity: identity))
         return try await whileConnected(connection) { connection in
             try await body(Exchange(
-                send: { try await connection.send(Versioned($0, version: version)) },
+                send: { request in
+                    try Task.checkCancellation()
+                    try await connection.send(Versioned(request, version: version))
+                },
                 receive: {
                     let reply = try await connection.receive().content
                     // A version from before `oldestVersion` answers only its own version.

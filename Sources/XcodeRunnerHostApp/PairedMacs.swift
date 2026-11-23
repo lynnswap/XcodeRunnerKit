@@ -23,7 +23,8 @@ final class PairedMacSettings {
     /// When `report` was read.
     private(set) var readAt: Date?
     var poolDraft = PoolSettingsDraft()
-    var jobOptionEdits: HostJobOptions.Edits = [:]
+    let hostDraft = HostSettingsDraft()
+    let runnerSave = SettingsSave<RunnerSetting>()
     var jobOptionsSyncError: String?
     var storageDirectoryInput = ""
     private(set) var isSaving = false
@@ -391,7 +392,7 @@ final class PairedMacs: MacList {
     private(set) var isPairing = false
     static let alreadyPairing = HostLinkError.refused("\(HostPane.macName) is already pairing with a Mac.")
     @ObservationIgnored weak var jobOptionsOwner: HostSettingsModel?
-    private var jobOptionsUpdates: [HostPairing.ID: Task<HostSettingsReport, any Error>] = [:]
+    private var jobOptionsUpdates: [HostPairing.ID: (endpoint: NWEndpoint, task: Task<HostSettingsReport, any Error>)] = [:]
     private var endpoints: [HostPairing.ID: NWEndpoint] = [:]
     func endpoint(for mac: PairedMac) -> NWEndpoint? { endpoints[mac.id] }
     /// Every management service found, by pairing ID. A Mac advertises its new pairing before this host saves it.
@@ -399,7 +400,8 @@ final class PairedMacs: MacList {
     /// The found services that advertise no version. Those Macs run a version from before messages carried one, and
     /// do not answer a message that does.
     private var unversioned: Set<HostPairing.ID> = []
-    private var checking: Set<HostPairing.ID> = []
+    @ObservationIgnored private var statusChecks: [HostPairing.ID: Task<Void, Never>] = [:]
+    private var isShuttingDown = false
     private var browsing: Task<Void, Never>?
     private var pairableBrowsing: Task<Void, Never>?
 
@@ -474,11 +476,16 @@ final class PairedMacs: MacList {
     }
 
     func shutDown() async {
-        let tasks = [browsing, pairableBrowsing]
+        isShuttingDown = true
+        let tasks = [browsing, pairableBrowsing].compactMap { $0 } + statusChecks.values
+        let updates = jobOptionsUpdates.values.map(\.task)
+        statusChecks.removeAll()
         browsing = nil
         pairableBrowsing = nil
-        for task in tasks { task?.cancel() }
-        for task in tasks { await task?.value }
+        for task in tasks { task.cancel() }
+        for update in updates { update.cancel() }
+        for task in tasks { await task.value }
+        for update in updates { _ = await update.result }
     }
 
     /// Lists Macs that wait to pair with a Mac of this role until `stopDiscoveringPairableMacs()`. This Mac keeps
@@ -573,7 +580,7 @@ final class PairedMacs: MacList {
                 }
                 if case .unpaired? = reply {} else { keepsEarlierPairing = true }
             }
-            forgetStatus(of: mac.id)
+            setEndpoint(nil, for: mac.id)
             forgetSettings(of: mac.id)
         }
         // The list may have been read again while the earlier pairing was told, so the new one joins what it is now.
@@ -653,7 +660,7 @@ final class PairedMacs: MacList {
         }
         guard saved != macs else { return }
         for mac in macs where !saved.contains(where: { $0.id == mac.id }) {
-            forgetStatus(of: mac.id)
+            setEndpoint(nil, for: mac.id)
             forgetSettings(of: mac.id)
         }
         for mac in saved where settings[mac.id] == nil { settings[mac.id] = PairedMacSettings() }
@@ -722,7 +729,7 @@ final class PairedMacs: MacList {
             return
         }
         macs = next
-        forgetStatus(of: id)
+        setEndpoint(nil, for: id)
         forgetSettings(of: id)
         message = notice
         if macs.isEmpty {
@@ -739,15 +746,24 @@ final class PairedMacs: MacList {
 
     /// Recheck after each transfer: the host can be edited while a runner is receiving an older save.
     func synchronizedSettings(of mac: PairedMac, at endpoint: NWEndpoint, report: HostSettingsReport? = nil) async throws -> HostSettingsReport {
+        guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
         guard let owner = jobOptionsOwner else {
             if let report { return report }
             return try await requestSettings(.read, from: mac, at: endpoint)
         }
-        if let update = jobOptionsUpdates[mac.id] { return try await update.value }
+        var initial = report
+        while let update = jobOptionsUpdates[mac.id] {
+            if update.endpoint == endpoint { return try await update.task.value }
+            // The former endpoint may already have received its write. Finish it before reading the new endpoint.
+            _ = await update.task.result
+            initial = nil
+        }
+        guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
         let update = Task {
             defer { jobOptionsUpdates[mac.id] = nil }
-            var report: HostSettingsReport = if let report { report } else { try await requestSettings(.read, from: mac, at: endpoint) }
+            var report: HostSettingsReport = if let initial { initial } else { try await requestSettings(.read, from: mac, at: endpoint) }
             while true {
+                guard endpoints[mac.id] == endpoint else { throw HostLinkError.unreachable("\(mac.name)'s address changed.") }
                 guard let desired = owner.jobOptions?.enabledEntries else {
                     throw HostSettingsError(owner.jobOptionsReadError ?? "Could not read the host's job defaults.")
                 }
@@ -764,7 +780,7 @@ final class PairedMacs: MacList {
             }
             return report
         }
-        jobOptionsUpdates[mac.id] = update
+        jobOptionsUpdates[mac.id] = (endpoint, update)
         return try await update.value
     }
 
@@ -776,35 +792,50 @@ final class PairedMacs: MacList {
     func distributeJobOptions() async {
         for mac in macs {
             guard let endpoint = endpoints[mac.id] else { continue }
+            var syncError: String?
             do {
                 _ = try await synchronizedSettings(of: mac, at: endpoint)
-                settings[mac.id]?.jobOptionsSyncError = nil
-            } catch { settings[mac.id]?.jobOptionsSyncError = error.localizedDescription }
+            } catch { syncError = error.localizedDescription }
+            if endpoints[mac.id] == endpoint { settings[mac.id]?.jobOptionsSyncError = syncError }
         }
     }
 
     /// Reads the settings of the Mac at `endpoint`, which also shows whether it accepts this Mac. Browsing calls this
     /// when a paired Mac is found.
     func checkStatus(of id: HostPairing.ID, at endpoint: NWEndpoint) async {
-        guard let mac = mac(id), !checking.contains(id) else { return }
-        endpoints[id] = endpoint
-        checking.insert(id)
-        defer { checking.remove(id) }
+        guard !isShuttingDown, !Task.isCancelled, let mac = mac(id) else { return }
+        setEndpoint(endpoint, for: id)
+        guard statusChecks[id] == nil else { return }
         if statuses[id] == nil || statuses[id] == .notFound { statuses[id] = .checking }
+        // Closing a pane cancels its watch. The shared read must still publish its answer and release this Mac.
+        let task = Task {
+            await readStatus(of: mac, at: endpoint)
+            if !Task.isCancelled { statusChecks[id] = nil }
+        }
+        statusChecks[id] = task
+        await task.value
+    }
+
+    private func readStatus(of mac: PairedMac, at endpoint: NWEndpoint) async {
+        let id = mac.id
         let changeCount = settings[id]?.changeCount
         let status: Status
         var report: HostSettingsReport?
         var github: GitHubReport?
         var managed: ManagedMacsReport?
         do {
+            let overlapsFormerEndpoint = jobOptionsUpdates[id].map { $0.endpoint != endpoint } ?? false
             let read = try await requestSettings(.read, from: mac, at: endpoint)
             report = read
             if role == .manager {
                 // An older runner can still be managed when it cannot apply build defaults.
+                var syncError: String?
                 do {
-                    report = try await synchronizedSettings(of: mac, at: endpoint, report: read)
-                    settings[id]?.jobOptionsSyncError = nil
-                } catch { settings[id]?.jobOptionsSyncError = error.localizedDescription }
+                    // The write at the former endpoint can finish after this snapshot but before its reply arrives.
+                    report = try await synchronizedSettings(of: mac, at: endpoint, report: overlapsFormerEndpoint ? nil : read)
+                } catch { syncError = error.localizedDescription }
+                guard !Task.isCancelled else { return }
+                settings[id]?.jobOptionsSyncError = syncError
             }
             // A dashboard shows the host's GitHub settings and the Macs it manages too. A managing host has its own.
             if role == .dashboard {
@@ -819,8 +850,7 @@ final class PairedMacs: MacList {
         } catch {
             status = .unreachable(error.localizedDescription)
         }
-        // A closed pane cancels its read, which says nothing about the Mac. The Mac may also have been removed or lost
-        // from the network while the request waited.
+        // The pairing or endpoint may have changed while the request was in flight.
         guard !Task.isCancelled, self.mac(id) != nil, endpoints[id] == endpoint else { return }
         statuses[id] = status
         if let report, let settings = settings[id], settings.changeCount == changeCount, !settings.isChanging {
@@ -972,11 +1002,9 @@ final class PairedMacs: MacList {
     }
     func reloadRepositories(of id: HostPairing.ID) async { await changeGitHub(.reloadRepositories, of: id) }
 
-    /// Saves the repository selection edited for a host. The host then registers and removes runners.
-    func applyRepositorySelection(of id: HostPairing.ID) async {
-        guard let settings = settings[id] else { return }
-        guard let saved = await changeGitHub(.applySelection(settings.selectedRepositoryIDs), of: id) else { return }
-        settings.selectedRepositoryIDs = saved.savedRepositoryIDs
+    /// Sends explicit edits, or asks the host to retry registration against its current saved selection.
+    func applyRepositorySelection(_ selection: Set<Int>?, of id: HostPairing.ID) async {
+        await changeGitHub(selection.map(GitHubRequest.applySelection) ?? .retryRunnerRegistration, of: id)
     }
 
     /// Opens the page that chooses the repositories of the host's GitHub App, in this Mac's browser.
@@ -1098,9 +1126,11 @@ final class PairedMacs: MacList {
         if role == .dashboard, browses { HostControl.dashboardHostsChanged() }
     }
 
-    private func forgetStatus(of id: HostPairing.ID) {
+    private func setEndpoint(_ endpoint: NWEndpoint?, for id: HostPairing.ID) {
+        guard endpoints[id] != endpoint else { return }
+        statusChecks.removeValue(forKey: id)?.cancel()
         statuses[id] = nil
-        endpoints[id] = nil
+        endpoints[id] = endpoint
     }
 
     /// Forgets what was read from a Mac that left the list.
@@ -1124,10 +1154,10 @@ final class PairedMacs: MacList {
     private func advertisedServicesChanged() {
         let current = advertised.filter { mac($0.key) != nil }
         let previous = endpoints
-        for id in previous.keys where current[id] == nil { forgetStatus(of: id) }
+        for id in previous.keys where current[id] == nil { setEndpoint(nil, for: id) }
         for (id, endpoint) in current where previous[id] != endpoint {
-            endpoints[id] = endpoint
-            Task { await checkStatus(of: id, at: endpoint) }
+            setEndpoint(endpoint, for: id)
+            Task { await refresh(id) }
         }
     }
 
@@ -1161,8 +1191,8 @@ final class PairedMacs: MacList {
 
     private func checkFoundMacs() async {
         await withTaskGroup { group in
-            for (id, endpoint) in endpoints {
-                group.addTask { await self.checkStatus(of: id, at: endpoint) }
+            for id in endpoints.keys {
+                group.addTask { await self.refresh(id) }
             }
         }
     }

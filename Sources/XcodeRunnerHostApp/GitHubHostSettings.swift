@@ -189,6 +189,7 @@ final class GitHubHostSettings {
             signInCode: deviceAuthorization.map { .init(userCode: $0.userCode, verificationURI: $0.verificationURI) },
             isBusy: isBusy, canReloadRepositories: canReloadRepositories, canDisconnect: canDisconnect,
             isLoadingRepositories: isLoadingRepositories, isSavingSelection: isSavingSelection, isSynchronizing: isSynchronizing,
+            supportsRegistrationRetry: true,
             selectableRepositories: selectableRepositories, hasListedRepositories: !repositories.isEmpty,
             savedRepositoryIDs: savedRepositoryIDs, runnerStatuses: runnerStatuses.map(RepositoryRunnerReport.init),
             errorMessage: errorMessage, installationURL: installationURL, addOrganizationURL: app.installationURL,
@@ -274,11 +275,11 @@ final class GitHubHostSettings {
         return await finishSelectionUpdate()
     }
 
-    /// Saves a selection and keeps other changes out until `finishSelectionUpdate()`.
-    private func beginSelectionUpdate(_ selectedIDs: Set<Int>) throws {
+    /// Reserves registration management. A retry uses the host's saved selection, including edits from another dashboard.
+    private func beginSelectionUpdate(_ selectedIDs: Set<Int>?) throws {
         guard !isShuttingDown else { throw HostSettingsError("The runner host is stopping.") }
         guard !isBusy, !isLoadingRepositories else { throw Self.busy }
-        try saveSelection(selectedIDs)
+        if let selectedIDs { try saveSelection(selectedIDs) }
         isSavingSelection = true
     }
 
@@ -291,8 +292,7 @@ final class GitHubHostSettings {
 
     /// Answers a dashboard's request to read or change this Mac's GitHub settings, the way this Mac's window does.
     ///
-    /// After a reply to `.applySelection` that is not a refusal, call `synchronizeDashboardSelection()`, so that the
-    /// dashboard gets the saved selection before runners are registered and removed.
+    /// A successful registration request acknowledges the saved selection before the host reconciles its runners.
     func answer(_ request: GitHubRequest) async -> HostLinkReply {
         do {
             switch request {
@@ -316,6 +316,8 @@ final class GitHubHostSettings {
             case .applySelection(let selectedIDs):
                 do { try beginSelectionUpdate(selectedIDs) }
                 catch { throw HostSettingsError("Could not save the repository selection: \(error.localizedDescription)") }
+            case .retryRunnerRegistration:
+                try beginSelectionUpdate(nil)
             }
             return .github(report)
         } catch {
@@ -323,8 +325,8 @@ final class GitHubHostSettings {
         }
     }
 
-    /// Registers and removes runners for the selection that a dashboard saved.
-    func synchronizeDashboardSelection() async {
+    /// Registers and removes runners after the selection has been saved.
+    func synchronizeSavedSelection() async {
         guard isSavingSelection else { return }
         errorMessage = await finishSelectionUpdate()
     }
@@ -350,16 +352,17 @@ final class GitHubHostSettings {
         return messages.isEmpty ? nil : messages.joined(separator: "\n")
     }
 
-    func applyRepositorySelection() async {
+    func applyRepositorySelection(_ selection: Set<Int>?) {
         do {
-            errorMessage = try await updateRepositorySelection(selectedRepositoryIDs)
+            try beginSelectionUpdate(selection)
+            Task { await synchronizeSavedSelection() }
         } catch { errorMessage = "Could not save the repository selection: \(error.localizedDescription)" }
     }
 
     /// Registers the selected repositories' runners on this Mac and the Macs it manages, and removes the runners of
     /// repositories that left the selection.
     func synchronize() async {
-        guard synchronizationTask == nil, storageIsReady, !isConnecting else { return }
+        guard !isShuttingDown, synchronizationTask == nil, storageIsReady, !isConnecting else { return }
         guard management?.manager == nil else {
             runnerStatuses = []
             return

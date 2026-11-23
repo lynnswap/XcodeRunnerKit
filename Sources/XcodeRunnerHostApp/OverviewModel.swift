@@ -106,8 +106,7 @@ final class OverviewModel: PaneSaving {
     /// one failed, which applying it again retries.
     private var canApplySelection: Bool {
         guard let github, !github.isBusy, !github.isLoadingRepositories else { return false }
-        return selection != github.savedRepositoryIDs || github.errorMessage != nil
-            || github.runnerStatuses.contains { $0.errorMessage != nil }
+        return selection != github.savedRepositoryIDs || (github.supportsRegistrationRetry == true && github.hasRegistrationError)
     }
 
     /// Starts the sign-in, whose code the pane then shows.
@@ -154,32 +153,23 @@ final class OverviewModel: PaneSaving {
         }
     }
 
-    private var jobOptionEdits: HostJobOptions.Edits {
-        get {
-            switch source {
-            case .thisMac(let settings): settings.jobOptionEdits
-            case .host(let hosts, let host): hosts.settings(of: host.id)?.jobOptionEdits ?? [:]
-            }
-        }
-        set {
-            switch source {
-            case .thisMac(let settings): settings.jobOptionEdits = newValue
-            case .host(let hosts, let host): hosts.settings(of: host.id)?.jobOptionEdits = newValue
-            }
+    private var draft: HostSettingsDraft? {
+        switch source {
+        case .thisMac(let settings): settings.hostDraft
+        case .host(let hosts, let host): hosts.settings(of: host.id)?.hostDraft
         }
     }
 
     subscript(jobOptions kind: HostJobOptions.Kind) -> [HostJobOptions.Entry] {
-        get { jobOptionEdits[kind] ?? jobOptions?[kind] ?? [] }
+        get { draft?.jobOptions[kind] ?? jobOptions?[kind] ?? [] }
         set {
-            jobOptionEdits[kind] = newValue == jobOptions?[kind] ? nil : newValue
-            jobOptionsSaveError = nil
+            draft?.jobOptions[kind] = newValue == jobOptions?[kind] ? nil : newValue
+            draft?.jobOptionsError = nil
         }
     }
 
-    private var jobOptionsSaveError: String?
     var jobOptionsError: String? {
-        if let jobOptionsSaveError { return jobOptionsSaveError }
+        if let error = draft?.jobOptionsError { return error }
         switch source {
         case .thisMac(let settings): return settings.jobOptionsReadError
         case .host(let hosts, let host): return hosts.answer(of: host.id)?.report.jobOptionsReadError
@@ -191,17 +181,12 @@ final class OverviewModel: PaneSaving {
         return canApplySelection && !isWaitingForGitHub
     }
 
-    private var canSaveOptions: Bool { jobOptions != nil && !jobOptionEdits.isEmpty }
+    private var canSaveOptions: Bool { jobOptions != nil && draft?.jobOptions.isEmpty == false }
     var canSave: Bool { !isSaving && (canSaveOptions || canSaveSelection) }
 
-    private var isApplyingSelection = false
-    private(set) var isSavingJobOptions = false
-    var isSaving: Bool { isApplyingSelection || isSavingJobOptions || github?.isSavingSelection == true }
-
-    private var saveCount = 0
-    var saveProgress: (completed: Int, total: Int) {
-        (max(0, saveCount - (isSavingJobOptions ? 1 : 0) - (isApplyingSelection ? 1 : 0)), saveCount)
-    }
+    var isSavingJobOptions: Bool { draft?.save.pending.contains(.jobOptions) == true }
+    var isSavingRepositories: Bool { draft?.save.pending.contains(.repositories) == true }
+    var saveProgress: (completed: Int, total: Int)? { draft?.save.progress }
 
     var hasEdits: Bool {
         if canSaveOptions { return true }
@@ -211,37 +196,29 @@ final class OverviewModel: PaneSaving {
 
     func revert() {
         if let github { selection = github.savedRepositoryIDs }
-        jobOptionEdits = [:]
-        jobOptionsSaveError = nil
+        draft?.jobOptions = [:]
+        draft?.jobOptionsError = nil
     }
 
     func save() {
-        guard canSave else { return }
-        isApplyingSelection = canSaveSelection
-        isSavingJobOptions = canSaveOptions
-        saveCount = (isSavingJobOptions ? 1 : 0) + (isApplyingSelection ? 1 : 0)
-        Task {
-            if isSavingJobOptions {
-                let edits = jobOptionEdits
-                do {
-                    switch source {
-                    case .thisMac(let settings):
-                        try settings.saveJobOptions(edits)
-                        await settings.managedMacs.distributeJobOptions()
-                    case .host(let hosts, let host):
-                        try await hosts.saveJobOptions(edits, of: host.id)
-                    }
-                    if jobOptionEdits == edits { jobOptionEdits = [:] }
-                    jobOptionsSaveError = nil
-                } catch { jobOptionsSaveError = error.localizedDescription }
-            }
-            isSavingJobOptions = false
-            if isApplyingSelection {
-                switch source {
-                case .thisMac(let settings): await settings.github.applyRepositorySelection()
-                case .host(let hosts, let host): await hosts.applyRepositorySelection(of: host.id)
+        guard canSave, let draft else { return }
+        var fields: [HostSettingsDraft.Field] = []
+        if canSaveOptions { fields.append(.jobOptions) }
+        if canSaveSelection { fields.append(.repositories) }
+        let editedSelection = selection == github?.savedRepositoryIDs ? nil : selection
+        draft.save.start(fields) { [source] field in
+            switch (source, field) {
+            case (.thisMac(let settings), .jobOptions):
+                await draft.saveJobOptions { edits in
+                    try settings.saveJobOptions(edits)
+                    await settings.managedMacs.distributeJobOptions()
                 }
-                isApplyingSelection = false
+            case (.host(let hosts, let host), .jobOptions):
+                await draft.saveJobOptions { try await hosts.saveJobOptions($0, of: host.id) }
+            case (.thisMac(let settings), .repositories):
+                settings.github.applyRepositorySelection(editedSelection)
+            case (.host(let hosts, let host), .repositories):
+                await hosts.applyRepositorySelection(editedSelection, of: host.id)
             }
         }
     }
