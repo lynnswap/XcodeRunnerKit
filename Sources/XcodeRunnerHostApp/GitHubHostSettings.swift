@@ -36,6 +36,7 @@ final class GitHubHostSettings {
     private let record: URL
     private let authentication: GitHubAuthentication
     @ObservationIgnored private var packageAccess: GitHubPackageAccess?
+    @ObservationIgnored private var packageUpdate: Task<Void, Never>?
 
     private let client: GitHubClient
     private let provisioner: RunnerProvisioner
@@ -160,8 +161,30 @@ final class GitHubHostSettings {
         packageAccess = GitHubPackageAccess(installation: installation, authentication: authentication)
     }
 
+    /// A refresh owns the relay until it has either published its routes or finished cleaning up a failure.
+    private func withPackageAccess(_ operation: @escaping @MainActor (GitHubPackageAccess) async -> Void) async {
+        while let pending = packageUpdate { await pending.value }
+        guard let packageAccess, !isShuttingDown else { return }
+        let update = Task {
+            defer { packageUpdate = nil }
+            await operation(packageAccess)
+        }
+        packageUpdate = update
+        await update.value
+    }
+
     func preparePackageAccess() async {
-        guard let packageAccess, !isShuttingDown, !Task.isCancelled else { return }
+        guard !Task.isCancelled else { return }
+        await withPackageAccess { await self.preparePackageAccess(using: $0) }
+    }
+
+    private func stopLocalPackageAccess() async {
+        await withPackageAccess { access in
+            if self.management?.manager == nil, self.account == nil { await access.stop() }
+        }
+    }
+
+    private func preparePackageAccess(using packageAccess: GitHubPackageAccess) async {
         let previousError = packageAccessError
         do {
             if let manager = management?.manager {
@@ -274,7 +297,7 @@ final class GitHubHostSettings {
         do {
             try await authentication.signOut(confirmedLogin: confirmedLogin)
             account = nil
-            if management?.manager == nil { await packageAccess?.stop() }
+            await stopLocalPackageAccess()
             repositories = []
             installations = []
             runnerStatuses = []
@@ -613,7 +636,7 @@ final class GitHubHostSettings {
             switch error {
             case .notSignedIn, .response(status: 401, message: _), .authorization:
                 account = nil
-                if management?.manager == nil { await packageAccess?.stop() }
+                await stopLocalPackageAccess()
             default: break
             }
         }
@@ -622,6 +645,7 @@ final class GitHubHostSettings {
 
     func shutDown() async {
         isShuttingDown = true
+        await packageUpdate?.value
         await packageAccess?.stop()
         packageAccess = nil
         cancelConnection()
