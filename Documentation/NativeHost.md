@@ -129,11 +129,13 @@ Open **Settings…** on the host or its paired dashboard.
 
 1. Under **GitHub**, choose **Connect GitHub…**. GitHub's device page opens,
    and the pane shows a code. Enter the code on that page and authorize the app.
-2. To add an organization, choose **Add Organization…** under **GitHub**.
-   On GitHub, choose the organization and its repositories, then install the
-   app or request the owner's approval. To change access for an existing
-   installation, choose **Add Repositories on GitHub…** under **Repositories**.
-3. Return to the window and choose the reload button beside **Repositories**.
+2. For a personal account, choose **Add Repositories on GitHub…** under
+   **Repositories** to install the app or change its repository selection.
+   For a new organization, choose **Add Organization…** under **GitHub**,
+   select the organization and its repositories, and install the app or
+   request installation from an organization owner.
+3. Once the installation is approved and complete, return to the window and
+   choose the reload button beside **Repositories**.
 4. Switch on the repositories to manage and choose **Save** in the toolbar.
 
 Enter the device code shown by your own app. Runner management requires
