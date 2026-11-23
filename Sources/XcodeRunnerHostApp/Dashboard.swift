@@ -237,7 +237,7 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
     }
 
     @objc private func showHelp(_ sender: Any?) {
-        NSWorkspace.shared.open(URL(string: "https://github.com/lynnswap/XcodeRunnerKit/blob/main/Documentation/NativeHost.md")!)
+        NSWorkspace.shared.open(URL(string: "https://github.com/lynnswap/XcodeHomeRunner/blob/main/Documentation/NativeHost.md")!)
     }
 
     /// The menus that people expect in the menu bar, in their usual order, with the commands that pair with Macs. The

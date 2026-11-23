@@ -26,7 +26,7 @@ defaults:
 jobs:
   tests:
     name: Tests
-    if: github.repository == 'lynnswap/XcodeRunnerKit'
+    if: github.repository == 'lynnswap/XcodeHomeRunner'
     runs-on: xcode-27
     timeout-minutes: 20
     steps:
@@ -64,7 +64,7 @@ jobs:
 
   cli:
     name: CLI checks
-    if: github.repository == 'lynnswap/XcodeRunnerKit'
+    if: github.repository == 'lynnswap/XcodeHomeRunner'
     runs-on: xcode-27
     timeout-minutes: 20
     steps:
@@ -92,7 +92,7 @@ jobs:
 
   host:
     name: Host app
-    if: github.repository == 'lynnswap/XcodeRunnerKit'
+    if: github.repository == 'lynnswap/XcodeHomeRunner'
     runs-on: xcode-27
     timeout-minutes: 20
     steps:
