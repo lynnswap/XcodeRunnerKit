@@ -331,7 +331,7 @@ struct PairedRunnerMac: RunnerMac {
 }
 
 /// The Macs that this Mac paired with, and whether each one can be reached: the Macs that a host manages, or the
-/// hosts that a dashboard shows.
+/// host paired with a dashboard.
 @MainActor @Observable
 final class PairedMacs: MacList {
     enum Status: Codable, Equatable, Sendable {
@@ -394,7 +394,7 @@ final class PairedMacs: MacList {
     private var discoveryUsers = 0
     /// Whether this Mac lists the Macs that wait to pair.
     var isDiscovering: Bool { discoveryUsers > 0 }
-    /// The Macs that each host manages, which a dashboard reaches through that host.
+    /// The dashboard reaches the runner Macs through its paired host.
     private var relayed: [HostPairing.ID: RelayedMacs] = [:]
     private(set) var message: String?
     private(set) var discoveryMessage: String?
@@ -440,11 +440,27 @@ final class PairedMacs: MacList {
         self.version = version
         self.openURL = openURL
         do {
-            macs = try store.read().map { try JSONDecoder().decode([PairedMac].self, from: $0) } ?? []
+            macs = try readPairings()
             for mac in macs { settings[mac.id] = PairedMacSettings() }
         } catch {
             message = "Could not read the paired Macs: \(error.localizedDescription)"
         }
+    }
+
+    /// A dashboard with several legacy pairings has no destination until its user disconnects the extra hosts.
+    var dashboardHost: PairedMac? { macs.count == 1 ? macs.first : nil }
+
+    var hasLegacyHosts: Bool { role == .dashboard && macs.count > 1 }
+    private(set) var isDisconnectingLegacyHost = false
+
+    var legacyHostMessage: String? {
+        guard hasLegacyHosts else { return nil }
+        return "An earlier version paired this dashboard with multiple hosts. Disconnect the extra pairings in the dashboard to use the remaining host."
+    }
+
+    private func readPairings() throws -> [PairedMac] {
+        guard let data = try store.read() else { return [] }
+        return try JSONDecoder().decode([PairedMac].self, from: data)
     }
 
     func mac(_ id: HostPairing.ID) -> PairedMac? { macs.first { $0.id == id } }
@@ -477,7 +493,7 @@ final class PairedMacs: MacList {
             packageServiceStarted = true
             updatePackageListeners()
         }
-        guard browses, browsing == nil, !macs.isEmpty else { return }
+        guard browses, browsing == nil, !macs.isEmpty, !hasLegacyHosts else { return }
         browsing = Task {
             await withTaskGroup { group in
                 group.addTask {
@@ -607,13 +623,16 @@ final class PairedMacs: MacList {
         return try await pair(at: mac.endpoint).listed
     }
 
-    /// Pairs with the Mac at `endpoint`, replacing an earlier pairing with the same Mac.
+    /// Pairs an empty dashboard with its host, or adds a runner to a manager.
     ///
     /// The pairing finishes after the person confirms `codeConfirmation` with `confirmCode()` and allows the
     /// pairing on the Mac.
     @discardableResult
     func pair(at endpoint: NWEndpoint) async throws -> PairedMac {
         guard !isPairing else { throw Self.alreadyPairing }
+        if role == .dashboard, let existing = try readPairings().first {
+            throw HostSettingsError("Disconnect \(existing.name) before pairing this dashboard with a host.")
+        }
         isPairing = true
         defer {
             isPairing = false
@@ -626,38 +645,35 @@ final class PairedMacs: MacList {
         }
         let macName = pairing.name
         let mac = PairedMac(pairing: pairing, hostID: hostID)
-        // The pairing took as long as the person or a command needed, and another process may have changed the list.
-        reload()
-        let replaced = macs.filter { $0.hostID == hostID }
-        let next = macs.filter { $0.hostID != hostID } + [mac]
+        // A command can pair another Mac while the person is comparing codes.
+        let next: [PairedMac]
         do {
-            try save(next)
-        } catch {
-            throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey:
-                "\(macName) paired, but this Mac could not save the pairing: \(error.localizedDescription) \(endingInstruction(on: macName)), then pair again."
-            ])
-        }
-        var keepsEarlierPairing = false
-        for mac in replaced {
-            // A Mac replaces its managing host by itself, and keeps every dashboard until told.
             if role == .dashboard {
-                let reply: HostLinkReply? = if let endpoint = endpoints[mac.id] {
-                    try? await send(.unpair, to: mac, at: endpoint)
-                } else {
-                    nil
-                }
-                if case .unpaired? = reply {} else { keepsEarlierPairing = true }
+                next = [mac]
+                try store.insert(JSONEncoder().encode(next))
+                if browses { HostControl.dashboardHostChanged() }
+            } else {
+                let saved = try readPairings()
+                next = saved.filter { $0.hostID != hostID } + [mac]
+                try save(next)
             }
-            setEndpoint(nil, for: mac.id)
-            forgetSettings(of: mac.id)
+        } catch {
+            var detail = "\(macName) paired, but this Mac could not save the pairing: \(error.localizedDescription)"
+            if role == .dashboard {
+                do {
+                    try await unpair(mac, at: RemoteOperationClient.find(mac))
+                    detail += " The host removed the new dashboard registration."
+                } catch {
+                    detail += " The host could not remove the registration: \(error.localizedDescription) \(endingInstruction(on: macName))."
+                }
+                reload()
+            } else {
+                detail += " \(endingInstruction(on: macName)), then pair again."
+            }
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: detail])
         }
-        // The list may have been read again while the earlier pairing was told, so the new one joins what it is now.
-        macs = macs.filter { $0.hostID != hostID } + [mac]
-        settings[mac.id] = PairedMacSettings()
-        message = keepsEarlierPairing
-            ? "\(macName) could not be told to forget this Mac's earlier pairing. It lists this Mac twice under Dashboards until you remove one there."
-            : nil
-        if browsing == nil { start() } else { advertisedServicesChanged() }
+        message = nil
+        updatePairings(next)
         return mac
     }
 
@@ -721,11 +737,15 @@ final class PairedMacs: MacList {
     func reload() {
         let saved: [PairedMac]
         do {
-            saved = try store.read().map { try JSONDecoder().decode([PairedMac].self, from: $0) } ?? []
+            saved = try readPairings()
         } catch {
             message = "Could not read the paired Macs: \(error.localizedDescription)"
             return
         }
+        updatePairings(saved)
+    }
+
+    private func updatePairings(_ saved: [PairedMac]) {
         guard saved != macs else { return }
         for mac in macs where !saved.contains(where: { $0.id == mac.id }) {
             setEndpoint(nil, for: mac.id)
@@ -733,7 +753,7 @@ final class PairedMacs: MacList {
         }
         for mac in saved where settings[mac.id] == nil { settings[mac.id] = PairedMacSettings() }
         macs = saved
-        if macs.isEmpty {
+        if macs.isEmpty || hasLegacyHosts {
             browsing?.cancel()
             browsing = nil
             advertised = [:]
@@ -769,41 +789,39 @@ final class PairedMacs: MacList {
         }
     }
 
+    private func unpair(_ mac: PairedMac, at endpoint: NWEndpoint) async throws {
+        let reply = try await send(.unpair, to: mac, at: endpoint)
+        if case .refused(let message) = reply { throw HostLinkError.refused(message) }
+        guard case .unpaired = reply else { throw HostLinkError.unexpectedReply }
+    }
+
     /// Ends the pairing on both Macs. A Mac that cannot be told keeps accepting this Mac until the person ends the
     /// pairing there.
     func remove(_ id: HostPairing.ID) async {
-        guard let mac = mac(id) else { return }
+        guard let mac = mac(id), !isDisconnectingLegacyHost else { return }
+        isDisconnectingLegacyHost = hasLegacyHosts
+        defer { isDisconnectingLegacyHost = false }
         var notice: String?
         if status(of: id) != .rejected {
-            if let endpoint = endpoints[id] {
-                do {
-                    let reply = try await send(.unpair, to: mac, at: endpoint)
-                    if case .refused(let message) = reply { throw HostLinkError.refused(message) }
-                    guard case .unpaired = reply else { throw HostLinkError.unexpectedReply }
-                } catch {
-                    notice = "\(mac.name) could not be told: \(error.localizedDescription) \(remainingAccess(on: mac.name))"
-                }
-            } else {
-                notice = "\(mac.name) was not found on the local network. \(remainingAccess(on: mac.name))"
+            do {
+                let endpoint: NWEndpoint
+                if let found = endpoints[id] { endpoint = found }
+                else if browses, hasLegacyHosts { endpoint = try await RemoteOperationClient.find(mac) }
+                else { throw HostLinkError.unreachable("\(mac.name) was not found on the local network.") }
+                try await unpair(mac, at: endpoint)
+            } catch {
+                notice = "\(mac.name) could not be told: \(error.localizedDescription) \(remainingAccess(on: mac.name))"
             }
         }
         // Telling the Mac took a moment, in which another process may have changed the list.
-        reload()
-        let next = macs.filter { $0.id != id }
         do {
-            try save(next)
+            let saved = try readPairings()
+            let next = saved.filter { $0.id != id }
+            if saved != next { try save(next) }
+            updatePairings(next)
+            message = notice
         } catch {
-            message = "Could not remove \(mac.name): \(error.localizedDescription)"
-            return
-        }
-        macs = next
-        setEndpoint(nil, for: id)
-        forgetSettings(of: id)
-        message = notice
-        if macs.isEmpty {
-            browsing?.cancel()
-            browsing = nil
-            advertised = [:]
+            message = ["Could not remove \(mac.name): \(error.localizedDescription)", notice].compactMap { $0 }.joined(separator: " ")
         }
     }
 
@@ -1318,10 +1336,9 @@ final class PairedMacs: MacList {
     }
 
     private func save(_ macs: [PairedMac]) throws {
-        if macs.isEmpty { try store.remove() } else { try store.write(JSONEncoder().encode(macs)) }
-        // A Mac with a host shows its dashboard from the host's process, and a dashboard opened before the host was
-        // set up runs in another one. Each reads the hosts again after the other saved them.
-        if role == .dashboard, browses { HostControl.dashboardHostsChanged() }
+        if macs.isEmpty { try store.remove() }
+        else { try store.write(JSONEncoder().encode(macs)) }
+        if role == .dashboard, browses { HostControl.dashboardHostChanged() }
     }
 
     private func setEndpoint(_ endpoint: NWEndpoint?, for id: HostPairing.ID) {

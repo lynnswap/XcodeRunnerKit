@@ -71,7 +71,7 @@ struct HostPairingReport: Codable, Equatable, Sendable {
     }
 }
 
-/// The pairings of a Mac without a host: the hosts that its dashboard shows, without the pairings' keys.
+/// The dashboard's pairing without its key. The existing report format also lists pairings to remove during migration.
 struct DashboardPairingReport: Codable, Equatable, Sendable {
     let hosts: [HostPairingReport.Mac]
     /// What the last change left to do on a host, or why it failed.
@@ -79,7 +79,8 @@ struct DashboardPairingReport: Codable, Equatable, Sendable {
 
     @MainActor init(_ hosts: PairedMacs) {
         self.hosts = hosts.macs.map { HostPairingReport.Mac($0.pairing) }
-        message = hosts.message
+        let notices = [hosts.message, hosts.legacyHostMessage].compactMap { $0 }
+        message = notices.isEmpty ? nil : notices.joined(separator: " ")
     }
 }
 

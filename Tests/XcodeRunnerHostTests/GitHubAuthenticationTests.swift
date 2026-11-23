@@ -22,6 +22,14 @@ final class MemorySecretStore: SecretStore, Sendable {
         if let error = writeError.withLock({ $0 }) { throw error }
         value.withLock { $0.data = data; $0.writes += 1 }
     }
+    func insert(_ data: Data) throws {
+        if let error = writeError.withLock({ $0 }) { throw error }
+        try value.withLock {
+            guard $0.data == nil else { throw CocoaError(.fileWriteFileExists) }
+            $0.data = data
+            $0.writes += 1
+        }
+    }
     func remove() { value.withLock { $0.data = nil } }
 }
 

@@ -139,12 +139,11 @@ with tempfile.TemporaryDirectory(prefix='Dashboard test ') as temporary:
     # The bundled CLI hands an operation for a host to the app, which has the pairings. This Mac paired with no host.
     dashboard_env = {key: value for key, value in os.environ.items()
                      if key not in ('GITHUB_ACTIONS', 'XCODE_RUNNER_HOST_ROOT', 'XCODE_RUNNER_HOST_STORAGE_DIRECTORY')}
-    for host_options in ([], ['--host', 'Missing Host']):
-        sent = subprocess.run(
-            [str(app/'Contents/Helpers/xcode-runner'), 'build', *host_options, '--package', '.', '--scheme', 'Probe'],
-            env={**dashboard_env, 'HOME': str(home)}, cwd=temporary, capture_output=True, text=True)
-        assert sent.returncode == 1 and sent.stderr.startswith('Error: '), f'The app did not take the operation: {sent}'
-        assert not (Path(temporary)/'XcodeRunnerOutput').exists(), 'The CLI ran the build on the dashboard'
+    sent = subprocess.run(
+        [str(app/'Contents/Helpers/xcode-runner'), 'build', '--package', '.', '--scheme', 'Probe'],
+        env={**dashboard_env, 'HOME': str(home)}, cwd=temporary, capture_output=True, text=True)
+    assert sent.returncode == 1 and sent.stderr.startswith('Error: '), f'The app did not take the operation: {sent}'
+    assert not (Path(temporary)/'XcodeRunnerOutput').exists(), 'The CLI ran the build on the dashboard'
     assert not any(home.iterdir()), f'An operation for a host created host files: {sorted(home.rglob("*"))}'
 
 

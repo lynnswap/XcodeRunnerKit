@@ -55,7 +55,6 @@ struct OverviewView: View {
                 if let management = model.management {
                     HostDashboardsSection(management: management)
                 }
-                if let showHost = model.showHost { shownHosts(showHost) }
             }
             if !model.notices.isEmpty {
                 Section { ForEach(model.notices, id: \.self) { ErrorText($0) } }
@@ -204,20 +203,7 @@ struct OverviewView: View {
         if let error = status.errorMessage { ErrorText(error) }
     }
 
-    /// The button that pairs this Mac as a dashboard with a host on another Mac, which the sidebar then lists.
-    private func shownHosts(_ showHost: @escaping @MainActor () -> Void) -> some View {
-        Section {
-            LabeledContent("Show another Mac's host in this window") {
-                Button("Show a Mac…") { showHost() }
-                    .accessibilityIdentifier("show-host")
-            }
-            if let message = model.shownHostsMessage { ErrorText(message) }
-        } header: {
-            Text("Hosts on Other Macs")
-        } footer: {
-            Text("The sidebar lists a host that this Mac paired with, with its settings and runners, as a dashboard does. On that Mac, choose Allow Dashboard… under Dashboards first.")
-        }
-    }
+
 }
 
 @MainActor

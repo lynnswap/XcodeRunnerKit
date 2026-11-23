@@ -9,7 +9,7 @@ import XcodeRunnerKit
 struct HostOptions: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "XcodeHomeRunner",
-        abstract: "Host opted-in GitHub Actions runners in a macOS menu bar app, or show hosts on other Macs."
+        abstract: "Host opted-in GitHub Actions runners in a macOS menu bar app, or connect a dashboard to its host."
     )
 
     @Option(help: .hidden) var homeDirectory: String?
@@ -26,10 +26,8 @@ struct HostOptions: ParsableCommand {
     @Option(help: .hidden) var parentProcessID: Int32?
     @Option(help: .hidden) var ownershipDescriptor: Int32?
 
-    /// The host that runs `operation`. `xcode-runner` starts the app with this for its `--host` option, because macOS
-    /// gives the pairings in the app's Keychain item to the app alone.
-    @Option(help: .hidden) var runOnHost: String?
-    @Flag(help: .hidden) var runOnAvailableHost = false
+    /// Sends the checkout through the dashboard's pairing, which belongs to the signed app.
+    @Flag(help: .hidden) var runOnHost = false
     /// This Mac's folder for the operation's log and result bundle.
     @Option(help: .hidden) var outputDirectory: String?
     /// Reads or changes a host as `operation` says. `xcode-runner host` starts the app with this for the commands that
@@ -67,13 +65,11 @@ struct HostOptions: ParsableCommand {
         if settingsService && !host {
             throw ValidationError("--settings-service requires --host. Run the installer in this app to update the LaunchAgent.")
         }
-        let remote = runOnHost != nil || runOnAvailableHost
-        guard !(runOnAvailableHost && runOnHost != nil) else { throw ValidationError("Choose one remote host selection.") }
         if control {
-            guard !remote, outputDirectory == nil, !operation.isEmpty else {
+            guard !runOnHost, outputDirectory == nil, !operation.isEmpty else {
                 throw ValidationError("--control takes a command after -- and neither --run-on-host nor --output-directory.")
             }
-        } else if remote != !operation.isEmpty || remote != (outputDirectory != nil) {
+        } else if runOnHost != !operation.isEmpty || runOnHost != (outputDirectory != nil) {
             throw ValidationError("--run-on-host requires --output-directory and a command after --.")
         }
     }
@@ -84,7 +80,7 @@ public enum RunnerHostApplication {
     /// Runs the menu bar host when launched with `--host`, a runner service helper when launched with
     /// `--service-directory`, a build or test on another Mac's host when launched with `--run-on-host`, and a command
     /// that reads or changes a host when launched with `--control`. Opened without them, the app starts the host that
-    /// the installer set up on this Mac, or shows a dashboard of hosts on other Macs when this Mac has none.
+    /// the installer set up on this Mac, or opens the dashboard for its paired host when this Mac has none.
     @MainActor public static func main() {
         do {
             let options = try HostOptions.parse(HostOptions.ownArguments(in: Array(CommandLine.arguments.dropFirst())))
@@ -143,7 +139,7 @@ public enum RunnerHostApplication {
             if let outputDirectory = options.outputDirectory {
                 let command = Task {
                     await RemoteOperationClient.run(
-                        options.operation, onHostNamed: options.runOnHost, installation: installation,
+                        options.operation, installation: installation,
                         outputDirectory: URL(filePath: outputDirectory)
                     )
                 }
@@ -161,8 +157,8 @@ public enum RunnerHostApplication {
             if !options.host {
                 guard let label = Bundle.main.bundleIdentifier, hasInstalledHost(label, in: installation) else {
                     // Only the pairings are kept, in the Keychain: a dashboard creates nothing under the host's folders.
-                    let dashboard = Dashboard(hosts: PairedMacs(
-                        store: KeychainSecretStore.dashboardHosts(hostRoot: installation.hostRoot), name: HostPane.macName,
+                    let dashboard = Dashboard(pairing: PairedMacs(
+                        store: KeychainSecretStore.dashboardHost(hostRoot: installation.hostRoot), name: HostPane.macName,
                         role: .dashboard
                     ))
                     application.delegate = dashboard
@@ -292,9 +288,10 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var poolMenuItem: NSMenuItem?
     private var settingsWindow: NSWindowController?
-    /// The hosts on other Macs that this Mac shows, as a Mac without a host shows them in its dashboard. A Mac that
-    /// another Mac manages sees that host and its Macs there.
-    private let dashboardHosts: PairedMacs
+    /// A dashboard Mac can also be a managed runner. Its local runner settings are accessible in their own window.
+    private let dashboardPairing: PairedMacs
+    private var dashboardWindow: NSWindowController?
+    private var dashboardItem: NSMenuItem?
     private var monitoring: Task<Void, Never>?
     private var poolMonitoring: Task<Void, Never>?
     private var resourceMonitoring: Task<Void, Never>?
@@ -313,8 +310,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         self.logs = logs
         self.installation = installation
         self.settings = HostSettingsModel(installation: installation)
-        dashboardHosts = PairedMacs(
-            store: KeychainSecretStore.dashboardHosts(hostRoot: installation.hostRoot), name: HostPane.macName, role: .dashboard
+        dashboardPairing = PairedMacs(
+            store: KeychainSecretStore.dashboardHost(hostRoot: installation.hostRoot), name: HostPane.macName, role: .dashboard
         )
         guard let executable = Bundle.main.executableURL else {
             throw ValidationError("Cannot locate the runner host executable.")
@@ -354,10 +351,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         settingsServer?.start()
         settings.management.start()
         settings.managedMacs.start()
-        dashboardHosts.start()
-        // A command pairs and removes the hosts that this Mac shows in its own process.
         DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(dashboardHostsChanged(_:)), name: HostControl.dashboardHostsChangedNotification,
+            self, selector: #selector(dashboardHostChanged(_:)), name: HostControl.dashboardHostChangedNotification,
             object: nil
         )
         settings.hostState = .preparingStorage
@@ -460,6 +455,11 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
+        let dashboard = NSMenuItem(title: "Open Dashboard…", action: #selector(showDashboard(_:)), keyEquivalent: "")
+        dashboard.target = self
+        dashboard.isHidden = !canOpenDashboard
+        dashboardItem = dashboard
+        menu.addItem(dashboard)
         menu.addItem(.separator())
         let quitItem = NSMenuItem(title: "Quit XcodeHomeRunner", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quitItem.target = NSApplication.shared
@@ -469,7 +469,11 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         poolMenuItem = poolItem
     }
 
+    // A Mac with an existing dashboard pairing can still use or disconnect it after upgrading.
+    private var canOpenDashboard: Bool { settings.management.manager != nil || !dashboardPairing.macs.isEmpty }
+
     private func updatePoolMenuItem() {
+        dashboardItem?.isHidden = !canOpenDashboard
         if let status = settings.poolStatus {
             poolMenuItem?.title = "\(status.activeJobCount) running · Limit \(status.configuration.maximumConcurrentJobs)"
         } else {
@@ -477,15 +481,32 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Shows this Mac's settings and runners, with the hosts on other Macs that it shows as a dashboard.
+    /// Shows settings for this Mac and its runners.
     @objc private func showSettings(_ sender: Any?) {
-        if settingsWindow == nil { settingsWindow = makeHostWindowController(settings: settings, shownHosts: dashboardHosts) }
+        if settingsWindow == nil { settingsWindow = makeHostWindowController(settings: settings) }
         NSApplication.shared.activate()
         settingsWindow?.showWindow(nil)
     }
 
-    @objc private func dashboardHostsChanged(_ notification: Notification) {
-        dashboardHosts.reload()
+    @objc private func showDashboard(_ sender: Any?) {
+        guard canOpenDashboard else { return }
+        if dashboardWindow == nil {
+            dashboardPairing.reload()
+            dashboardPairing.start()
+            dashboardWindow = makePaneWindowController(
+                content: DashboardSplitViewController(model: DashboardWindowModel(pairing: dashboardPairing)) { [settings] in
+                    settings.management.manager != nil
+                },
+                autosaveName: "XcodeHomeRunnerDashboard"
+            )
+        }
+        NSApplication.shared.activate()
+        dashboardWindow?.showWindow(nil)
+    }
+
+    @objc private func dashboardHostChanged(_ notification: Notification) {
+        dashboardPairing.reload()
+        updatePoolMenuItem()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -513,7 +534,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             await settings.management.shutDown()
             await settings.managedMacsRelay.shutDown()
             await stopManagedMacs
-            await dashboardHosts.shutDown()
+            await dashboardPairing.shutDown()
             await storagePreparation?.value
             await monitoring?.value
             await poolMonitoring?.value

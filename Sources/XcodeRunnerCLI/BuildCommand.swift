@@ -48,8 +48,6 @@ struct BuildOptions: ParsableArguments {
     @Option var scheme: String
     @Option(help: "xcodebuild destination specifier (default: platform=macOS). Not used with Simulator options.")
     var destination: String?
-    @Option(help: "Run on a host Mac that XcodeHomeRunner on this Mac shows, with the files of the Git checkout that contains the current directory. The log and result bundle are copied to --output-directory on this Mac. Relative paths in other options are resolved in the host's copy of the current directory, and absolute paths, as for --developer-directory, name the host's files.")
-    var host: String?
     @Flag(help: "Run on this Mac even when using the CLI inside XcodeHomeRunner.app.")
     var local = false
     @Option(help: .hidden) var reservedSlot: Int32?
@@ -82,12 +80,10 @@ struct BuildOptions: ParsableArguments {
     var additionalArguments: [String] = []
 
     func run(_ action: XcodeBuildAction) async throws {
-        guard !(local && host != nil) else { throw ValidationError("Choose either --local or --host.") }
-        if let host { try runRemotely(action, host: host) }
         let host = try HostInstallation.hostedConfiguration()
         if host == nil, !local, action != .testWithoutBuilding, HostApp.executable() != nil,
            ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] != "true" {
-            try runRemotely(action, host: nil)
+            try runRemotely(action)
         }
         let sources: [XcodeBuildSource] = [
             workspace.map { .workspace(Self.url($0)) },
@@ -213,10 +209,7 @@ struct BuildOptions: ParsableArguments {
     /// Replaces this process with the app, which sends the checkout to the host and shows the operation's output.
     ///
     /// The pairings with hosts are in the app's Keychain item, and macOS gives it to the app alone.
-    private func runRemotely(_ action: XcodeBuildAction, host: String?) throws -> Never {
-        guard action != .testWithoutBuilding else {
-            throw ValidationError("A host keeps no build products after an operation. Use test with --host.")
-        }
+    private func runRemotely(_ action: XcodeBuildAction) throws -> Never {
         let localFolders = [
             ("--derived-data", derivedData), ("--compilation-cache", compilationCache), ("--pool-directory", poolDirectory),
             ("--build-service-path", buildServicePath),
@@ -234,17 +227,16 @@ struct BuildOptions: ParsableArguments {
         }
         _ = try requestedDestination()
         guard let app = HostApp.executable() else {
-            throw ValidationError("--host needs the xcode-runner inside XcodeHomeRunner.app, at Contents/Helpers/xcode-runner.")
+            throw ValidationError("Remote builds need the xcode-runner inside XcodeHomeRunner.app, at Contents/Helpers/xcode-runner.")
         }
         try HostApp.replaceProcess(with: [
-            app.path(percentEncoded: false),
-        ] + (host.map { ["--run-on-host", $0] } ?? ["--run-on-available-host"]) + [
+            app.path(percentEncoded: false), "--run-on-host",
             "--output-directory", Self.url(outputDirectory ?? "XcodeRunnerOutput").path(percentEncoded: false),
             "--", action.rawValue,
         ] + hostArguments)
     }
 
-    /// The options that a host takes: every option except `--host` and those that name this Mac's folders.
+    /// The options that a host takes: the options excluding those that name this Mac's folders.
     private var hostArguments: [String] {
         var arguments: [String] = []
         func add(_ name: String, _ value: String?) {

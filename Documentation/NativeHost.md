@@ -50,16 +50,19 @@ on the local network and allow XcodeHomeRunner to use Bonjour.
 1. On the host, open **Settings…** and choose **Allow Dashboard…** under
    **Dashboards**. The host waits five minutes for a dashboard.
 2. On the dashboard Mac, open XcodeHomeRunner and choose **File > Add Mac >
-   Show a Mac on This Dashboard…**. An empty dashboard also has an **Add Mac…**
+   Pair Host…**. An empty dashboard also has a **Pair Host…**
    button. Select the host and choose **Continue**. Both Macs show a six-digit code.
 3. If the codes match, choose **Pair** on the dashboard and **Allow** on the
    host. A different code means that another device answered, so choose
    **Don't Allow**.
 
-The menu bar lists paired hosts. Open **Settings…** to manage GitHub and
+The dashboard connects to one host. Its menu bar shows that host’s status. Open **Settings…** to manage GitHub and
 repositories, or select a runner in the sidebar for its jobs, CPU load, memory
 pressure, storage and Xcode settings. **Open dashboard at login** controls
-automatic launch on this Mac. Removing a dashboard pairing ends its access.
+automatic launch on this Mac. To change hosts, remove the current pairing before pairing again.
+If an older dashboard has several pairings, use **Disconnect Host…** to remove the extra
+pairings. The remaining host becomes the dashboard’s destination. A Mac that is also a managed
+runner opens its dashboard from **Open Dashboard…** in the menu bar.
 
 ## Set build defaults for a host
 
@@ -92,7 +95,8 @@ runner=/Applications/XcodeHomeRunner.app/Contents/Helpers/xcode-runner
 
 The host dispatches `build`, `build-for-testing` and `test` to a Mac with a
 matching Xcode and destination. If all eligible slots are busy, the command
-waits. To inspect the available Macs, run `"$runner" host runners`.
+waits. Run `"$runner" host runners` to see that host’s runner Macs and free slots,
+including when the dashboard Mac is itself a managed runner.
 
 The transfer includes tracked edits and unignored new files present when the
 job is accepted, including those in submodules. Name the project, workspace or
@@ -240,15 +244,16 @@ Xcode. **System selection** uses `xcode-select`.
 Install the XcodeHomeRunner GitHub App on the dependency repositories and grant
 **Contents: read**. Sign in to GitHub on the managing host, then allow
 each dependency that jobs on this host and its runners may read. From a
-paired dashboard, run the embedded CLI with the name of that host.
+paired dashboard, run the embedded CLI. It addresses the paired host.
 
 ```sh
-xcode-runner host settings package-access add my-org/DesignKit --host "$host"
-xcode-runner host settings package-access list --host "$host"
-xcode-runner host settings package-access remove my-org/DesignKit --host "$host"
+xcode-runner host settings package-access add my-org/DesignKit
+xcode-runner host settings package-access list
+xcode-runner host settings package-access remove my-org/DesignKit
 ```
 
-On the host itself, omit `--host`. Keep the normal GitHub HTTPS package URLs
+On a Mac with both a local host and a dashboard pairing, add `--local` to edit
+the local host’s grants. Keep the normal GitHub HTTPS package URLs
 in the project. Both dashboard builds and GitHub Actions jobs receive the Git
 configuration on the executing Mac. For a managed runner, the signed app asks
 its managing host to fetch the package over their pairing. The host checks the
@@ -264,9 +269,11 @@ registration separately under **Repositories**.
 
 ## Commands for the host
 
-Use the CLI embedded in the installed app. For host administration,
-`--host` addresses a paired host and `--mac` addresses one of its runners.
-Use the identifiers returned by `host runners`.
+The following commands in the bundled CLI address the dashboard’s paired host, including on a Mac that also runs jobs.
+On an installed Mac without a dashboard pairing they address the local host. Use `--mac` with a managed runner’s
+ID from `host runners` to address that runner. For maintenance on this Mac’s own runner service,
+use `--local`, for example `xcode-runner host restart --local`. The pairing commands and the local settings commands below
+operate on the Mac where you run them.
 
 ```sh
 xcode-runner host runners         # runner Macs and free Xcode slots, including the host itself
@@ -286,6 +293,9 @@ xcode-runner host configure --build-service /path/to/SWBBuildServiceBundle   # o
 xcode-runner host configure --storage /path/to/JobData
 xcode-runner host configure --repositories 101 102   # IDs from github status; --no-repositories selects none
 ```
+
+When using `host configure --local --repositories`, get the local repository IDs from
+`xcode-runner host settings get --scope githubRepositories`.
 
 `host restart` normally requires an idle Mac. Use `host github --help` for
 sign-in and repository commands, `host pairing --help` for dashboard pairing,
