@@ -63,15 +63,16 @@ package struct HostJobOptions: Codable, Equatable, Sendable {
     package func values(for kind: Kind) throws -> [String: String] {
         var result: [String: String] = [:]
         for entry in self[kind] where entry.isEnabled {
-            guard !entry.name.isEmpty, !entry.name.contains("="), !entry.name.utf8.contains(0),
+            let name = kind == .buildSettings ? entry.name.trimmingCharacters(in: .whitespacesAndNewlines) : entry.name
+            guard !name.isEmpty, !name.contains("="), !name.utf8.contains(0),
                   !entry.value.utf8.contains(0) else {
                 throw HostSettingsError("Enter a name for each enabled row. Names cannot contain =, and names and values cannot contain a null character.")
             }
-            if kind == .buildSettings, entry.name.hasPrefix("-") {
+            if kind == .buildSettings, name.hasPrefix("-") {
                 throw HostSettingsError("A build setting name cannot begin with a dash.")
             }
-            guard result.updateValue(entry.value, forKey: entry.name) == nil else {
-                throw HostSettingsError("Enable only one row named \(entry.name) in the same table.")
+            guard result.updateValue(entry.value, forKey: name) == nil else {
+                throw HostSettingsError("Enable only one row named \(name) in the same table.")
             }
         }
         return result
@@ -117,7 +118,14 @@ package struct HostInstallation: Sendable {
         package var local = HostJobOptions()
         package var manager: UUID?
         package var inherited = HostJobOptions()
-        package var effective: HostJobOptions { manager == nil ? local : inherited }
+        package func options(managedBy owner: UUID?) -> HostJobOptions {
+            guard let owner else { return local }
+            return owner == manager ? inherited : HostJobOptions()
+        }
+
+        package var hasEnabledEntries: Bool {
+            [local, inherited].contains { $0.buildSettings.contains(where: \.isEnabled) || $0.environment.contains(where: \.isEnabled) }
+        }
     }
 
     package func jobOptionsRecord() throws -> JobOptionsRecord { try Self.jobOptionsRecord(hostRoot: hostRoot) }
@@ -382,11 +390,12 @@ package struct HostInstallation: Sendable {
     package var packageRepositories: URL { hostRoot.appending(path: "github-package-repositories.json") }
     package var packageGitConfiguration: URL { hostRoot.appending(path: "github-packages.gitconfig") }
 
-    package func environment(for storage: Storage) -> [String: String] {
+    package func environment(for storage: Storage, hostExecutable: URL? = nil) -> [String: String] {
         var values = [
             "XCODE_RUNNER_HOST_STORAGE_DIRECTORY": storage.directory.path(percentEncoded: false),
             "XCODE_RUNNER_HOST_ROOT": hostRoot.path(percentEncoded: false),
         ]
+        values["XCODE_RUNNER_HOST_EXECUTABLE"] = hostExecutable?.path(percentEncoded: false)
         for prefix in ["", "TEST_RUNNER_"] {
             let countKey = prefix + "GIT_CONFIG_COUNT"
             let count = Int(ProcessInfo.processInfo.environment[countKey] ?? "0") ?? 0
@@ -399,14 +408,14 @@ package struct HostInstallation: Sendable {
 
     package static func hostedConfiguration(
         environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> (storage: Storage, poolDirectory: URL, buildServiceExecutableURL: URL?, developerDirectory: URL?, jobOptions: HostJobOptions, isWorkflow: Bool, usesPackageAccess: Bool)? {
+    ) throws -> (storage: Storage, poolDirectory: URL, buildServiceExecutableURL: URL?, developerDirectory: URL?, hostRoot: URL, jobOptions: JobOptionsRecord, isWorkflow: Bool, usesPackageAccess: Bool)? {
         guard let hosted = try hostedLocations(environment) else { return nil }
         return (
             Storage(directory: hosted.storageDirectory),
             hosted.poolDirectory,
             try buildServiceExecutableURL(hostRoot: hosted.hostRoot),
             try developerDirectory(hostRoot: hosted.hostRoot),
-            try jobOptionsRecord(hostRoot: hosted.hostRoot).effective,
+            hosted.hostRoot, try jobOptionsRecord(hostRoot: hosted.hostRoot),
             hosted.isWorkflow,
             FileManager.default.fileExists(atPath: hosted.hostRoot.appending(path: "github-packages.gitconfig").path)
         )

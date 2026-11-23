@@ -264,6 +264,9 @@ struct HostPairingTests {
         let host = managedMac(named: "Host", at: root.appending(path: "Host"))
         let runner = managedMac(named: "Runner", at: root.appending(path: "Runner"))
         _ = try await pair(host.managedMacs, with: runner.management)
+        var options = HostJobOptions()
+        options.environment = [.init(name: "GROUP", value: "managed")]
+        try runner.applyJobOptions(options, from: #require(runner.management.manager?.id))
         let file = runner.installation.hostRoot.appending(path: "JobDefaults/options.json")
         try Data("damaged".utf8).write(to: file)
         runner.management.stopManagement()
@@ -791,7 +794,7 @@ struct HostPairingTests {
         #expect(overview.jobOptionsError == nil)
         #expect(host.jobOptions?.environment == [enabled, disabled])
         #expect(runner.jobOptions?.environment == [enabled])
-        #expect(try runner.installation.jobOptionsRecord().effective.buildSettings == [batchMode])
+        #expect(try runner.installation.jobOptionsRecord().options(managedBy: runner.management.manager?.id).buildSettings == [batchMode])
         overview[jobOptions: .environment] = []
         overview.revert()
         #expect(overview[jobOptions: .environment] == [enabled, disabled])
@@ -886,14 +889,18 @@ struct HostPairingTests {
         // The runner keeps the last defaults offline and receives edits before taking another forwarded build.
         var changed = try #require(host.jobOptions)
         changed.environment = []
-        try host.saveJobOptions([.environment: []])
-        #expect(try runner.installation.jobOptionsRecord().effective.environment == [enabled])
+        overview[jobOptions: .environment] = []
+        overview.save()
+        try await waitUntil { !overview.isSaving }
+        #expect(!overview.hasEdits)
+        #expect(host.jobOptions == changed)
+        #expect(try runner.installation.jobOptionsRecord().options(managedBy: runner.management.manager?.id).environment == [enabled])
         runner.management.start()
         try await waitUntil { runner.management.managementPort != nil }
         await host.managedMacs.checkStatus(of: managed.id, at: try local(runner.management.managementPort))
-        #expect(try runner.installation.jobOptionsRecord().effective == changed.enabledEntries)
+        #expect(try runner.installation.jobOptionsRecord().options(managedBy: runner.management.manager?.id) == changed.enabledEntries)
         runner.management.stopManagement()
-        #expect(try runner.installation.jobOptionsRecord().effective == ownDefaults)
+        #expect(try runner.installation.jobOptionsRecord().options(managedBy: runner.management.manager?.id) == ownDefaults)
         await runner.management.shutDown()
 
         await host.management.shutDown()

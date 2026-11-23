@@ -378,7 +378,7 @@ final class HostSettingsModel: HostSettingsDisplay {
     private(set) var jobOptions: HostJobOptions?
     private(set) var jobOptionsReadError: String?
 
-    /// Reconcile the CLI's on-disk options with the pairing kept in the Keychain.
+    /// A pairing change immediately selects the new owner's defaults, even on read-only storage.
     func refreshJobOptions() {
         do { _ = try optionsForJobs() }
         catch {
@@ -388,21 +388,17 @@ final class HostSettingsModel: HostSettingsDisplay {
     }
 
     func optionsForJobs() throws -> HostJobOptions {
-        let manager = management.manager?.id
-        var record = try installation.jobOptionsRecord()
-        if record.manager != manager {
-            record.manager = manager
-            record.inherited = HostJobOptions()
-            try installation.saveJobOptionsRecord(record)
-        }
-        jobOptions = record.effective
+        let options = try installation.jobOptionsRecord().options(managedBy: management.manager?.id)
+        jobOptions = options
         jobOptionsReadError = nil
-        return record.effective
+        return options
     }
 
     func saveJobOptions(_ edits: HostJobOptions.Edits) throws {
         guard management.manager == nil else { throw HostSettingsError("Edit job defaults on the managing host.") }
         var record = try installation.jobOptionsRecord()
+        record.manager = nil
+        record.inherited = HostJobOptions()
         for (kind, entries) in edits {
             record.local[kind] = entries
             _ = try record.local.values(for: kind)
@@ -906,7 +902,7 @@ final class HostSettingsModel: HostSettingsDisplay {
             case .saveBuildService(let path): try saveBuildService(path)
             case .saveJobOptions(let options):
                 try saveJobOptions(options)
-                try await managedMacs.distributeJobOptions()
+                await managedMacs.distributeJobOptions()
             case .setPaused(let isPaused): try savePaused(isPaused)
             case .saveRunnerLabels(let labels): try saveRunnerLabels(labels)
             case .restart: try acceptRestart()

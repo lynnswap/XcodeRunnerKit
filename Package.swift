@@ -38,6 +38,7 @@ let package = Package(
         .target(
             name: "XcodeRunnerCLI",
             dependencies: [
+                .product(name: "Subprocess", package: "swift-subprocess"),
                 "XcodeRunnerSkill",
                 "XcodeRunnerKit", "XcodeRunnerHostSupport",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),

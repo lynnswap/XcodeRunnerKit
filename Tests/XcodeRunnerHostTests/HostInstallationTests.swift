@@ -9,7 +9,7 @@ struct HostInstallationTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let installation = HostInstallation(homeDirectory: root)
         let environment = installation.environment(for: .init(directory: root))
-        #expect(try HostInstallation.hostedConfiguration(environment: environment)?.jobOptions == HostJobOptions())
+        #expect(try HostInstallation.hostedConfiguration(environment: environment)?.jobOptions.options(managedBy: nil) == HostJobOptions())
         let entries: [HostJobOptions.Entry] = [
             .init(name: "FIRST", value: "one = two"),
             .init(name: "SECOND", value: "host"),
@@ -24,7 +24,7 @@ struct HostInstallationTests {
         request.buildSettings["FIRST"] = "job"
         request.environment["SECOND"] = ""
         let hosted = try #require(try HostInstallation.hostedConfiguration(environment: environment))
-        try hosted.jobOptions.apply(to: &request)
+        try hosted.jobOptions.options(managedBy: nil).apply(to: &request)
         #expect(request.arguments == ["FIRST=one = two", "SECOND=host", "THIRD=host", "THIRD=from command line"])
         #expect(request.buildSettings == ["FIRST": "job"])
         #expect(request.environment == ["FIRST": "one = two", "SECOND": ""])

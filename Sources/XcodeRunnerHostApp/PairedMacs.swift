@@ -773,14 +773,14 @@ final class PairedMacs: MacList {
     }
 
     /// Disconnected runners receive the current settings when their regular status checks resume.
-    func distributeJobOptions() async throws {
-        var failures: [String] = []
+    func distributeJobOptions() async {
         for mac in macs {
             guard let endpoint = endpoints[mac.id] else { continue }
-            do { _ = try await synchronizedSettings(of: mac, at: endpoint) }
-            catch { failures.append("\(mac.name): \(error.localizedDescription)") }
+            do {
+                _ = try await synchronizedSettings(of: mac, at: endpoint)
+                settings[mac.id]?.jobOptionsSyncError = nil
+            } catch { settings[mac.id]?.jobOptionsSyncError = error.localizedDescription }
         }
-        if !failures.isEmpty { throw HostSettingsError("Saved on the host. " + failures.joined(separator: "\n")) }
     }
 
     /// Reads the settings of the Mac at `endpoint`, which also shows whether it accepts this Mac. Browsing calls this

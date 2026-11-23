@@ -73,9 +73,12 @@ go into the `xcodebuild` process. A job can override either value with
 `--setting NAME=VALUE` or `--environment NAME=VALUE` on its
 `xcode-runner` build or test command.
 
-These defaults apply to jobs using `xcode-runner` on the host and the Macs
-it manages, including GitHub Actions jobs. An offline runner keeps its last
-settings until it reconnects.
+Dashboard submissions and GitHub Actions steps that invoke `xcode-runner`
+in the host environment use these defaults. A standalone terminal command
+with `--local` uses its own settings. An existing GitHub runner uses its last
+synchronized values until the next successful host check, including after
+reconnecting. The host also synchronizes before it forwards a dashboard job
+or registers a new GitHub runner.
 
 ## Build or test on a host from another Mac
 

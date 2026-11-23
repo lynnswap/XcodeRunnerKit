@@ -2,6 +2,7 @@ import ArgumentParser
 import Darwin
 import Dispatch
 import Foundation
+import Subprocess
 import XcodeRunnerHostSupport
 import XcodeRunnerKit
 
@@ -131,7 +132,20 @@ struct BuildOptions: ParsableArguments {
         request.environment = try Self.assignments(environment)
         request.buildSettings = try Self.assignments(settings)
         request.arguments = additionalArguments
-        try host?.jobOptions.apply(to: &request)
+        if let host, host.jobOptions.hasEnabledEntries {
+            // The live pairing owns these defaults. Disk state alone cannot establish who manages a runner.
+            let app = ProcessInfo.processInfo.environment["XCODE_RUNNER_HOST_EXECUTABLE"].map { URL(filePath: $0) }
+                ?? HostApp.executable()
+            guard let app else { throw ValidationError("The hosting app must identify the owner of its build settings.") }
+            let owner = try await Subprocess.run(
+                .path(.init(app.path(percentEncoded: false))),
+                arguments: ["--job-options-owner", host.hostRoot.path(percentEncoded: false)],
+                output: .bytes(limit: 1024), error: .string(limit: 4096)
+            )
+            guard owner.terminationStatus.isSuccess else { throw ValidationError(owner.standardError) }
+            let manager = try JSONDecoder().decode(UUID?.self, from: Data(owner.standardOutput))
+            try host.jobOptions.options(managedBy: manager).apply(to: &request)
+        }
         if host?.usesPackageAccess == true, !additionalArguments.contains("-scmProvider") {
             request.arguments += ["-scmProvider", "system"]
         }

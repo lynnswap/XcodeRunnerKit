@@ -82,7 +82,7 @@ final class RemoteOperations {
         let output = storage.buildDirectory.appending(path: "Remote/\(UUID().uuidString)")
         let executable: URL
         let arguments: [String]
-        var hostEnvironment = installation.environment(for: storage)
+        var hostEnvironment = installation.environment(for: storage, hostExecutable: Bundle.main.executableURL)
         if let workflow = operation.workflow {
             guard slot != nil, let script = Bundle.module.url(forResource: "run-workflow", withExtension: "py") else {
                 throw HostAvailability.unavailable("This host could not start the workflow.")
