@@ -60,9 +60,6 @@ later and macOS 26 or later. Keep the workspace and package copies of
 `Package.resolved` in sync. To override the signing team, set `DEVELOPMENT_TEAM`
 in the ignored `App/Configurations/Signing.local.xcconfig`.
 
-Run this repository’s tests directly on the development Mac so they can run
-while you are changing the runner service itself.
-
 ```sh
 xcodebuild test -scheme XcodeRunnerKit-Package -destination 'platform=macOS,arch=arm64'
 ```
