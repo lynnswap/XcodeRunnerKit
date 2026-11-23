@@ -110,6 +110,7 @@ final class GitHubHostSettings {
         do {
             if try await authentication.account() != nil {
                 try await packageAccess.update()
+                packageAccessError = nil
             } else {
                 await packageAccess.stop()
             }
@@ -216,26 +217,20 @@ final class GitHubHostSettings {
         guard !isLoadingRepositories else { return }
         isLoadingRepositories = true
         defer { isLoadingRepositories = false }
+        await preparePackageAccess()
         do {
-            try await authenticated { token in
-                let access = try await client.listInstallations(accessToken: token)
-                await show(access)
-            }
+            show(try await authenticated { token in
+                try await client.listInstallations(accessToken: token)
+            })
             errorMessage = packageAccessError
         } catch is CancellationError {
         } catch { await handleGitHubFailure(error, operation: "load repositories") }
     }
 
     /// Shows what GitHub listed for the app's installations.
-    private func show(_ access: GitHubAppAccess) async {
+    private func show(_ access: GitHubAppAccess) {
         installations = access.installations
         repositories = access.repositories
-        do {
-            try await packageAccess?.update(repositories: access.repositories)
-            packageAccessError = nil
-        } catch {
-            packageAccessError = "Could not configure private packages: \(error.localizedDescription)"
-        }
     }
 
     var savedRepositoryIDs: Set<Int> { Set(configuration.repositories.map(\.id)) }
@@ -390,7 +385,7 @@ final class GitHubHostSettings {
             pairedProvisioners = pairedProvisioners.filter { id, _ in paired.contains { $0.id == id } }
             let statuses = try await authenticated { token in
                 let access = try await client.listInstallations(accessToken: token)
-                await show(access)
+                show(access)
                 let available = access.repositories
                 let current = Dictionary(uniqueKeysWithValues: available.map { ($0.id, $0) })
                 let inaccessible = selected.filter { current[$0.id] == nil }.map { repository in

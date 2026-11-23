@@ -17,7 +17,7 @@ actor GitHubPackageAccess {
         self.installation = installation
     }
 
-    func update(repositories: [GitHubRepository]? = nil) throws {
+    func update() throws {
         // Installation access may include repositories that the owner never intended CI jobs to read.
         let allowed: [String]
         do {
@@ -30,17 +30,8 @@ actor GitHubPackageAccess {
             stop()
             throw error
         }
-        // Before the first API listing, GitHub enforces the signed-in user's access on each fetch.
-        // Once listed, also recognize the installation's canonical spelling and omit public packages.
-        let names: Set<String>
-        if let repositories {
-            let approved = Set(allowed.map { $0.lowercased() })
-            let accessible = repositories.filter { $0.isPrivate == true && approved.contains($0.fullName.lowercased()) }
-            let canonical = Set(accessible.map { $0.fullName.lowercased() })
-            names = Set(accessible.map(\.fullName) + allowed.filter { canonical.contains($0.lowercased()) })
-        } else {
-            names = Set(allowed)
-        }
+        // GitHub evaluates repository access on every fetch, independently of listing installations.
+        let names = Set(allowed)
         guard !names.isEmpty else { stop(); return }
         if process?.isRunning != true {
             stop()

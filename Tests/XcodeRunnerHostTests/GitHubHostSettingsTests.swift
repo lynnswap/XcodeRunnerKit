@@ -24,12 +24,8 @@ struct GitHubHostSettingsTests {
         let relay = GitHubPackageAccess(installation: installation, authentication: auth)
         let storage = HostInstallation.Storage(directory: root.appending(path: "Storage"))
         #expect(installation.environment(for: storage)["SWIFTPM_MIRROR_CONFIG"] == nil)
-        try JSONEncoder().encode(["owner/library", "owner/Public"]).write(to: installation.packageRepositories)
-        try await relay.update(repositories: [
-            .init(id: 1, fullName: "owner/Library", isPrivate: true),
-            .init(id: 2, fullName: "owner/Public", isPrivate: false),
-            .init(id: 3, fullName: "owner/LibraryTools", isPrivate: true),
-        ])
+        try JSONEncoder().encode(["owner/Library"]).write(to: installation.packageRepositories)
+        try await relay.update()
         do {
             let config = installation.packageGitConfiguration.deletingPathExtension().appendingPathExtension("json")
             let settings = try JSONDecoder().decode(RelaySettings.self, from: Data(contentsOf: config))
@@ -38,7 +34,8 @@ struct GitHubHostSettingsTests {
                 .appending(queryItems: [URLQueryItem(name: "service", value: "git-upload-pack")])
             let (_, response) = try await URLSession.shared.data(from: url)
             #expect((response as? HTTPURLResponse)?.statusCode == 401)
-            try await relay.update(repositories: [])
+            try JSONEncoder().encode([String]()).write(to: installation.packageRepositories)
+            try await relay.update()
             #expect(!FileManager.default.fileExists(atPath: config.path))
             #expect(!FileManager.default.fileExists(atPath: installation.packageGitConfiguration.path))
         } catch {
