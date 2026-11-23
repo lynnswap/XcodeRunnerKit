@@ -61,6 +61,22 @@ repositories, or select a runner in the sidebar for its jobs, CPU load, memory
 pressure, storage and Xcode settings. **Open dashboard at login** controls
 automatic launch on this Mac. Removing a dashboard pairing ends its access.
 
+## Set build defaults for a host
+
+Select the host’s **Settings** in the sidebar. Under **Build Settings** or
+**Environment Variables**, use **+** to add a name and value, then choose
+**Save**. Uncheck a row to stop using it and keep it for later.
+
+For example, add `SWIFT_ENABLE_BATCH_MODE` with the value `NO` under
+**Build Settings** to disable Swift batch compilation. Environment variables
+go into the `xcodebuild` process. A job can override either value with
+`--setting NAME=VALUE` or `--environment NAME=VALUE` on its
+`xcode-runner` build or test command.
+
+These defaults apply to jobs using `xcode-runner` on the host and the Macs
+it manages, including GitHub Actions jobs. An offline runner keeps its last
+settings until it reconnects.
+
 ## Build or test on a host from another Mac
 
 Run the embedded CLI from the Git checkout on the dashboard.

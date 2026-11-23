@@ -393,11 +393,13 @@ extension HostSettingsModel {
             guard !isPaused else { throw RemoteOperationFailure("Paused.") }
             guard let storage = operations.storage else { throw RemoteOperationFailure("Storage unavailable.") }
             try await RemoteOperations.requireStorage(storage)
+            let defaults = try optionsForJobs()
             if let workflow = operation.workflow {
                 labels = try await operations.labels(for: workflow)
             } else {
                 labels = []
-                try await operation.checkDestination(savedXcode: installation.developerDirectory(), allowRuntimeDownload: allowRuntimeDownload)
+                let jobXcode = try defaults.values(for: .environment)["DEVELOPER_DIR"]
+                try await operation.checkDestination(savedXcode: installation.developerDirectory(), jobXcode: jobXcode, allowRuntimeDownload: allowRuntimeDownload)
             }
             reservation = try await pool.reserveAvailableSlot()
             busy = reservation == nil
@@ -436,6 +438,8 @@ extension HostSettingsModel {
                     continue
                 }
                 do {
+                    do { _ = try await managedMacs.synchronizedSettings(of: mac, at: endpoint) }
+                    catch { throw HostAvailability.unavailable(error.localizedDescription) }
                     try await RemoteOperations.forward(
                         forwarded, to: mac, at: endpoint, allowRuntimeDownload: allowRuntimeDownload, next: next, reply: reply
                     )
@@ -506,7 +510,7 @@ extension RemoteOperations {
 
 extension RemoteOperation {
     /// The dashboard joins each option to its value, except for empty values, which ArgumentParser reads separately.
-    func checkDestination(savedXcode: URL?, allowRuntimeDownload: Bool) async throws {
+    func checkDestination(savedXcode: URL?, jobXcode: String? = nil, allowRuntimeDownload: Bool) async throws {
         let options = arguments.prefix { $0 != "--" }
         func value(_ key: String) -> String? {
             for index in options.indices.reversed() {
@@ -519,7 +523,7 @@ extension RemoteOperation {
         let explicitDirectory = value("--developer-directory=")
         let runtime = value("--simulator-runtime=")
         let developer = explicitDirectory ?? value("--environment=DEVELOPER_DIR=")
-            ?? ProcessInfo.processInfo.environment["DEVELOPER_DIR"] ?? savedXcode?.path(percentEncoded: false)
+            ?? jobXcode ?? ProcessInfo.processInfo.environment["DEVELOPER_DIR"] ?? savedXcode?.path(percentEncoded: false)
         let environment: Subprocess.Environment = developer.map { .inherit.updating(["DEVELOPER_DIR": $0]) } ?? .inherit
         func xcrun(_ arguments: [String]) async throws -> Data {
             let result = try await Subprocess.run(

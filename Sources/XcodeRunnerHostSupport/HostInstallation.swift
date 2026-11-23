@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import XcodeRunnerKit
 
 extension URL {
     /// The physical path the compiler sees. Storage records keep this form so that
@@ -10,6 +11,76 @@ extension URL {
             throw CocoaError(.fileReadUnknown, userInfo: [NSURLErrorKey: self])
         }
         return URL(filePath: path)
+    }
+}
+
+/// Defaults for xcodebuild jobs on a host and its managed runners.
+package struct HostJobOptions: Codable, Equatable, Sendable {
+    package struct Entry: Codable, Equatable, Identifiable, Sendable {
+        package let id: UUID
+        package var isEnabled: Bool
+        package var name: String
+        package var value: String
+
+        package init(name: String = "", value: String = "", isEnabled: Bool = true) {
+            self.id = UUID()
+            self.name = name
+            self.value = value
+            self.isEnabled = isEnabled
+        }
+    }
+
+    package enum Kind: String, Codable, Sendable { case buildSettings, environment }
+
+    package typealias Edits = [Kind: [Entry]]
+
+    package var buildSettings: [Entry] = []
+    package var environment: [Entry] = []
+    package init() {}
+
+    package subscript(kind: Kind) -> [Entry] {
+        get {
+            switch kind {
+            case .buildSettings: buildSettings
+            case .environment: environment
+            }
+        }
+        set {
+            switch kind {
+            case .buildSettings: buildSettings = newValue
+            case .environment: environment = newValue
+            }
+        }
+    }
+
+    package var enabledEntries: Self {
+        var result = Self()
+        result.buildSettings = buildSettings.filter(\.isEnabled)
+        result.environment = environment.filter(\.isEnabled)
+        return result
+    }
+
+    package func values(for kind: Kind) throws -> [String: String] {
+        var result: [String: String] = [:]
+        for entry in self[kind] where entry.isEnabled {
+            guard !entry.name.isEmpty, !entry.name.contains("="), !entry.name.utf8.contains(0),
+                  !entry.value.utf8.contains(0) else {
+                throw HostSettingsError("Enter a name for each enabled row. Names cannot contain =, and names and values cannot contain a null character.")
+            }
+            if kind == .buildSettings, entry.name.hasPrefix("-") {
+                throw HostSettingsError("A build setting name cannot begin with a dash.")
+            }
+            guard result.updateValue(entry.value, forKey: entry.name) == nil else {
+                throw HostSettingsError("Enable only one row named \(entry.name) in the same table.")
+            }
+        }
+        return result
+    }
+
+    package func apply(to request: inout XcodeBuildRequest) throws {
+        let defaults = try values(for: .buildSettings).sorted { $0.key < $1.key }
+        request.arguments.insert(contentsOf: defaults.map { "\($0.key)=\($0.value)" }, at: 0)
+        request.environment = try values(for: .environment).merging(request.environment) { _, job in job }
     }
 }
 
@@ -40,6 +111,31 @@ package struct HostInstallation: Sendable {
     private var storageRecord: URL { hostRoot.appending(path: "storage-directory") }
     private var buildServiceRecord: URL { hostRoot.appending(path: "build-service-path") }
     private var developerDirectoryRecord: URL { Self.developerDirectoryRecord(hostRoot: hostRoot) }
+
+    /// The CLI reads the effective values for each job, including jobs taken directly from GitHub.
+    package struct JobOptionsRecord: Codable, Sendable {
+        package var local = HostJobOptions()
+        package var manager: UUID?
+        package var inherited = HostJobOptions()
+        package var effective: HostJobOptions { manager == nil ? local : inherited }
+    }
+
+    package func jobOptionsRecord() throws -> JobOptionsRecord { try Self.jobOptionsRecord(hostRoot: hostRoot) }
+
+    private static func jobOptionsRecord(hostRoot: URL) throws -> JobOptionsRecord {
+        do {
+            let data = try Data(contentsOf: hostRoot.appending(path: "JobDefaults/options.json"))
+            return try JSONDecoder().decode(JobOptionsRecord.self, from: data)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            return JobOptionsRecord()
+        }
+    }
+
+    package func saveJobOptionsRecord(_ record: JobOptionsRecord) throws {
+        let directory = hostRoot.appending(path: "JobDefaults", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try JSONEncoder().encode(record).write(to: directory.appending(path: "options.json"), options: .atomic)
+    }
 
     /// The Xcode that hosted operations use when they name none, as its `Contents/Developer` directory.
     package func developerDirectory() throws -> URL? {
@@ -303,13 +399,14 @@ package struct HostInstallation: Sendable {
 
     package static func hostedConfiguration(
         environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> (storage: Storage, poolDirectory: URL, buildServiceExecutableURL: URL?, developerDirectory: URL?, isWorkflow: Bool, usesPackageAccess: Bool)? {
+    ) throws -> (storage: Storage, poolDirectory: URL, buildServiceExecutableURL: URL?, developerDirectory: URL?, jobOptions: HostJobOptions, isWorkflow: Bool, usesPackageAccess: Bool)? {
         guard let hosted = try hostedLocations(environment) else { return nil }
         return (
             Storage(directory: hosted.storageDirectory),
             hosted.poolDirectory,
             try buildServiceExecutableURL(hostRoot: hosted.hostRoot),
             try developerDirectory(hostRoot: hosted.hostRoot),
+            try jobOptionsRecord(hostRoot: hosted.hostRoot).effective,
             hosted.isWorkflow,
             FileManager.default.fileExists(atPath: hosted.hostRoot.appending(path: "github-packages.gitconfig").path)
         )

@@ -131,6 +131,7 @@ struct BuildOptions: ParsableArguments {
         request.environment = try Self.assignments(environment)
         request.buildSettings = try Self.assignments(settings)
         request.arguments = additionalArguments
+        try host?.jobOptions.apply(to: &request)
         if host?.usesPackageAccess == true, !additionalArguments.contains("-scmProvider") {
             request.arguments += ["-scmProvider", "system"]
         }
