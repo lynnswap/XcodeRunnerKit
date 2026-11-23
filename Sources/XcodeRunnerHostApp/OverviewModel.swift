@@ -211,7 +211,7 @@ final class OverviewModel: PaneSaving {
             case (.thisMac(let settings), .jobOptions):
                 await draft.saveJobOptions { edits in
                     try settings.saveJobOptions(edits)
-                    await settings.managedMacs.distributeSettings()
+                    await settings.managedMacs.distributeJobOptions()
                 }
             case (.host(let hosts, let host), .jobOptions):
                 await draft.saveJobOptions { try await hosts.saveJobOptions($0, of: host.id) }

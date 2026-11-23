@@ -515,7 +515,7 @@ final class HostSettingsModel: HostSettingsDisplay {
         }
         // The Macs paired with this Mac read and change its settings through the owner of this Mac's window.
         self.management.settings = self
-        self.managedMacs.jobOptionsOwner = self
+        self.managedMacs.managingHost = self
         self.github.pairedMacs = self.managedMacs
         self.github.management = self.management
     }
@@ -950,7 +950,7 @@ final class HostSettingsModel: HostSettingsDisplay {
             case .saveBuildService(let path): try saveBuildService(path)
             case .saveJobOptions(let options):
                 try saveJobOptions(options)
-                await managedMacs.distributeSettings()
+                await managedMacs.distributeJobOptions()
             case .setPaused(let isPaused): try savePaused(isPaused)
             case .saveRunnerLabels(let labels): try saveRunnerLabels(labels)
             case .restart: try acceptRestart()

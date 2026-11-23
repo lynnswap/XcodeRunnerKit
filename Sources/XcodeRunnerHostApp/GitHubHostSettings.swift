@@ -135,8 +135,8 @@ final class GitHubHostSettings {
             try FileManager.default.createDirectory(at: installation.hostRoot, withIntermediateDirectories: true)
             try JSONEncoder().encode(names).write(to: installation.packageRepositories, options: .atomic)
             await preparePackageAccess()
-            await pairedMacs?.distributeSettings()
-            let errors = [packageAccessError].compactMap { $0 } + (pairedMacs?.packageSyncErrors ?? [])
+            let deliveryErrors = await pairedMacs?.distributePackages() ?? []
+            let errors = [packageAccessError].compactMap { $0 } + deliveryErrors
             if !errors.isEmpty { throw HostSettingsError("Package access was saved. " + errors.joined(separator: " ")) }
             return .packageRepositories(names)
         } catch { return .refused(error.localizedDescription) }
