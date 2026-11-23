@@ -120,7 +120,7 @@ final class GitHubHostSettings {
         } catch {
             await packageAccess.stop()
             packageAccessError = "Could not configure private packages: \(error.localizedDescription)"
-            errorMessage = packageAccessError
+            if errorMessage == nil || errorMessage == previousError { errorMessage = packageAccessError }
         }
     }
 
@@ -203,8 +203,8 @@ final class GitHubHostSettings {
         }
         do {
             try await authentication.signOut(confirmedLogin: confirmedLogin)
-            await packageAccess?.stop()
             account = nil
+            await packageAccess?.stop()
             repositories = []
             installations = []
             runnerStatuses = []
@@ -389,6 +389,7 @@ final class GitHubHostSettings {
             pairedProvisioners = pairedProvisioners.filter { id, _ in paired.contains { $0.id == id } }
             let statuses = try await authenticated { token in
                 let access = try await client.listInstallations(accessToken: token)
+                try Task.checkCancellation()
                 show(access)
                 let available = access.repositories
                 let current = Dictionary(uniqueKeysWithValues: available.map { ($0.id, $0) })
@@ -539,8 +540,8 @@ final class GitHubHostSettings {
         if let error = error as? GitHubError {
             switch error {
             case .notSignedIn, .response(status: 401, message: _), .authorization:
-                await packageAccess?.stop()
                 account = nil
+                await packageAccess?.stop()
             default: break
             }
         }

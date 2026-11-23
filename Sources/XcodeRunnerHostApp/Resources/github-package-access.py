@@ -70,6 +70,16 @@ class Packages(http.server.BaseHTTPRequestHandler):
                 or not self.path.startswith("/") or self.path.startswith("//")):
             self.send_error(404)
             return
+        # Revocation applies to the next fetch even if registration synchronization is still busy.
+        try:
+            approved = json.loads(self.server.approvals.read_text())
+        except (OSError, ValueError):
+            approved = []
+        if not isinstance(approved, list) or not any(
+            isinstance(name, str) and name.lower() == match[1].lower() for name in approved
+        ):
+            self.send_error(403)
+            return
         discovery = self.command == "GET"
         if ((discovery and (match[2] != "info/refs" or url.query != "service=git-upload-pack")) or
                 (not discovery and (match[2] != "git-upload-pack" or url.query))):
@@ -171,6 +181,7 @@ def main(config):
     with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Packages) as server:
         server.authorization = "Bearer " + secrets.token_hex(32)
         server.repositories = {}
+        server.approvals = config.with_name("github-package-repositories.json")
         server.credential_lock = threading.Lock()
         server.credentials = queue.Queue()
         threading.Thread(target=server.serve_forever, daemon=True).start()
