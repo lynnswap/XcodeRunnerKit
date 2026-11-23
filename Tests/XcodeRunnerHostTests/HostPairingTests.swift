@@ -225,6 +225,44 @@ struct HostPairingTests {
         await macs.shutDown()
     }
 
+    @Test func dispatchReconcilesChangesMadeDuringEitherSettingsWrite() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manager = managedMac(at: root.appending(path: "Manager"))
+        let worker = managedMac(at: root.appending(path: "Worker"))
+        worker.github.enablePackageAccess(on: worker.installation)
+        let macs = manager.managedMacs
+        let mac = try await pair(macs, with: worker.management)
+        let grant = ["owner/Library"]
+        let first: HostJobOptions.Edits = [.environment: [.init(name: "LANG", value: "en")]]
+        let second: HostJobOptions.Edits = [.environment: [.init(name: "LANG", value: "fr")]]
+        try manager.saveJobOptions(first)
+        @Sendable @MainActor func answer(_ request: HostLinkRequest) async throws -> HostLinkReply {
+            switch request {
+            case .syncJobOptions(let options):
+                try worker.applyJobOptions(options, from: mac.id)
+                if options.environment == first[.environment] {
+                    try JSONEncoder().encode(grant).write(to: manager.installation.packageRepositories, options: .atomic)
+                }
+            case .syncPackageRepositories(let names):
+                try manager.saveJobOptions(second)
+                try await worker.github.routePackages(names, from: mac.id)
+            default: break
+            }
+            return await worker.answer(.read)
+        }
+        let runner = try await listener(key: mac.pairing.symmetricKey, identity: mac.id.uuidString) { request, reply, _ in
+            try await reply(try await answer(request))
+        }
+        defer { runner.task.cancel() }
+        await macs.checkStatus(of: mac.id, at: runner.endpoint)
+        #expect(worker.jobOptions?.environment == second[.environment])
+        #expect(worker.github.packageRouting == .applied(grant))
+        await worker.github.shutDown()
+        await worker.management.shutDown()
+        await macs.shutDown()
+    }
+
     @Test func theManagingHostReadsAndChangesAPairedMacsSettings() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
