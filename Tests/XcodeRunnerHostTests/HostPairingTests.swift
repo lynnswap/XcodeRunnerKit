@@ -175,6 +175,56 @@ struct HostPairingTests {
         await macs.shutDown()
     }
 
+    @Test func packageGrantFollowsTheRunnerWhenItsEndpointChanges() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manager = managedMac(at: root.appending(path: "Manager"))
+        let worker = managedMac(at: root.appending(path: "Worker"))
+        let macs = manager.managedMacs
+        let mac = try await pair(macs, with: worker.management)
+        let requested = AsyncStream<Void>.makeStream()
+        let release = AsyncStream<Void>.makeStream()
+        let old = try await listener(key: mac.pairing.symmetricKey, identity: mac.id.uuidString) { request, reply, _ in
+            switch request {
+            case .syncPackageRepositories:
+                requested.continuation.yield(())
+                for await _ in release.stream {}
+                try await reply(.refused("Former endpoint"))
+            case .syncJobOptions:
+                Issue.record("The former endpoint received another write after the Mac moved.")
+                try await reply(.refused("Former endpoint"))
+            default: try await reply(await worker.answer(.read))
+            }
+        }
+        defer { old.task.cancel() }
+        await macs.checkStatus(of: mac.id, at: old.endpoint)
+        try manager.saveJobOptions([.environment: [.init(name: "LANG", value: "en")]])
+        let save = Task { await manager.github.changePackageAccess(.add("owner/Library")) }
+        var arrivals = requested.stream.makeAsyncIterator()
+        _ = await arrivals.next()
+
+        let replacement = try await listener(key: mac.pairing.symmetricKey, identity: mac.id.uuidString) { request, reply, _ in
+            release.continuation.finish()
+            switch request {
+            case .syncPackageRepositories: try await reply(.refused("Package configuration is read-only"))
+            case .syncJobOptions(let options):
+                try await worker.applyJobOptions(options, from: mac.id)
+                try await reply(await worker.answer(.read))
+            default: try await reply(await worker.answer(.read))
+            }
+        }
+        defer { replacement.task.cancel() }
+        await macs.checkStatus(of: mac.id, at: replacement.endpoint)
+        guard case .refused(let message) = await save.value else {
+            Issue.record("The save must report the replacement runner's failure.")
+            return
+        }
+        #expect(message.contains("Package access was saved."))
+        #expect(message.contains("Package configuration is read-only"))
+        await worker.management.shutDown()
+        await macs.shutDown()
+    }
+
     @Test func theManagingHostReadsAndChangesAPairedMacsSettings() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

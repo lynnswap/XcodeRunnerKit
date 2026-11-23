@@ -842,7 +842,10 @@ final class PairedMacs: MacList {
                         }
                     }
                     settings[mac.id]?.packageSyncError = nil
-                } catch { settings[mac.id]?.packageSyncError = error.localizedDescription }
+                } catch {
+                    guard endpoints[mac.id] == endpoint else { throw error }
+                    settings[mac.id]?.packageSyncError = error.localizedDescription
+                }
                 guard let desired = owner.jobOptions?.enabledEntries else {
                     throw HostSettingsError(owner.jobOptionsReadError ?? "Could not read the host's job defaults.")
                 }
@@ -876,12 +879,23 @@ final class PairedMacs: MacList {
     /// Disconnected runners receive the current settings when their regular status checks resume.
     func distributeSettings() async {
         for mac in macs {
-            guard let endpoint = endpoints[mac.id] else { continue }
-            var syncError: String?
-            do {
-                _ = try await synchronizedSettings(of: mac, at: endpoint)
-            } catch { syncError = error.localizedDescription }
-            if endpoints[mac.id] == endpoint { settings[mac.id]?.jobOptionsSyncError = syncError }
+            guard var endpoint = endpoints[mac.id] else { continue }
+            while true {
+                var syncError: String?
+                do { _ = try await synchronizedSettings(of: mac, at: endpoint) }
+                catch { syncError = error.localizedDescription }
+                guard let current = endpoints[mac.id] else {
+                    settings[mac.id]?.packageSyncError = "The runner disconnected before its settings were confirmed."
+                    break
+                }
+                if current == endpoint || isShuttingDown || Task.isCancelled {
+                    settings[mac.id]?.jobOptionsSyncError = syncError
+                    if isShuttingDown || Task.isCancelled { settings[mac.id]?.packageSyncError = "Settings synchronization stopped." }
+                    break
+                }
+                // A save targets the Mac. A job already dispatched to a particular endpoint cannot follow it.
+                endpoint = current
+            }
         }
     }
 
