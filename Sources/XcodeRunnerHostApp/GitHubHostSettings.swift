@@ -659,7 +659,7 @@ extension GitHubHostSettings {
         let url = discovery ? repository.appending(path: "info/refs").appending(queryItems: [
             URLQueryItem(name: "service", value: "git-upload-pack")
         ]) : repository.appending(path: "git-upload-pack")
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: url, timeoutInterval: PackageFetch.idleTimeout)
         request.setValue(relay.authorization, forHTTPHeaderField: "Authorization")
         if fetch.protocolV2 { request.setValue("version=2", forHTTPHeaderField: "Git-Protocol") }
         if !discovery {

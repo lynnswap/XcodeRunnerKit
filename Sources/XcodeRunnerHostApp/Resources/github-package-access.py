@@ -10,7 +10,6 @@ from pathlib import Path
 import re
 import secrets
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -136,7 +135,8 @@ class Packages(http.server.BaseHTTPRequestHandler):
                 if response.getheader(field) is not None:
                     self.send_header(field, response.getheader(field))
             self.end_headers()
-            shutil.copyfileobj(response, self.wfile)
+            while data := response.read1(65536):
+                self.wfile.write(data)
         finally:
             upstream.close()
 

@@ -491,13 +491,13 @@ struct HostPairingTests {
                     self.send_response(200 if valid else 403)
                     self.send_header('Content-Type', 'application/x-git-upload-pack-result')
                     self.end_headers()
-                    self.wfile.write(body[:65536])
+                    self.wfile.write(body[:256])
                     self.wfile.flush()
                     deadline = time.monotonic() + 10
-                    while os.stat(sys.argv[1]).st_size < 65536:
+                    while os.stat(sys.argv[1]).st_size < 256:
                         if time.monotonic() > deadline: return
                         time.sleep(.02)
-                    self.wfile.write(body[65536:])
+                    self.wfile.write(body[256:])
             server = HTTPServer(('127.0.0.1', 0), Git)
             print(server.server_port, flush=True)
             server.timeout = 30

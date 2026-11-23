@@ -127,6 +127,8 @@ struct PackageFetch: Codable, Sendable {
     let protocolV2: Bool
     let gzip: Bool
 
+    static let idleTimeout: TimeInterval = 120
+
     static func validRepository(_ name: String) -> Bool {
         guard name.wholeMatch(of: #/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/#) != nil else { return false }
         return !name.split(separator: "/").contains { $0 == "." || $0 == ".." }
@@ -147,8 +149,8 @@ struct PackageFetch: Codable, Sendable {
     func transfer(to endpoint: NWEndpoint, manager: HostPairing, input: FileHandle, output: FileHandle) async throws {
         try await HostLink.exchange(with: endpoint, key: manager.symmetricKey, identity: manager.id.uuidString) { connection in
             let exchange = HostLink.Exchange(
-                send: { message in try await HostLink.within(.seconds(120)) { try await connection.send(message) } },
-                receive: { try await HostLink.within(.seconds(120), connection.receive) }
+                send: { message in try await HostLink.within(.seconds(Self.idleTimeout)) { try await connection.send(message) } },
+                receive: { try await HostLink.within(.seconds(Self.idleTimeout), connection.receive) }
             )
             try await HostLink.within(HostLink.requestTimeout) {
                 try await exchange.send(.fetchPackage(self))
@@ -200,24 +202,57 @@ extension PackageFetch {
     @concurrent func sendResponse(
         to request: URLRequest, reply: @escaping @Sendable (HostLinkReply) async throws -> Void
     ) async throws {
-        let session = URLSession(configuration: .ephemeral)
+        let (events, continuation) = AsyncThrowingStream<HostLinkReply, any Error>.makeStream()
+        let session = URLSession(configuration: .ephemeral, delegate: PackageResponseDelegate(continuation), delegateQueue: nil)
         defer { session.invalidateAndCancel() }
-        let (bytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-        let length = http.expectedContentLength
-        try await reply(.packageResponse(.init(status: http.statusCode, length: length < 0 ? nil : length,
-                                               contentType: http.value(forHTTPHeaderField: "Content-Type"))))
-        var chunk = Data()
-        let chunkSize = 64 * 1024
-        chunk.reserveCapacity(chunkSize)
-        for try await byte in bytes {
-            chunk.append(byte)
-            if chunk.count == chunkSize {
-                try await reply(.packageData(chunk))
-                chunk.removeAll(keepingCapacity: true)
+        let task = session.dataTask(with: request)
+        task.resume()
+        for try await event in events {
+            if case .packageData(let data) = event {
+                var start = data.startIndex
+                while start < data.endIndex {
+                    let end = start + min(64 * 1024, data.endIndex - start)
+                    try await reply(.packageData(data[start..<end]))
+                    start = end
+                }
+                task.resume()
+            } else {
+                try await reply(event)
             }
         }
-        if !chunk.isEmpty { try await reply(.packageData(chunk)) }
+        try Task.checkCancellation()
         try await reply(.packageEnd)
+    }
+}
+
+/// Forwards each delivery as it arrives, including Git progress while the server prepares a pack.
+private final class PackageResponseDelegate: NSObject, URLSessionDataDelegate {
+    private let events: AsyncThrowingStream<HostLinkReply, any Error>.Continuation
+
+    init(_ events: AsyncThrowingStream<HostLinkReply, any Error>.Continuation) { self.events = events }
+
+    func urlSession(
+        _ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+        completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let http = response as? HTTPURLResponse else {
+            events.finish(throwing: URLError(.badServerResponse))
+            completionHandler(.cancel)
+            return
+        }
+        let length = http.expectedContentLength
+        events.yield(.packageResponse(.init(status: http.statusCode, length: length < 0 ? nil : length,
+                                            contentType: http.value(forHTTPHeaderField: "Content-Type"))))
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        // The consumer resumes the task when the runner has taken this data. A slow runner cannot buffer a whole pack.
+        dataTask.suspend()
+        events.yield(.packageData(data))
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
+        events.finish(throwing: error)
     }
 }
