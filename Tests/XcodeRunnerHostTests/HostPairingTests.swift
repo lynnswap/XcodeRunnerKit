@@ -652,12 +652,16 @@ struct HostPairingTests {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let repository = GitHubRepository(id: 1, fullName: "owner/Project")
+        let organizationRepository = GitHubRepository(id: 2, fullName: "team/Shared")
         let transport = GitHubTestTransport([
             .init(path: "/login/device/code", body: #"{"device_code":"device-secret","user_code":"USER-CODE","verification_uri":"https://github.com/login/device","expires_in":900,"interval":5}"#),
             .init(path: "/login/oauth/access_token", body: #"{"access_token":"token-secret"}"#),
             .init(path: "/user", body: #"{"id":1,"login":"owner"}"#),
             .init(path: "/user/installations", body: #"{"installations":[{"id":10,"account":{"id":1},"html_url":"https://github.com/settings/installations/10"}]}"#),
             .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Project"}]}"#),
+            .init(path: "/user/installations", body: #"{"installations":[{"id":10},{"id":20}]}"#),
+            .init(path: "/user/installations/10/repositories", body: #"{"repositories":[{"id":1,"full_name":"owner/Project"}]}"#),
+            .init(path: "/user/installations/20/repositories", body: #"{"repositories":[{"id":2,"full_name":"team/Shared"}]}"#),
         ])
         let client = await transport.client
         // The host asks GitHub for the token once the test lets its wait end, as after the person authorizes the app.
@@ -704,15 +708,17 @@ struct HostPairingTests {
         // The app's only installation is for the account that signed in, so the page that opens is that installation's.
         dashboard.addRepositories(to: shown.id)
         #expect(opened.last == URL(string: "https://github.com/settings/installations/10")!)
-
-        settings.selectedRepositoryIDs = [repository.id]
+        #expect(settings.github?.addOrganizationURL == URL(string: "https://github.com/apps/host-app/installations/new"))
+        await dashboard.reloadRepositories(of: shown.id)
+        #expect(settings.github?.selectableRepositories == [repository, organizationRepository])
+        settings.selectedRepositoryIDs = [organizationRepository.id]
         await dashboard.applyRepositorySelection(of: shown.id)
         #expect(settings.githubError == nil)
-        #expect(settings.github?.savedRepositoryIDs == [repository.id])
+        #expect(settings.github?.savedRepositoryIDs == [organizationRepository.id])
         let record = host.installation.hostRoot.appending(path: "github-host.json")
-        #expect(try GitHubHostConfiguration.load(from: record).repositories == [repository])
+        #expect(try GitHubHostConfiguration.load(from: record).repositories == [organizationRepository])
         // The host's own window shows the selection, as it does for any change it did not make.
-        #expect(host.github.selectedRepositoryIDs == [repository.id])
+        #expect(host.github.selectedRepositoryIDs == [organizationRepository.id])
         // The host reports what registering the runners waits for, as its own Apply does.
         try await waitUntil { !host.github.isSavingSelection }
         await dashboard.checkStatus(of: shown.id, at: endpoint)
@@ -724,7 +730,7 @@ struct HostPairingTests {
         await dashboard.signOut(of: shown.id, confirmedLogin: "owner")
         #expect(settings.github?.accountLogin == nil)
         #expect(host.github.account == nil)
-        #expect(await transport.requests.count == 5)
+        #expect(await transport.requests.count == 8)
 
         await host.management.shutDown()
         await dashboard.shutDown()

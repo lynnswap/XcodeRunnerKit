@@ -55,6 +55,8 @@ struct GitHubReport: Codable, Equatable, Sendable {
     /// The page where the person chooses the GitHub App's repositories: the settings of the app's installation for
     /// the person's account, or the page that installs the app.
     let installationURL: URL
+    /// The host app's installation picker. Older hosts only send the repository settings URL.
+    let addOrganizationURL: URL?
     /// The Mac that manages the host and registers its runners in its place.
     let managerName: String?
     let managesMacs: Bool

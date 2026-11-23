@@ -89,6 +89,10 @@ struct OverviewView: View {
                             }
                     }
                 }
+                if github.managerName == nil, let url = github.addOrganizationURL {
+                    Link("Add Organization…", destination: url)
+                        .accessibilityIdentifier("add-github-organization")
+                }
             } else if github.isConnecting {
                 if let code = github.signInCode {
                     LabeledContent("Code", value: code.userCode)

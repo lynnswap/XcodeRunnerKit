@@ -191,8 +191,8 @@ final class GitHubHostSettings {
             isLoadingRepositories: isLoadingRepositories, isSavingSelection: isSavingSelection, isSynchronizing: isSynchronizing,
             selectableRepositories: selectableRepositories, hasListedRepositories: !repositories.isEmpty,
             savedRepositoryIDs: savedRepositoryIDs, runnerStatuses: runnerStatuses.map(RepositoryRunnerReport.init),
-            errorMessage: errorMessage, installationURL: installationURL, managerName: management?.manager?.name,
-            managesMacs: pairedMacs?.macs.isEmpty == false
+            errorMessage: errorMessage, installationURL: installationURL, addOrganizationURL: app.installationURL,
+            managerName: management?.manager?.name, managesMacs: pairedMacs?.macs.isEmpty == false
         )
     }
 
