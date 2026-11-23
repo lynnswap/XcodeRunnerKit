@@ -364,7 +364,10 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 try Task.checkCancellation()
                 githubMonitoring = Task {
                     while !Task.isCancelled {
-                        if !settings.isSaving { await settings.github.synchronize() }
+                        if !settings.isSaving {
+                            await settings.github.preparePackageAccess()
+                            await settings.github.synchronize()
+                        }
                         do { try await Task.sleep(for: .seconds(300)) }
                         catch { break }
                     }

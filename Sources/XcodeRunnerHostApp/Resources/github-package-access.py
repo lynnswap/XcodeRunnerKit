@@ -107,10 +107,8 @@ class Packages(http.server.BaseHTTPRequestHandler):
         with self.server.credential_lock:
             print("credential", file=sys.stderr, flush=True)
             token = self.server.credentials.get()
-        if not token:
-            self.send_error(403)
-            return
-        headers["Authorization"] = "Basic " + base64.b64encode(("x-access-token:" + token).encode()).decode()
+        if token:
+            headers["Authorization"] = "Basic " + base64.b64encode(("x-access-token:" + token).encode()).decode()
         upstream = http.client.HTTPSConnection("github.com", timeout=120)
         try:
             path = "/" + repos[match[1].lower()] + ".git/" + match[2]
