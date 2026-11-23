@@ -813,11 +813,11 @@ final class PairedMacs: MacList {
             while true {
                 do {
                     let repositories = try owner.github.packageRepositories()
-                    if report.packageRepositories != repositories {
-                        if report.packageRepositories != nil {
+                    if report.packageRouting != .applied(repositories) {
+                        if report.packageRouting != nil {
                             let reply = try await send(.syncPackageRepositories(repositories), to: mac, at: endpoint)
                             if case .refused(let reason) = reply { throw HostLinkError.refused(reason) }
-                            guard case .settings(let saved) = reply, saved.packageRepositories == repositories else {
+                            guard case .settings(let saved) = reply, saved.packageRouting == .applied(repositories) else {
                                 throw HostLinkError.unexpectedReply
                             }
                             report = saved
@@ -852,8 +852,10 @@ final class PairedMacs: MacList {
         macs.compactMap { mac in settings[mac.id]?.packageSyncError.map { "\(mac.name): \($0)" } }
     }
 
-    var jobOptionsSyncErrors: [String] {
-        macs.compactMap { mac in settings[mac.id]?.jobOptionsSyncError.map { "\(mac.name): \($0)" } }
+    var settingsSyncErrors: [String] {
+        let jobErrors = macs.compactMap { mac in settings[mac.id]?.jobOptionsSyncError.map { "\(mac.name): \($0)" } }
+        var seen: Set<String> = []
+        return (jobErrors + packageSyncErrors).filter { seen.insert($0).inserted }
     }
 
     /// Disconnected runners receive the current settings when their regular status checks resume.

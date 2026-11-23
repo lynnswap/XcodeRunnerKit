@@ -109,7 +109,11 @@ final class GitHubHostSettings {
     }
 
     private var routesFile: URL { installation.hostRoot.appending(path: "managed-package-repositories.json") }
-    private(set) var managedPackageRepositories: [String] = []
+    private var managedPackageRepositories: [String] = []
+    var packageRouting: PackageRouting {
+        if let packageAccessError { return .failed(packageAccessError) }
+        return .applied(managedPackageRepositories)
+    }
 
     func packageRepositories() throws -> [String] {
         try GitHubPackageAccess.repositories(in: installation.packageRepositories)

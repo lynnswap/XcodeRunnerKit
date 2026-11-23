@@ -138,7 +138,7 @@ final class ManagedMacsRelay {
         // A pairing from this host's own Add Mac sheet, or from another dashboard, shows its code there.
         let attempt = pairingAttempt?.dashboard == dashboard ? pairingAttempt?.id : nil
         let isPairing = attempt != nil && pairing != nil
-        let notices = [macs.message].compactMap { $0 } + macs.jobOptionsSyncErrors
+        let notices = [macs.message].compactMap { $0 } + macs.settingsSyncErrors
         return ManagedMacsReport(
             session: session, revision: revision,
             macs: macs.macs.map { mac in

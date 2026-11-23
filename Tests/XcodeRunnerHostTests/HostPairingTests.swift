@@ -272,7 +272,7 @@ struct HostPairingTests {
             Issue.record("The manager could not save the package grant.")
             return
         }
-        #expect(runner.github.managedPackageRepositories == [name])
+        #expect(runner.github.packageRouting == .applied([name]))
         #expect(try runner.github.packageRepositories().isEmpty)
 
         // Hold the last bytes until the runner has received the start of the Git response.
@@ -336,15 +336,17 @@ struct HostPairingTests {
         // A failed reload stops the relay. The manager must see that the runner needs its routes again.
         try Data("invalid".utf8).write(to: runner.installation.hostRoot.appending(path: "managed-package-repositories.json"))
         await runner.github.preparePackageAccess()
-        #expect(runner.github.managedPackageRepositories.isEmpty)
-        await host.managedMacs.checkStatus(of: mac.id, at: try local(runner.management.managementPort))
-        #expect(runner.github.managedPackageRepositories == [name])
+        guard case .failed = runner.github.packageRouting else {
+            Issue.record("An unreadable routing file must be reported to the manager.")
+            return
+        }
 
         guard case .packageRepositories([]) = await host.github.changePackageAccess(.remove(name)) else {
             Issue.record("The manager could not remove the package grant.")
             return
         }
-        #expect(runner.github.managedPackageRepositories.isEmpty)
+        await runner.github.preparePackageAccess()
+        #expect(runner.github.packageRouting == .applied([]))
         let denied = await #expect(throws: HostSettingsError.self) {
             try await fetch.transfer(to: endpoint, manager: mac.pairing, input: input, output: output)
         }

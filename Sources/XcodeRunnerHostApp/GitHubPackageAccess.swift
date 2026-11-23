@@ -102,6 +102,11 @@ actor GitHubPackageAccess {
     }
 }
 
+enum PackageRouting: Codable, Equatable, Sendable {
+    case applied([String])
+    case failed(String)
+}
+
 enum PackageAccessChange: Codable, Sendable {
     case list
     case add(String)

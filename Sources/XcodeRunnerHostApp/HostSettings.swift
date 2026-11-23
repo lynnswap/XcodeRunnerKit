@@ -274,7 +274,7 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
     /// Whether the Mac reports its build service. One that runs a version without the setting can have one saved.
     var reportsBuildService: Bool { buildServiceIsMissing != nil }
     let buildServiceError: String?
-    let packageRepositories: [String]?
+    let packageRouting: PackageRouting?
     let jobOptions: HostJobOptions?
     let jobOptionsReadError: String?
     let canApplyPoolConfiguration: Bool
@@ -305,7 +305,7 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
         savedBuildService = settings.savedBuildService
         buildServiceIsMissing = settings.savedBuildServiceIsMissing
         buildServiceError = settings.buildServiceError
-        packageRepositories = settings.github.managedPackageRepositories
+        packageRouting = settings.github.packageRouting
         jobOptions = settings.jobOptions
         jobOptionsReadError = settings.jobOptionsReadError
         canApplyPoolConfiguration = settings.canApplyPoolConfiguration
