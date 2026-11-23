@@ -10,6 +10,7 @@ actor GitHubPackageAccess {
     private let authentication: GitHubAuthentication
     private var requests: Task<Void, Never>?
     private var process: Process?
+    var isRunning: Bool { process?.isRunning == true }
     private var activeManager: UUID?
     private var input: FileHandle?
     private var acknowledgment: FileHandle?
@@ -40,7 +41,7 @@ actor GitHubPackageAccess {
         // GitHub evaluates repository access on every fetch, independently of listing installations.
         let names = Set(allowed)
         guard !names.isEmpty else { stop(); return nil }
-        if process?.isRunning != true || manager != activeManager {
+        if !isRunning || manager != activeManager {
             stop()
             guard let relay = Bundle.module.url(forResource: "github-package-access", withExtension: "py") else {
                 throw CocoaError(.fileNoSuchFile)
@@ -102,7 +103,7 @@ actor GitHubPackageAccess {
         requests?.cancel()
         requests = nil
         input?.closeFile()
-        if process?.isRunning == true { process?.terminate() }
+        if isRunning { process?.terminate() }
         acknowledgment?.closeFile()
         process = nil
         input = nil

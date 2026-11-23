@@ -253,9 +253,11 @@ xcode-runner host settings package-access remove my-org/DesignKit
 ```
 
 On a Mac with both a local host and a dashboard pairing, add `--local` to edit
-the local host’s grants. Keep the normal GitHub HTTPS package URLs
-in the project. Both dashboard builds and GitHub Actions jobs receive the Git
-configuration on the executing Mac. For a managed runner, the signed app asks
+the local host’s grants. Use the repository spelling from the project’s GitHub
+HTTPS URL. Adding an existing grant again updates the spelling used by Git.
+
+Both dashboard builds and GitHub Actions jobs receive the Git configuration
+on the executing Mac. For a managed runner, the signed app asks
 its managing host to fetch the package over their pairing. The host checks the
 current grant for each request and keeps its GitHub credentials on that Mac.
 Removing a grant takes effect on the next fetch through the host. Jobs that

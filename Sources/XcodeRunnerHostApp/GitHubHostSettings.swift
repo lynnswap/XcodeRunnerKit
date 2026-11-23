@@ -127,7 +127,8 @@ final class GitHubHostSettings {
             case .list: return .packageRepositories(names)
             case .add(let name):
                 guard PackageFetch.validRepository(name) else { throw HostSettingsError("Enter a GitHub repository as OWNER/REPO.") }
-                if !names.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) { names.append(name) }
+                names.removeAll { $0.caseInsensitiveCompare(name) == .orderedSame }
+                names.append(name)
             case .remove(let name):
                 names.removeAll { $0.caseInsensitiveCompare(name) == .orderedSame }
             }
@@ -642,6 +643,7 @@ extension GitHubHostSettings {
         _ fetch: PackageFetch, reply: @escaping @Sendable (HostLinkReply) async throws -> Void,
         next: @escaping @Sendable () async throws -> HostLinkRequest
     ) async throws {
+        if let packageAccess, !(await packageAccess.isRunning) { await preparePackageAccess() }
         guard management?.manager == nil, PackageFetch.validRepository(fetch.repository),
               try packageRepositories().contains(where: { $0.caseInsensitiveCompare(fetch.repository) == .orderedSame }) else {
             throw HostSettingsError("The host has not allowed this package repository.")

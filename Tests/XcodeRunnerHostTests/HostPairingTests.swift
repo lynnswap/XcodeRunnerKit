@@ -468,6 +468,7 @@ struct HostPairingTests {
         try await waitUntil { runner.management.managementPort != nil }
         await host.managedMacs.checkStatus(of: mac.id, at: try local(runner.management.managementPort))
         let name = "owner/Library"
+        _ = await host.github.changePackageAccess(.add(name.lowercased()))
         guard case .packageRepositories([name]) = await host.github.changePackageAccess(.add(name)) else {
             Issue.record("The manager could not save the package grant.")
             return
