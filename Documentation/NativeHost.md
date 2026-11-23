@@ -212,7 +212,8 @@ Xcode. **System selection** uses `xcode-select`.
 
 Install the XcodeHomeRunner GitHub App on the dependency repositories and grant
 **Contents: read**. On the runner Mac, sign in to the app and list the private
-packages that jobs may fetch in
+packages that jobs may fetch, using the owner and repository spelling in the
+package URLs, in
 `~/Library/Application Support/XcodeRunnerKit/github-package-repositories.json`.
 
 ```json

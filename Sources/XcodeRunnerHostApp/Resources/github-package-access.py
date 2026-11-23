@@ -30,6 +30,25 @@ def request_body(stream, remaining):
         yield chunk
 
 
+def chunked_body(stream):
+    while True:
+        line = stream.readline(8193)
+        if len(line) > 8192 or not line.endswith(b"\r\n"):
+            raise ValueError("Invalid chunk header.")
+        size, _, _ = line[:-2].partition(b";")
+        if not re.fullmatch(rb"[a-fA-F0-9]+", size):
+            raise ValueError("Invalid chunk size.")
+        length = int(size, 16)
+        if not length:
+            # Git does not send trailer fields.
+            if stream.readline(3) != b"\r\n":
+                raise ValueError("Unexpected upload-pack trailer.")
+            return
+        yield from request_body(stream, length)
+        if stream.read(2) != b"\r\n":
+            raise ValueError("Invalid chunk terminator.")
+
+
 class Packages(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
@@ -64,17 +83,23 @@ class Packages(http.server.BaseHTTPRequestHandler):
             if self.headers.get("Content-Type") != "application/x-git-upload-pack-request":
                 self.send_error(415)
                 return
-            try:
-                count = int(self.headers["Content-Length"])
-            except (TypeError, ValueError):
-                self.send_error(411)
-                return
-            if count < 0 or self.headers.get("Transfer-Encoding"):
+            encoding = self.headers.get("Transfer-Encoding", "").lower()
+            if encoding == "chunked" and "Content-Length" not in self.headers:
+                body = chunked_body(self.rfile)
+            elif encoding:
                 self.send_error(400)
                 return
-            # A fetch request contains negotiation packets. The pack itself is the streamed response.
-            body = request_body(self.rfile, count)
-            headers["Content-Length"] = str(count)
+            else:
+                try:
+                    count = int(self.headers["Content-Length"])
+                except (TypeError, ValueError):
+                    self.send_error(411)
+                    return
+                if count < 0:
+                    self.send_error(400)
+                    return
+                body = request_body(self.rfile, count)
+                headers["Content-Length"] = str(count)
             headers["Content-Type"] = "application/x-git-upload-pack-request"
             if self.headers.get("Content-Encoding") == "gzip":
                 headers["Content-Encoding"] = "gzip"
@@ -111,12 +136,17 @@ def publish(config, port, authorization, names):
     origin = f"http://127.0.0.1:{port}/"
     # Git compares insteadOf prefixes. The remote helper compares the complete repository name.
     helper = shlex.join(["/usr/bin/python3", "-I", str(Path(__file__).resolve()), "--remote", str(config)])
-    lines = [f'[http "{origin}"]', f'    extraHeader = Authorization: {authorization}',
-             '[alias]', '    remote-xcode-package = ' + json.dumps('!' + helper),
+    lines = [f'[http "{origin}"]', f'    extraHeader = Authorization: {authorization}', '    proxy =',
+             '[alias]', '    remote-xcode-package = ' + json.dumps('!' + helper, ensure_ascii=False),
              '[protocol "xcode-package"]', '    allow = always']
     # Keep the original HTTPS URL in .git/config and in SwiftPM's bare repository cache.
-    for owner in sorted({name.split("/")[0] for name in names}):
-        github = f"https://github.com/{owner}/"
+    spellings = set()
+    for name in names:
+        owner, repo = name.split("/")
+        for account in {owner, owner.lower()}:
+            spellings.update(account + "/" + part for part in (repo, repo.lower()))
+    for spelling in sorted(spellings):
+        github = f"https://github.com/{spelling}"
         lines.extend([f'[url "xcode-package::{github}"]', f'    insteadOf = {github}',
                       f'[url "{github}"]', f'    pushInsteadOf = {github}'])
     write_atomic(config.with_suffix(".json"), json.dumps({"origin": origin, "repositories": sorted(names)}))

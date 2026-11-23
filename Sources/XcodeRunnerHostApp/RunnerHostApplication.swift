@@ -354,6 +354,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                     self.settings.storageDidBecomeUnavailable(error)
                 }
                 try Task.checkCancellation()
+                await settings.github.preparePackageAccess()
+                try Task.checkCancellation()
                 environment = installation.environment(for: storage)
                 settings.storageDidBecomeAvailable(storage)
                 settings.hostState = .running

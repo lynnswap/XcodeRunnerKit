@@ -105,10 +105,23 @@ final class GitHubHostSettings {
         packageAccess = GitHubPackageAccess(installation: installation, authentication: authentication)
     }
 
+    func preparePackageAccess() async {
+        guard let packageAccess else { return }
+        do {
+            if try await authentication.account() != nil {
+                try await packageAccess.update()
+            } else {
+                await packageAccess.stop()
+            }
+        } catch {
+            await packageAccess.stop()
+            packageAccessError = "Could not configure private packages: \(error.localizedDescription)"
+        }
+    }
+
     func restore() async {
         guard !hasRestored else { return }
         hasRestored = true
-        await packageAccess?.stop()
         do {
             account = try await authentication.account()
             if account != nil { await loadRepositories() }
