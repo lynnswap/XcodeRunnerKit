@@ -125,11 +125,11 @@ enum HostPreview {
 
     /// GitHub settings that are answered in memory, with two selected repositories when signed in.
     static func gitHubSettings(installation: HostInstallation, isSignedIn: Bool) -> GitHubHostSettings {
-        let repositories = #"{"repositories":[{"id":1,"full_name":"lynnswap/XcodeRunnerKit"},{"id":2,"full_name":"example/App"},{"id":3,"full_name":"example/Website"}]}"#
+        let repositories = #"{"repositories":[{"id":1,"full_name":"lynnswap/XcodeHomeRunner"},{"id":2,"full_name":"example/App"},{"id":3,"full_name":"example/Website"}]}"#
         let store = PreviewSecretStore()
         if isSignedIn {
             try? GitHubHostConfiguration(repositories: [
-                GitHubRepository(id: 1, fullName: "lynnswap/XcodeRunnerKit"), GitHubRepository(id: 2, fullName: "example/App"),
+                GitHubRepository(id: 1, fullName: "lynnswap/XcodeHomeRunner"), GitHubRepository(id: 2, fullName: "example/App"),
             ]).save(to: installation.hostRoot.appending(path: "github-host.json"))
             try? store.write(JSONEncoder().encode(GitHubCredentials(
                 clientID: GitHubApp.xcodeHomeRunner.clientID, account: GitHubAccount(id: 1, login: "lynnswap"), accessToken: "preview",

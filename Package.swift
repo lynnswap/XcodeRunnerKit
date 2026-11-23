@@ -21,6 +21,7 @@ let package = Package(
         .target(
             name: "XcodeRunnerKit",
             dependencies: [.product(name: "Subprocess", package: "swift-subprocess")],
+            exclude: ["README.md"],
             swiftSettings: [.swiftLanguageMode(.v6), .defaultIsolation(nil)]
         ),
         // Host installation layout and storage, shared by the CLI and the host app but not the library product.

@@ -1,4 +1,4 @@
-# XcodeHomeRunner
+# Set up and manage an XcodeHomeRunner host
 
 The **dashboard** is the menu bar app on the Mac where you work. A **host**
 accepts its requests and assigns each job to a **runner**. One Mac can be both
@@ -9,18 +9,23 @@ Keep the runner account logged in. Jobs execute with that user’s access to fil
 and settings, including when a dashboard submits a checkout. Run builds, tests
 and workflows from sources you trust.
 
+For a first setup, [install the app](#install), then [pair the dashboard
+Mac](#show-a-host-on-another-mac). To run jobs triggered by GitHub, also
+[connect the host to GitHub](#connect-github). You can [add a runner
+Mac](#pair-other-macs) when you need more capacity.
+
 ## Install
 
 Build the app from a checkout on a Mac whose Xcode is signed in to your Apple
 Developer account (**Xcode > Settings > Accounts**) and has your Developer ID
-Application certificate. Replace `TEAM_ID` with your team identifier:
+Application certificate. Replace `TEAM_ID` with your team identifier.
 
 ```sh
 bash Scripts/build-runner-host.sh TEAM_ID .build/RunnerHost
 ```
 
-Copy `.build/RunnerHost/XcodeHomeRunner.app` to the CI Mac and run the installer
-inside it there. The CI Mac needs no checkout:
+Copy `.build/RunnerHost/XcodeHomeRunner.app` to the Mac that will host jobs.
+On that Mac, run the installer from the directory containing the copied app.
 
 ```sh
 bash XcodeHomeRunner.app/Contents/Resources/HostSetup/install-runner-host.sh \
@@ -44,10 +49,9 @@ on the local network and allow XcodeHomeRunner to use Bonjour.
 
 1. On the host, open **Settings…** and choose **Allow Dashboard…** under
    **Dashboards**. The host waits five minutes for a dashboard.
-2. On the other Mac, open XcodeHomeRunner and choose **Add Mac…**, which its
-   window shows while it has no Mac, or **File > Add Mac > Show a Mac on This
-   Dashboard…**. Select the host and choose **Continue**. Both Macs show a
-   six-digit code.
+2. On the dashboard Mac, open XcodeHomeRunner and choose **File > Add Mac >
+   Show a Mac on This Dashboard…**. An empty dashboard also has an **Add Mac…**
+   button. Select the host and choose **Continue**. Both Macs show a six-digit code.
 3. If the codes match, choose **Pair** on the dashboard and **Allow** on the
    host. A different code means that another device answered, so choose
    **Don't Allow**.
@@ -83,7 +87,7 @@ locally. Direct submissions work independently of GitHub runner registration.
 
 ## Run a workflow from a dashboard
 
-On each Mac that will execute workflow files, open a checkout of XcodeRunnerKit
+On each Mac that will execute workflow files, open a checkout of XcodeHomeRunner
 and install its patched [act](https://github.com/nektos/act) engine.
 
 ```sh
@@ -144,7 +148,7 @@ App](https://github.com/apps/xcodehomerunner) installation. The host keeps
 sign-in tokens in Keychain. Disconnecting pauses registration management.
 Existing runner services and their jobs continue.
 
-### What the limit controls
+### Set a concurrency limit
 
 In the runner’s pane, set **Maximum concurrent jobs** and choose **Save**.
 All repositories and direct jobs share that Mac’s Xcode slots. Each selected
@@ -155,7 +159,7 @@ in-progress count can exceed the number of occupied slots.
 Lowering the limit lets running operations finish. Extra registrations may
 remain. Deselecting a repository removes its managed runners after active jobs
 finish and the host can reach both GitHub and the Mac. The limit also caps the
-runner’s [managed Simulators](../README.md#ios-simulators).
+runner’s [managed Simulators](CLI.md#ios-simulators).
 
 ### Pause a Mac
 
@@ -170,7 +174,7 @@ with the managing host.
 
 1. On the Mac to add, open **Settings…** and turn off **Host** under **Roles**.
    The Mac waits five minutes for a host.
-2. On the managing Mac, the host, choose **Add Mac…** in **Settings**, select
+2. On the managing host, choose **Add Mac…** in **Settings**, select
    the Mac, and choose **Continue**. Both Macs show a six-digit code.
 3. If the codes match, choose **Pair** on the managing Mac and **Allow** on the
    added Mac. A different code means that another device answered, so choose
@@ -206,7 +210,7 @@ jobs:
 
 Use `exec` in shell wrappers so cancellation reaches the CLI. The host supplies
 the pool, output directory and repository-scoped compiler cache. See
-[shared compilation cache](../README.md#shared-compilation-cache) for reuse
+[shared compilation cache](CLI.md#shared-compilation-cache) for reuse
 across checkout paths. The runner’s **Xcode** settings select the developer
 directory and optional build service for subsequent jobs. An explicit
 `--developer-directory` or `DEVELOPER_DIR` takes precedence over the saved
@@ -215,10 +219,10 @@ Xcode. **System selection** uses `xcode-select`.
 ### Private SwiftPM dependencies
 
 Install the XcodeHomeRunner GitHub App on the dependency repositories and grant
-**Contents: read**. On the runner Mac, sign in to the app and list the private
-packages that jobs may fetch, using the owner and repository spelling in the
-package URLs, in
+**Contents: read**. On the runner Mac, sign in to the app. List the
+packages jobs may fetch in
 `~/Library/Application Support/XcodeRunnerKit/github-package-repositories.json`.
+Use the owner and repository names from their package URLs.
 
 ```json
 ["my-org/PrivateLibrary", "my-org/DesignKit"]
@@ -232,9 +236,9 @@ does not register a GitHub Actions runner for it.
 The host authenticates Git fetches to GitHub through a read-only relay bound to
 its loopback interface. A job can read the listed packages. The GitHub user
 token stays with the host. Each runner using these credentials needs its own
-authorized sign-in. A dashboard submits its checkout without credentials. Only allow trusted jobs
-to run under the host’s macOS account. Those jobs share its files and can read
-the approved package sources.
+authorized sign-in. A dashboard submits its checkout without credentials.
+Jobs share the runner account’s access to files, including the approved
+package sources.
 
 ## Commands for the host
 
@@ -288,6 +292,8 @@ ssh -T ci-host 'exec "$HOME/Library/Application Support/XcodeRunnerKit/bin/xcode
 ```
 
 ## Storage
+
+The job data folder you select at installation holds these directories.
 
 | Directory | Contents |
 | --- | --- |
