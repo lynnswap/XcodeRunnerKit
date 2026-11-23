@@ -104,7 +104,7 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
             let followUp: FollowUp = { await settings.github.synchronizeSavedSelection() }
             return (reply, followUp)
         case .macs(let request):
-            let answer = await settings.managedMacsRelay.answer(request, from: Self.commands)
+            let answer = await settings.managedMacsRelay.answer(request, from: Self.commands, on: settings)
             // The limit is saved, and runners are registered for it after the answer.
             guard answer.registrationsChanged else { return (answer.reply, nil) }
             let followUp: FollowUp = { await settings.github.synchronize() }

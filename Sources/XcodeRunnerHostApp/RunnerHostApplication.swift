@@ -337,7 +337,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             settingsServer = HostSettingsServer(settings: settings)
             // Only the installed LaunchAgent starts the host with its settings service, and launchd starts that host
             // again after it exits unsuccessfully.
-            settings.restartHost = { [unowned self] in
+            settings.restartHost = { [weak self] in
+                guard let self else { return }
                 restartsAfterStopping = true
                 beginShutdown()
             }

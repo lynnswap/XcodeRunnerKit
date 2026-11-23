@@ -205,7 +205,7 @@ final class HostManagement {
                                 : "\(self.name) shares its Macs only with a dashboard."))
                             return
                         }
-                        let answer = await settings.managedMacsRelay.answer(request, from: pairing.id)
+                        let answer = await settings.managedMacsRelay.answer(request, from: pairing.id, on: settings)
                         // The limit is saved, so registering runners for it does not depend on the reply arriving.
                         let delivery: Result<Void, any Error>
                         do { delivery = .success(try await reply(answer.reply)) } catch { delivery = .failure(error) }

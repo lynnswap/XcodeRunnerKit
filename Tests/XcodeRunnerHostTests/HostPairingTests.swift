@@ -1092,6 +1092,25 @@ struct HostPairingTests {
         await dashboard.shutDown()
     }
 
+    @Test func discoveryStopsAfterTheHostSettingsAreReleased() async {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let macs: PairedMacs
+        let relay: ManagedMacsRelay
+        weak var releasedHost: HostSettingsModel?
+        do {
+            let host = managedMac(at: root)
+            releasedHost = host
+            macs = host.managedMacs
+            relay = host.managedMacsRelay
+            _ = await relay.answer(.discover, from: UUID(), on: host)
+        }
+        #expect(releasedHost == nil)
+        #expect(macs.isDiscovering)
+        await relay.shutDown()
+        #expect(!macs.isDiscovering)
+    }
+
     @Test func aDashboardReachesAHostsMacsThroughTheHost() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1189,9 +1208,9 @@ struct HostPairingTests {
         #expect(other.pairingWindow?.request?.requesterName == "Host")
         // Only the dashboard that started the pairing gets its code and confirms it.
         let anotherDashboard = UUID()
-        let attempt = try #require(host.managedMacsRelay.report(for: shown.id).pairingAttempt)
-        #expect(host.managedMacsRelay.report(for: anotherDashboard).codeConfirmation == nil)
-        _ = await host.managedMacsRelay.answer(.confirmCode(attempt: attempt), from: anotherDashboard)
+        let attempt = try #require(host.managedMacsRelay.report(for: shown.id, on: host).pairingAttempt)
+        #expect(host.managedMacsRelay.report(for: anotherDashboard, on: host).codeConfirmation == nil)
+        _ = await host.managedMacsRelay.answer(.confirmCode(attempt: attempt), from: anotherDashboard, on: host)
         #expect(host.managedMacs.codeConfirmation?.isConfirmed == false)
         macs.confirmCode()
         other.allowPairing()

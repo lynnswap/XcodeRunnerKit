@@ -373,7 +373,7 @@ final class HostSettingsModel: HostSettingsDisplay {
     /// The Macs that this host manages.
     let managedMacs: PairedMacs
     /// Answers a dashboard's requests about the Macs that this host manages.
-    @ObservationIgnored private(set) lazy var managedMacsRelay = ManagedMacsRelay(host: self)
+    let managedMacsRelay = ManagedMacsRelay()
     let settingsService: HostSettingsService
     /// Runs the builds and tests that dashboards send to this Mac.
     let operations: RemoteOperations

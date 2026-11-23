@@ -9,7 +9,7 @@ final class RelayedMacs: MacList {
     static let pairingInterval = Duration.milliseconds(500)
 
     // The hosts own this list and remove it with its host.
-    private unowned let hosts: PairedMacs
+    @ObservationIgnored private weak var hosts: PairedMacs?
     private let host: HostPairing.ID
     private var report: ManagedMacsReport?
     private var settings: [HostPairing.ID: PairedMacSettings] = [:]
@@ -46,7 +46,8 @@ final class RelayedMacs: MacList {
     func settings(of id: HostPairing.ID) -> PairedMacSettings? { settings[id] }
 
     func readActivity(of id: HostPairing.ID, after clock: RunnerMetricSample.SampleClock?) async throws -> [RunnerMetricSample] {
-        try await hosts.readActivity(of: id, through: host, after: clock)
+        guard let hosts else { throw CancellationError() }
+        return try await hosts.readActivity(of: id, through: host, after: clock)
     }
 
     /// Shows what the host answered, unless a report that the host made later is already shown. Answers can arrive in
@@ -66,7 +67,7 @@ final class RelayedMacs: MacList {
     }
 
     func watchSettings(of id: HostPairing.ID) async {
-        while true {
+        while hosts != nil {
             // The host's own panes show whether it answers.
             _ = try? await request(.read(refreshing: id))
             do { try await Task.sleep(for: PairedMacs.settingsInterval) } catch { return }
@@ -152,6 +153,7 @@ final class RelayedMacs: MacList {
     /// Has the host pair with a waiting Mac. The host pairs while the person confirms the code on the dashboard and
     /// allows the pairing on the Mac.
     func pair(with id: WaitingMac.ID) async throws -> ListedMac {
+        guard let hosts else { throw CancellationError() }
         let attempt = UUID()
         pairingAttempt = attempt
         defer { if pairingAttempt == attempt { pairingAttempt = nil } }
@@ -170,7 +172,7 @@ final class RelayedMacs: MacList {
             // The host may still be pairing for this attempt, with no dashboard left to show the code: this sheet was
             // cancelled, or a request to the host failed. The task that ends here may be cancelled, so another one
             // tells the host.
-            Task { _ = try? await self.request(.cancelPairing(attempt: attempt)) }
+            Task { [host] in _ = try? await hosts.requestManagedMacs(.cancelPairing(attempt: attempt), from: host) }
             throw error
         }
     }
@@ -180,11 +182,12 @@ final class RelayedMacs: MacList {
         Task { await send(.confirmCode(attempt: pairingAttempt)) }
     }
 
-    private var hostName: String? { hosts.mac(host)?.name }
+    private var hostName: String? { hosts?.mac(host)?.name }
 
     /// Sends a request and shows what the host answered.
     @discardableResult
     private func request(_ request: ManagedMacsRequest) async throws -> ManagedMacsReport {
+        guard let hosts else { throw CancellationError() }
         let report = try await hosts.requestManagedMacs(request, from: host)
         show(report)
         return report
