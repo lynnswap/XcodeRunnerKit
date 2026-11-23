@@ -489,6 +489,14 @@ struct HostPairingTests {
             try await fetch.transfer(to: endpoint, manager: mac.pairing, input: input, output: output)
         }
         #expect(denied?.message.contains("not allowed") == true)
+
+        // A reconnect still restores the package grants when the runner cannot read its independent job defaults.
+        try runner.applyJobOptions(HostJobOptions(), from: mac.id)
+        try Data("damaged".utf8).write(to: runner.installation.hostRoot.appending(path: "JobDefaults/options.json"))
+        runner.refreshJobOptions()
+        try JSONEncoder().encode([name]).write(to: host.installation.packageRepositories, options: .atomic)
+        await host.managedMacs.checkStatus(of: mac.id, at: try local(runner.management.managementPort))
+        #expect(runner.github.packageRouting == .applied([name]))
         await runner.github.shutDown()
         await runner.management.shutDown()
         await host.managedMacs.shutDown()

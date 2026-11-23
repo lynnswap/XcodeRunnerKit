@@ -806,22 +806,28 @@ final class PairedMacs: MacList {
         }
         var initial = report
         while true {
-            _ = try await synchronize(.jobOptions, of: mac, at: endpoint, report: initial)
-            initial = nil
-            let combined: HostSettingsReport
+            let packagesApplied: Bool
             do {
-                // Read after the jobs phase: either group can be saved independently while a request is in flight.
-                combined = try await synchronize(.packages, of: mac, at: endpoint)
-                if try change(for: .packages, in: combined, owner: owner, mac: mac) != nil { continue }
+                _ = try await synchronize(.packages, of: mac, at: endpoint, report: initial)
+                packagesApplied = true
                 if endpoints[mac.id] == endpoint { settings[mac.id]?.packageSyncError = nil }
             } catch {
+                packagesApplied = false
                 if endpoints[mac.id] == endpoint { settings[mac.id]?.packageSyncError = error.localizedDescription }
-                // A package failure does not prevent unrelated jobs. Read the defaults after that failure.
-                return try await synchronize(.jobOptions, of: mac, at: endpoint)
             }
-            if try change(for: .jobOptions, in: combined, owner: owner, mac: mac) == nil {
-                return combined
+            initial = nil
+            // The other group may have changed while packages were synchronizing. Read a fresh report for this phase.
+            let current = try await synchronize(.jobOptions, of: mac, at: endpoint)
+            guard endpoints[mac.id] == endpoint else { throw HostLinkError.unreachable("\(mac.name)'s address changed.") }
+            // A matching snapshot can predate a write still in flight. Join it before deciding what the job will use.
+            if updates.keys.contains(where: { $0.mac == mac.id }) { continue }
+            if try change(for: .jobOptions, in: current, owner: owner, mac: mac) != nil { continue }
+            if packagesApplied {
+                do {
+                    if try change(for: .packages, in: current, owner: owner, mac: mac) != nil { continue }
+                } catch { settings[mac.id]?.packageSyncError = error.localizedDescription }
             }
+            return current
         }
     }
 
