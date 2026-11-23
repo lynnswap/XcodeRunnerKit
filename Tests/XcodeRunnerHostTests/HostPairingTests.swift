@@ -283,6 +283,12 @@ struct HostPairingTests {
         release.continuation.finish()
         _ = try await dispatch.value
         #expect(worker.github.packageRouting == .applied(grant))
+
+        // Concurrent dispatches can share the same read when no write overlaps it.
+        async let one = macs.synchronizedSettings(of: mac, at: runner.endpoint)
+        async let two = macs.synchronizedSettings(of: mac, at: runner.endpoint)
+        let reports = try await [one, two]
+        #expect(reports.allSatisfy { $0.packageRouting == .applied(grant) })
         await worker.github.shutDown()
         await worker.management.shutDown()
         await macs.shutDown()

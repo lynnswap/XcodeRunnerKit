@@ -401,7 +401,13 @@ final class PairedMacs: MacList {
     @ObservationIgnored weak var managingHost: HostSettingsModel?
     private enum SettingGroup: Hashable { case jobOptions, packages }
     private struct SyncTarget: Hashable { let mac: UUID; let group: SettingGroup }
-    private var updates: [SyncTarget: (endpoint: NWEndpoint, task: Task<HostSettingsReport, any Error>)] = [:]
+    private struct SettingsRead: Sendable {
+        let report: HostSettingsReport
+        /// The writes that had finished before the remote read started, even when several callers share that read.
+        let revision: UInt64?
+    }
+    private var updates: [SyncTarget: (endpoint: NWEndpoint, task: Task<SettingsRead, any Error>)] = [:]
+    private var writes: Set<SyncTarget> = []
     private var endpoints: [HostPairing.ID: NWEndpoint] = [:]
     func endpoint(for mac: PairedMac) -> NWEndpoint? { endpoints[mac.id] }
     /// Every management service found, by pairing ID. A Mac advertises its new pairing before this host saves it.
@@ -819,14 +825,16 @@ final class PairedMacs: MacList {
             }
             initial = nil
             // The other group may have changed while packages were synchronizing. Read a fresh report for this phase.
-            let revision = settings[mac.id]?.settingsWriteRevision
-            let joiningOlderRead = updates[SyncTarget(mac: mac.id, group: .jobOptions)] != nil
-            let current = try await synchronize(.jobOptions, of: mac, at: endpoint)
+            let read = try await synchronize(.jobOptions, of: mac, at: endpoint)
+            let current = read.report
             guard endpoints[mac.id] == endpoint else { throw HostLinkError.unreachable("\(mac.name)'s address changed.") }
             // A matching snapshot can predate a write still in flight. Join it before deciding what the job will use.
-            if joiningOlderRead || revision != settings[mac.id]?.settingsWriteRevision || updates.keys.contains(where: { $0.mac == mac.id }) {
+            let writers = writes.filter { $0.mac == mac.id }.compactMap { updates[$0]?.task }
+            if !writers.isEmpty {
+                for writer in writers { _ = await writer.result }
                 continue
             }
+            if read.revision != settings[mac.id]?.settingsWriteRevision { continue }
             if try change(for: .jobOptions, in: current, owner: owner, mac: mac) != nil { continue }
             if packagesApplied {
                 do {
@@ -866,11 +874,12 @@ final class PairedMacs: MacList {
     /// Each setting has its own acknowledgment. A package save can finish even if a job-defaults write is pending.
     private func synchronize(
         _ group: SettingGroup, of mac: PairedMac, at endpoint: NWEndpoint, report: HostSettingsReport? = nil
-    ) async throws -> HostSettingsReport {
+    ) async throws -> SettingsRead {
         guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
         guard let owner = managingHost else {
-            if let report { return report }
-            return try await requestSettings(.read, from: mac, at: endpoint)
+            let revision = settings[mac.id]?.settingsWriteRevision
+            let current = if let report { report } else { try await requestSettings(.read, from: mac, at: endpoint) }
+            return SettingsRead(report: current, revision: revision)
         }
         let target = SyncTarget(mac: mac.id, group: group)
         var initial = report
@@ -883,13 +892,19 @@ final class PairedMacs: MacList {
         guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
         let update = Task {
             defer { updates[target] = nil }
+            var revision = settings[mac.id]?.settingsWriteRevision
             var report = if let initial { initial } else { try await requestSettings(.read, from: mac, at: endpoint) }
             guard endpoints[mac.id] == endpoint else { throw HostLinkError.unreachable("\(mac.name)'s address changed.") }
             while let request = try change(for: group, in: report, owner: owner, mac: mac) {
                 guard endpoints[mac.id] == endpoint else { throw HostLinkError.unreachable("\(mac.name)'s address changed.") }
                 let reply: HostLinkReply
                 do {
-                    defer { settings[mac.id]?.settingsWriteRevision &+= 1 }
+                    revision = settings[mac.id]?.settingsWriteRevision
+                    writes.insert(target)
+                    defer {
+                        writes.remove(target)
+                        settings[mac.id]?.settingsWriteRevision &+= 1
+                    }
                     reply = try await send(request, to: mac, at: endpoint)
                 }
                 if case .refused(let reason) = reply { throw HostLinkError.refused(reason) }
@@ -901,7 +916,7 @@ final class PairedMacs: MacList {
                 }
                 report = saved
             }
-            return report
+            return SettingsRead(report: report, revision: revision)
         }
         updates[target] = (endpoint, update)
         return try await update.value
