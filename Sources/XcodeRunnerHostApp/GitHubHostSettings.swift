@@ -385,6 +385,9 @@ final class GitHubHostSettings {
             pairedProvisioners = pairedProvisioners.filter { id, _ in paired.contains { $0.id == id } }
             let statuses = try await authenticated { token in
                 let access = try await client.listInstallations(accessToken: token)
+                try Task.checkCancellation()
+                await preparePackageAccess()
+                try Task.checkCancellation()
                 show(access)
                 let available = access.repositories
                 let current = Dictionary(uniqueKeysWithValues: available.map { ($0.id, $0) })
