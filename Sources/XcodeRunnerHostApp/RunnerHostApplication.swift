@@ -381,7 +381,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         resourceMonitoring = Task {
             while !Task.isCancelled {
                 settings.sampleResources()
-                do { try await Task.sleep(for: PairedMacs.settingsInterval) } catch { return }
+                do { try await Task.sleep(for: RunnerMetricSampler.interval) } catch { return }
             }
         }
         poolMonitoring = Task {

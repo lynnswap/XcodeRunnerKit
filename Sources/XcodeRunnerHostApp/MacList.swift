@@ -41,6 +41,7 @@ protocol MacList: AnyObject, Observable {
     var message: String? { get }
     func status(of id: HostPairing.ID) -> PairedMacs.Status
     func settings(of id: HostPairing.ID) -> PairedMacSettings?
+    func readActivity(of id: HostPairing.ID, after clock: RunnerMetricSample.SampleClock?) async throws -> [RunnerMetricSample]
     /// Reads a Mac's settings every few seconds until the task is cancelled.
     func watchSettings(of id: HostPairing.ID) async
     /// - Returns: Whether the Mac saved a different job limit.

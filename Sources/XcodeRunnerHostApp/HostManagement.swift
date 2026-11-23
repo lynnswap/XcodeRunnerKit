@@ -114,6 +114,23 @@ final class HostManagement {
                     connected: { version in await self.connected(pairing.id, version: version) }
                 ) { request, reply, next in
                     switch request {
+                    case .activity(let mac, let clock):
+                        guard let settings = await self.settings else {
+                            try await reply(.refused("\(self.name) cannot share its activity."))
+                            return
+                        }
+                        if let mac {
+                            guard role == .dashboard else {
+                                try await reply(.refused("\(self.name) shares its Macs only with a dashboard."))
+                                return
+                            }
+                            let answer: HostLinkReply
+                            do { answer = .activity(try await settings.managedMacs.readActivity(of: mac, after: clock)) }
+                            catch { answer = .refused(error.localizedDescription) }
+                            try await reply(answer)
+                        } else {
+                            try await reply(.activity(await settings.resourceHistory.samples(after: clock)))
+                        }
                     case .runnerSlots:
                         guard let settings = await self.settings else {
                             try await reply(.refused("\(self.name) cannot report runner slots."))

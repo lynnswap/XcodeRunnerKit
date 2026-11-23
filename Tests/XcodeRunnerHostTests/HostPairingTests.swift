@@ -745,6 +745,8 @@ struct HostPairingTests {
         runner.restartHost = { restarts += 1 }
         await runner.configureDefaultPool()
         await runner.refreshPoolStatus()
+        runner.sampleResources()
+        runner.sampleResources()
         let managed = try await pair(host.managedMacs, with: runner.management)
         try await waitUntil { runner.management.managementPort != nil }
         await host.managedMacs.checkStatus(of: managed.id, at: try local(runner.management.managementPort))
@@ -760,6 +762,16 @@ struct HostPairingTests {
         #expect(macs.status(of: managed.id) == .online)
         #expect(runner.management.dashboards.isEmpty)
 
+        // The settings report carries only the latest sample. Opening Activity also retrieves the runner's history.
+        let pane = MacPaneModel(macs: macs, id: managed.id, relay: (dashboard, shown.id), removed: {})
+        let activity = Task { await pane.watchActivity() }
+        defer { activity.cancel() }
+        try await waitUntil { pane.resourceHistory.samples == runner.resourceHistory.samples }
+        let clock = try #require(runner.resourceHistory.samples.last?.clock)
+        runner.sampleResources()
+        runner.sampleResources()
+        #expect(try await macs.readActivity(of: managed.id, after: clock) == Array(runner.resourceHistory.samples.suffix(2)))
+        try await waitUntil { pane.resourceHistory.samples == runner.resourceHistory.samples }
         // It changes the Mac through the host, with the checks of the Mac's own window.
         let settings = try #require(macs.settings(of: managed.id))
         #expect(settings.poolDraft.capacityInput == String(HostInstallation.defaultMaximumConcurrentJobs))
@@ -827,6 +839,9 @@ struct HostPairingTests {
         await dashboard.checkStatus(of: shown.id, at: endpoint)
         let readAt = try #require(settings.readAt)
         await runner.management.shutDown()
+        // While the host can only return its cached settings, the graph uses the reported samples.
+        try await waitUntil { pane.resourceHistory.samples == settings.resourceHistory.samples }
+        activity.cancel()
         let watching = Task { await macs.watchSettings(of: managed.id) }
         try await waitUntil {
             if case .unreachable = macs.status(of: managed.id) { true } else { false }

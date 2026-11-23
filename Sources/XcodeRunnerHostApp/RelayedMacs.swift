@@ -45,6 +45,10 @@ final class RelayedMacs: MacList {
     func status(of id: HostPairing.ID) -> PairedMacs.Status { report?.macs.first { $0.id == id }?.status ?? .notFound }
     func settings(of id: HostPairing.ID) -> PairedMacSettings? { settings[id] }
 
+    func readActivity(of id: HostPairing.ID, after clock: RunnerMetricSample.SampleClock?) async throws -> [RunnerMetricSample] {
+        try await hosts.readActivity(of: id, through: host, after: clock)
+    }
+
     /// Shows what the host answered, unless a report that the host made later is already shown. Answers can arrive in
     /// another order, and the earlier one can list a Mac that was removed since, or settings from before a change.
     func show(_ report: ManagedMacsReport) {
