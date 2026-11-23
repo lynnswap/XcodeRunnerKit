@@ -48,7 +48,7 @@ Report skipped jobs as skipped. If the run cannot start, report the error messag
 
 ## Keep the defaults
 
-- Leave out `--host`, `--local`, Xcode version, and output directory options unless asked. Choosing a host and waiting for a free runner are automatic, so skip listing hosts.
+- Leave out `--local`, Xcode version, and output directory options unless asked. The CLI sends the checkout to the paired host, which waits for a free runner.
 - Let queued runs finish. Report test failures with the failing test or step.
 - If the requested destination cannot run, say so instead of substituting another.
 - Follow the repository's test scope. Tests the repository runs directly on this Mac can stay there, and a full workflow is not needed after every edit.

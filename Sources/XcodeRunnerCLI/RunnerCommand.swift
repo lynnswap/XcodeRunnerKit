@@ -36,7 +36,7 @@ struct Workflow: AsyncParsableCommand {
                 throw ValidationError("Workflow runs need the CLI inside the paired XcodeHomeRunner.app.")
             }
             try HostApp.replaceProcess(with: [
-                app.path(percentEncoded: false), "--run-on-available-host", "--output-directory",
+                app.path(percentEncoded: false), "--run-on-host", "--output-directory",
                 URL(filePath: outputDirectory).standardizedFileURL.path(percentEncoded: false), "--", "workflow", file, event, base ?? "", json ? "json" : (verbose ? "verbose" : "concise"),
             ])
         }

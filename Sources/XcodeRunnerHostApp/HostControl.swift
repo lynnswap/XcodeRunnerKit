@@ -42,7 +42,7 @@ struct HostControl: AsyncParsableCommand {
         var repositories: [Int] = []
         @Flag(help: "Select no repository, which removes the host's runners.")
         var noRepositories = false
-        @OptionGroup var host: HostOption
+
         @OptionGroup var mac: MacOption
 
         func validate() throws {
@@ -85,8 +85,9 @@ struct HostControl: AsyncParsableCommand {
         }
 
         func run() async throws {
-            for request in settingsRequests { try await HostControl.perform(request, host: host.host, mac: mac.mac) }
-            if let selection { try await HostControl.perform(.github(.applySelection(selection)), on: host.host) }
+            let host = try await HostControl.destination()
+            for request in settingsRequests { try await HostControl.perform(request, host: host, mac: mac.mac) }
+            if let selection { try await HostControl.perform(.github(.applySelection(selection)), on: host) }
         }
     }
 
@@ -103,9 +104,7 @@ struct HostControl: AsyncParsableCommand {
                 abstract: "Print paired Macs in macs and all execution candidates, including the host, in runnerMacs."
             )
 
-            @OptionGroup var host: HostOption
-
-            func run() async throws { try HostControl.write(try await HostControl.macs(.read(refreshing: nil), on: host.host)) }
+            func run() async throws { try HostControl.write(try await HostControl.macs(.read(refreshing: nil), on: HostControl.destination())) }
         }
 
         struct Pair: AsyncParsableCommand {
@@ -123,11 +122,10 @@ struct HostControl: AsyncParsableCommand {
             var mac: String
             @Option(help: "How many seconds the host looks for the Mac.")
             var timeout = 60
-            @OptionGroup var host: HostOption
 
             func run() async throws {
                 let mac = mac
-                let report = try await HostControl.pairManagedMac(named: mac, on: host.host, timeout: .seconds(timeout)) { shown in
+                let report = try await HostControl.pairManagedMac(named: mac, on: HostControl.destination(), timeout: .seconds(timeout)) { shown in
                     try HostControl.write(shown)
                 } otherCode: {
                     // Reading blocks its thread, and the host is read meanwhile.
@@ -148,10 +146,9 @@ struct HostControl: AsyncParsableCommand {
 
             @Argument(help: "The Mac's name or ID, as `status` prints them.")
             var mac: String
-            @OptionGroup var host: HostOption
 
             func run() async throws {
-                let host = host.host
+                let host = try await HostControl.destination()
                 let listed = try await HostControl.macs(.read(refreshing: nil), on: host).macs.filter {
                     $0.name == mac || $0.id.uuidString.caseInsensitiveCompare(mac) == .orderedSame
                 }
@@ -187,9 +184,8 @@ struct HostControl: AsyncParsableCommand {
             )
 
             func run() async throws {
-                // A Mac without a host is a dashboard, and its pairings are the hosts that it shows.
                 guard await HostControl.runsHost else {
-                    let hosts = await HostControl.dashboardHosts()
+                    let hosts = await HostControl.dashboardPairing()
                     return try HostControl.write(await DashboardPairingReport(hosts))
                 }
                 try HostControl.write(try await HostControl.pairing(.read))
@@ -216,8 +212,10 @@ struct HostControl: AsyncParsableCommand {
                 guard await !HostControl.runsHost else {
                     throw HostSettingsError("This Mac runs a host, which pairs with the Macs that it manages in its window.")
                 }
-                let hosts = await HostControl.dashboardHosts()
-                // A host that this Mac is paired with already is told to forget that pairing, if it is found.
+                let hosts = await HostControl.dashboardPairing()
+                if let host = await hosts.macs.first {
+                    throw HostSettingsError("Disconnect \(host.name) before pairing this dashboard with a host.")
+                }
                 await hosts.start()
                 await hosts.discoverPairableMacs()
                 let deadline = ContinuousClock.now + .seconds(timeout)
@@ -248,7 +246,6 @@ struct HostControl: AsyncParsableCommand {
                     }
                     return code
                 }
-                HostControl.dashboardHostsChanged()
                 try HostControl.write(await DashboardPairingReport(hosts))
                 await hosts.stopDiscoveringPairableMacs()
                 await hosts.shutDown()
@@ -322,10 +319,10 @@ struct HostControl: AsyncParsableCommand {
 
         struct Remove: AsyncParsableCommand {
             static let configuration = CommandConfiguration(
-                abstract: "Forget a dashboard. It can no longer connect until the Macs pair again."
+                abstract: "Disconnect a pairing on this Mac. Reconnecting requires pairing again."
             )
 
-            @Argument(help: "The dashboard's name or ID, as `status` prints them.")
+            @Argument(help: "The paired Mac’s name or ID from pairing status.")
             var dashboard: String
 
             func run() async throws {
@@ -343,7 +340,7 @@ struct HostControl: AsyncParsableCommand {
 
             /// Removes a host from this Mac's dashboard, and tells the host if it is found on the network.
             @MainActor private func removeHost() async throws {
-                let hosts = HostControl.dashboardHosts()
+                let hosts = HostControl.dashboardPairing()
                 let named = hosts.macs.filter { $0.name == dashboard || $0.id.uuidString.caseInsensitiveCompare(dashboard) == .orderedSame }
                 guard let match = named.first else {
                     throw HostSettingsError("This Mac's dashboard shows no host named \(dashboard).")
@@ -354,11 +351,10 @@ struct HostControl: AsyncParsableCommand {
                 // The host forgets this Mac when it is told, so it is looked for first.
                 hosts.start()
                 let deadline = ContinuousClock.now + .seconds(5)
-                while hosts.status(of: match.id) != .online, ContinuousClock.now < deadline {
+                while !hosts.hasLegacyHosts, hosts.status(of: match.id) != .online, ContinuousClock.now < deadline {
                     try await Task.sleep(for: .milliseconds(250))
                 }
                 await hosts.remove(match.id)
-                HostControl.dashboardHostsChanged()
                 try HostControl.write(DashboardPairingReport(hosts))
                 let stayed = hosts.macs.contains { $0.id == match.id }
                 await hosts.shutDown()
@@ -389,9 +385,7 @@ struct HostControl: AsyncParsableCommand {
                 abstract: "Print the sign-in, the repositories, and their runners as JSON."
             )
 
-            @OptionGroup var host: HostOption
-
-            func run() async throws { try await HostControl.perform(.github(.read), on: host.host) }
+            func run() async throws { try await HostControl.perform(.github(.read), on: HostControl.destination()) }
         }
 
         struct Connect: AsyncParsableCommand {
@@ -406,12 +400,11 @@ struct HostControl: AsyncParsableCommand {
 
             @Flag(help: "Print the code, then wait until the sign-in has ended and print the result.")
             var wait = false
-            @OptionGroup var host: HostOption
 
             func run() async throws {
                 // The window offers no sign-in while an account is connected, and a sign-in that failed then would
                 // leave that account in place of a result.
-                let host = host.host
+                let host = try await HostControl.destination()
                 let current = try await HostControl.github(on: host)
                 // Until the host has read its saved sign-in, it shows no account although it may have one.
                 guard current.hasRestored else {
@@ -447,9 +440,7 @@ struct HostControl: AsyncParsableCommand {
         struct Cancel: AsyncParsableCommand {
             static let configuration = CommandConfiguration(abstract: "End a sign-in that waits for its code.")
 
-            @OptionGroup var host: HostOption
-
-            func run() async throws { try await HostControl.perform(.github(.cancelSignIn), on: host.host) }
+            func run() async throws { try await HostControl.perform(.github(.cancelSignIn), on: HostControl.destination()) }
         }
 
         struct Disconnect: AsyncParsableCommand {
@@ -457,9 +448,7 @@ struct HostControl: AsyncParsableCommand {
                 abstract: "Sign the host out of GitHub. Its runners stay registered until it is connected again."
             )
 
-            @OptionGroup var host: HostOption
-
-            func run() async throws { try await HostControl.change(.signOut, on: host.host) }
+            func run() async throws { try await HostControl.change(.signOut, on: HostControl.destination()) }
         }
 
         struct Reload: AsyncParsableCommand {
@@ -467,9 +456,7 @@ struct HostControl: AsyncParsableCommand {
                 abstract: "Read again which repositories the GitHub App is installed on."
             )
 
-            @OptionGroup var host: HostOption
-
-            func run() async throws { try await HostControl.change(.reloadRepositories, on: host.host) }
+            func run() async throws { try await HostControl.change(.reloadRepositories, on: HostControl.destination()) }
         }
     }
 
@@ -478,16 +465,13 @@ struct HostControl: AsyncParsableCommand {
             abstract: "Print the host's state, jobs, runners, and settings as JSON."
         )
 
-        @OptionGroup var host: HostOption
         @OptionGroup var mac: MacOption
 
-        func run() async throws { try await HostControl.perform(.read, host: host.host, mac: mac.mac) }
+        func run() async throws { try await HostControl.perform(.read, host: HostControl.destination(), mac: mac.mac) }
     }
 
     struct Runners: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "List runner Macs, including each host, and their available Xcode slots.")
-        @Option(help: "Limit the report to a paired host. By default list this Mac's installed host and all hosts its dashboard shows.")
-        var host: String?
+        static let configuration = CommandConfiguration(abstract: "List the host's runner Macs and available Xcode slots.")
 
         struct Group: Encodable {
             let host: String
@@ -496,32 +480,19 @@ struct HostControl: AsyncParsableCommand {
         }
 
         @MainActor func run() async throws {
-            var groups: [Group] = []
-            func group(_ name: String, request: () async throws -> HostLinkReply) async -> Group {
-                do {
-                    guard case .macs(let report) = try await request(), let runners = report.runnerMacs else {
-                        throw HostSettingsError("Update XcodeHomeRunner on \(name) to read runner availability.")
-                    }
-                    return Group(host: name, runnerMacs: runners, error: report.message)
-                } catch { return Group(host: name, runnerMacs: nil, error: error.localizedDescription) }
+            let paired = HostControl.runsHost ? nil : try RemoteOperationClient.pairedHost(installation: HostInstallation())
+            guard HostControl.runsHost || paired != nil else { return try HostControl.write([Group]()) }
+            let name = paired?.name ?? HostPane.macName
+            do {
+                guard case .macs(let report) = try await HostControl.reply(to: .macs(.listRunners), on: paired),
+                      let runners = report.runnerMacs else {
+                    throw HostSettingsError("Update XcodeHomeRunner on \(name) to read runner availability.")
+                }
+                try HostControl.write([Group(host: name, runnerMacs: runners, error: report.message)])
+            } catch {
+                try HostControl.write([Group(host: name, runnerMacs: nil, error: error.localizedDescription)])
+                throw ExitCode.failure
             }
-            let installation = HostInstallation()
-            let request = HostLinkRequest.macs(.listRunners)
-            if host == nil, HostControl.runsHost {
-                groups.append(await group(HostPane.macName) { try await HostControl.reply(to: request) })
-            }
-            let hosts = try host.map { [try RemoteOperationClient.host(named: $0, installation: installation)] }
-                ?? RemoteOperationClient.pairedHosts(installation: installation)
-            for paired in hosts {
-                groups.append(await group(paired.name) {
-                    let reply = try await HostLink.send(request, to: try await RemoteOperationClient.find(paired),
-                        key: paired.pairing.symmetricKey, identity: paired.id.uuidString, timeout: request.replyTimeout)
-                    if case .refused(let message) = reply { throw HostSettingsError(message) }
-                    return reply
-                })
-            }
-            try HostControl.write(groups)
-            if !groups.isEmpty, groups.allSatisfy({ $0.runnerMacs == nil }) { throw ExitCode.failure }
         }
     }
 
@@ -530,19 +501,17 @@ struct HostControl: AsyncParsableCommand {
             abstract: "Take no new jobs. Runner services stop after the jobs that they run."
         )
 
-        @OptionGroup var host: HostOption
         @OptionGroup var mac: MacOption
 
-        func run() async throws { try await HostControl.perform(.setPaused(true), host: host.host, mac: mac.mac) }
+        func run() async throws { try await HostControl.perform(.setPaused(true), host: HostControl.destination(), mac: mac.mac) }
     }
 
     struct Resume: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Take jobs again after a pause.")
 
-        @OptionGroup var host: HostOption
         @OptionGroup var mac: MacOption
 
-        func run() async throws { try await HostControl.perform(.setPaused(false), host: host.host, mac: mac.mac) }
+        func run() async throws { try await HostControl.perform(.setPaused(false), host: HostControl.destination(), mac: mac.mac) }
     }
 
     struct Restart: AsyncParsableCommand {
@@ -552,14 +521,15 @@ struct HostControl: AsyncParsableCommand {
 
         @Flag(help: "Restart although Xcode jobs run on the Mac. The jobs of its runners end.")
         var stopJobs = false
-        @OptionGroup var host: HostOption
+
         @OptionGroup var mac: MacOption
 
         func run() async throws {
+            let host = try await HostControl.destination()
             // The window names the running jobs before a person confirms, and a command is refused in their place.
             // The count is the host's last, as it is in the window: a job can start after it.
             if !stopJobs {
-                let running = try await HostControl.settings(host: host.host, mac: mac.mac)?.poolStatus?.activeJobCount
+                let running = try await HostControl.settings(host: host, mac: mac.mac)?.poolStatus?.activeJobCount
                 guard running == 0 else {
                     let jobs = switch running {
                     case nil: "The host has not counted the Xcode jobs"
@@ -571,7 +541,7 @@ struct HostControl: AsyncParsableCommand {
                     )
                 }
             }
-            try await HostControl.perform(.restart, host: host.host, mac: mac.mac)
+            try await HostControl.perform(.restart, host: host, mac: mac.mac)
         }
     }
 
@@ -584,7 +554,7 @@ struct HostControl: AsyncParsableCommand {
         var labels: [String] = []
         @Flag(help: "Leave the runners with no label of their own.")
         var none = false
-        @OptionGroup var host: HostOption
+
         @OptionGroup var mac: MacOption
 
         func validate() throws {
@@ -593,7 +563,7 @@ struct HostControl: AsyncParsableCommand {
             }
         }
 
-        func run() async throws { try await HostControl.perform(.saveRunnerLabels(labels), host: host.host, mac: mac.mac) }
+        func run() async throws { try await HostControl.perform(.saveRunnerLabels(labels), host: HostControl.destination(), mac: mac.mac) }
     }
 
     static var unexpectedAnswer: HostSettingsError {
@@ -601,7 +571,7 @@ struct HostControl: AsyncParsableCommand {
     }
 
     /// Sends a host a request and prints its answer.
-    @MainActor static func perform(_ request: HostLinkRequest, on host: String? = nil) async throws {
+    @MainActor static func perform(_ request: HostLinkRequest, on host: PairedMac? = nil) async throws {
         switch try await reply(to: request, on: host) {
         case .settings(let report): try write(report)
         case .github(let report): try write(report)
@@ -610,7 +580,7 @@ struct HostControl: AsyncParsableCommand {
     }
 
     /// Reads or changes the settings of a host, or of a Mac that it manages, and prints them.
-    @MainActor static func perform(_ request: HostSettingsRequest, host: String?, mac: String?) async throws {
+    @MainActor static func perform(_ request: HostSettingsRequest, host: PairedMac?, mac: String?) async throws {
         guard let mac else { return try await perform(.settings(request), on: host) }
         try write(try await managed(mac, on: host) { id in
             switch request {
@@ -628,7 +598,7 @@ struct HostControl: AsyncParsableCommand {
     }
 
     /// Reads the settings of a host, or the ones that the host last read from a Mac that it manages.
-    @MainActor static func settings(host: String?, mac: String?) async throws -> HostSettingsReport? {
+    @MainActor static func settings(host: PairedMac?, mac: String?) async throws -> HostSettingsReport? {
         if let mac { return try await managed(mac, on: host) { .read(refreshing: $0) }.settings }
         guard case .settings(let report) = try await reply(to: .settings(.read), on: host) else { throw unexpectedAnswer }
         return report
@@ -636,7 +606,7 @@ struct HostControl: AsyncParsableCommand {
 
     /// Asks a host about the Macs that it manages, or to change them, as a dashboard does.
     @MainActor static func macs(
-        _ request: ManagedMacsRequest, on host: String?,
+        _ request: ManagedMacsRequest, on host: PairedMac?,
         over bridge: (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = HostSettingsBridge.request
     ) async throws -> ManagedMacsReport {
         guard case .macs(let report) = try await reply(to: .macs(request), on: host, over: bridge) else { throw unexpectedAnswer }
@@ -653,7 +623,7 @@ struct HostControl: AsyncParsableCommand {
     ///     for once the Mac refused or left.
     /// - Returns: The host's Macs after the pairing, with the Mac that it added.
     @MainActor static func pairManagedMac(
-        named mac: String, on host: String?, timeout: Duration,
+        named mac: String, on host: PairedMac?, timeout: Duration,
         over bridge: @escaping (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = HostSettingsBridge.request,
         showCode: (PairedMacs.CodeConfirmation) throws -> Void, otherCode: @escaping @MainActor () async throws -> String
     ) async throws -> ManagedMacsReport {
@@ -736,7 +706,7 @@ struct HostControl: AsyncParsableCommand {
     ///   - bridge: Sends the request to the host on this Mac. Tests pass a connection to a host of their own.
     ///   - request: Makes the request for the Mac's ID, which the host's list gives for its name.
     @MainActor static func managed(
-        _ mac: String, on host: String?,
+        _ mac: String, on host: PairedMac?,
         over bridge: (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = HostSettingsBridge.request,
         _ request: (HostPairing.ID) throws -> ManagedMacsRequest
     ) async throws -> ManagedMacsReport.Mac {
@@ -758,14 +728,14 @@ struct HostControl: AsyncParsableCommand {
 
     /// Signs the host out or reloads its repositories, and prints its answer. The host reports what went wrong with
     /// GitHub or the Keychain in its answer, and clears that after either succeeds, so it is the command's failure.
-    @MainActor static func change(_ request: GitHubRequest, on host: String?) async throws {
+    @MainActor static func change(_ request: GitHubRequest, on host: PairedMac?) async throws {
         guard case .github(let report) = try await reply(to: .github(request), on: host) else { throw unexpectedAnswer }
         try write(report)
         if let error = report.errorMessage { throw HostSettingsError(error) }
     }
 
     /// Reads the host's GitHub sign-in, repositories, and runners.
-    @MainActor static func github(on host: String?) async throws -> GitHubReport {
+    @MainActor static func github(on host: PairedMac?) async throws -> GitHubReport {
         guard case .github(let report) = try await reply(to: .github(.read), on: host) else { throw unexpectedAnswer }
         return report
     }
@@ -776,21 +746,29 @@ struct HostControl: AsyncParsableCommand {
         return hasInstalledHost(label, in: HostInstallation())
     }
 
-    /// The hosts that this Mac's dashboard shows, from the Keychain item that the app keeps them in.
-    @MainActor static func dashboardHosts() -> PairedMacs {
+    /// Resolve once per command so a pairing change cannot redirect the second half of an operation.
+    @MainActor static func destination() throws -> PairedMac? {
+        if runsHost { return nil }
+        guard let host = try RemoteOperationClient.pairedHost(installation: HostInstallation()) else {
+            throw HostSettingsError("Pair a host in XcodeHomeRunner first.")
+        }
+        return host
+    }
+
+    /// The host paired with this dashboard.
+    @MainActor static func dashboardPairing() -> PairedMacs {
         PairedMacs(
-            store: KeychainSecretStore.dashboardHosts(hostRoot: HostInstallation().hostRoot), name: HostPane.macName,
+            store: KeychainSecretStore.dashboardHost(hostRoot: HostInstallation().hostRoot), name: HostPane.macName,
             role: .dashboard
         )
     }
 
-    /// Posted when a command changed the hosts of this Mac's dashboard, for a dashboard that is open to read them
-    /// again.
-    static let dashboardHostsChangedNotification = Notification.Name("lynnpd.xcodehomerunner.dashboard-hosts-changed")
+    /// Existing dashboards also receive this notification after a command changes the pairing.
+    static let dashboardHostChangedNotification = Notification.Name("lynnpd.xcodehomerunner.dashboard-hosts-changed")
 
-    static func dashboardHostsChanged() {
+    static func dashboardHostChanged() {
         DistributedNotificationCenter.default().postNotificationName(
-            dashboardHostsChangedNotification, object: nil, userInfo: nil, deliverImmediately: true
+            dashboardHostChangedNotification, object: nil, userInfo: nil, deliverImmediately: true
         )
     }
 
@@ -823,12 +801,11 @@ struct HostControl: AsyncParsableCommand {
     ///     host on this Mac, which gets it over its settings service.
     ///   - bridge: Sends the request to the host on this Mac. Tests pass a connection to a host of their own.
     @MainActor static func reply(
-        to request: HostLinkRequest, on host: String? = nil,
+        to request: HostLinkRequest, on host: PairedMac? = nil,
         over bridge: (HostSettingsBridgeRequest) async throws -> HostSettingsBridgeResponse = HostSettingsBridge.request
     ) async throws -> HostLinkReply {
         let reply: HostLinkReply
-        if let host {
-            let paired = try RemoteOperationClient.host(named: host, installation: HostInstallation())
+        if let paired = host {
             reply = try await HostLink.send(
                 request, to: try await RemoteOperationClient.find(paired), key: paired.pairing.symmetricKey,
                 identity: paired.id.uuidString, timeout: request.replyTimeout
@@ -847,12 +824,6 @@ struct HostControl: AsyncParsableCommand {
 }
 
 extension PairingRole: ExpressibleByArgument {}
-
-/// The host that a command reads or changes.
-struct HostOption: ParsableArguments {
-    @Option(help: "A host that this Mac's dashboard shows, by its name. Without it, the host on this Mac.")
-    var host: String?
-}
 
 /// The Mac that a command reads or changes through its host.
 struct MacOption: ParsableArguments {

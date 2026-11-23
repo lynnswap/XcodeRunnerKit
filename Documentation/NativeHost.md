@@ -50,16 +50,19 @@ on the local network and allow XcodeHomeRunner to use Bonjour.
 1. On the host, open **Settings…** and choose **Allow Dashboard…** under
    **Dashboards**. The host waits five minutes for a dashboard.
 2. On the dashboard Mac, open XcodeHomeRunner and choose **File > Add Mac >
-   Show a Mac on This Dashboard…**. An empty dashboard also has an **Add Mac…**
+   Pair Host…**. An empty dashboard also has a **Pair Host…**
    button. Select the host and choose **Continue**. Both Macs show a six-digit code.
 3. If the codes match, choose **Pair** on the dashboard and **Allow** on the
    host. A different code means that another device answered, so choose
    **Don't Allow**.
 
-The menu bar lists paired hosts. Open **Settings…** to manage GitHub and
+The dashboard connects to one host. Its menu bar shows that host’s status. Open **Settings…** to manage GitHub and
 repositories, or select a runner in the sidebar for its jobs, CPU load, memory
 pressure, storage and Xcode settings. **Open dashboard at login** controls
-automatic launch on this Mac. Removing a dashboard pairing ends its access.
+automatic launch on this Mac. To change hosts, remove the current pairing before pairing again.
+If an older dashboard has several pairings, use **Disconnect Host…** to remove the extra
+pairings. The remaining host becomes the dashboard’s destination. A Mac that is also a managed
+runner opens its dashboard from **Open Dashboard…** in the menu bar.
 
 ## Set build defaults for a host
 
@@ -261,8 +264,8 @@ package sources.
 
 ## Commands for the host
 
-Use the CLI embedded in the installed app. For host administration,
-`--host` addresses a paired host and `--mac` addresses one of its runners.
+Use the CLI embedded in the installed app. Administration commands on a dashboard address its paired host automatically.
+On an installed host they address this Mac. Use `--mac` to address one of its managed runners.
 Use the identifiers returned by `host runners`.
 
 ```sh

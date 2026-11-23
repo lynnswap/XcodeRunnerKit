@@ -6,6 +6,7 @@ import Security
 protocol SecretStore: Sendable {
     func read() throws -> Data?
     func write(_ data: Data) throws
+    func insert(_ data: Data) throws
     func remove() throws
 }
 
@@ -34,8 +35,8 @@ struct KeychainSecretStore: SecretStore {
         Self(service: "lynnpd.xcodehomerunner.pairing", hostRoot: hostRoot, name: "managed-macs")
     }
 
-    /// The hosts that this Mac shows as a dashboard.
-    static func dashboardHosts(hostRoot: URL) -> Self {
+    /// The dashboard’s host. Keep the Keychain account used by earlier versions.
+    static func dashboardHost(hostRoot: URL) -> Self {
         Self(service: "lynnpd.xcodehomerunner.pairing", hostRoot: hostRoot, name: "dashboard-hosts")
     }
 
@@ -63,6 +64,13 @@ struct KeychainSecretStore: SecretStore {
         } else {
             try check(status)
         }
+    }
+
+    /// Claims an empty dashboard pairing even when two processes finish pairing at the same time.
+    func insert(_ data: Data) throws {
+        var item = baseQuery
+        item[kSecValueData] = data
+        try check(SecItemAdd(item as CFDictionary, nil))
     }
 
     func remove() throws {

@@ -20,7 +20,7 @@ struct Host: AsyncParsableCommand {
     }
 
     struct Runners: ParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "List runner Macs, including each host, and their available Xcode slots.")
+        static let configuration = CommandConfiguration(abstract: "List the host's runner Macs and available Xcode slots.")
         @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
         func run() throws { try HostApp.run(["runners"] + arguments) }
     }

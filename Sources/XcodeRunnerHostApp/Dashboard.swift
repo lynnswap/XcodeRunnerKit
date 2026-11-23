@@ -3,13 +3,13 @@ import Observation
 import ServiceManagement
 import SwiftUI
 
-/// The app opened without a host: a menu bar item and a window that show the hosts paired with this Mac.
+/// The app opened without a host: a menu bar item and a window that show the host paired with this Mac.
 ///
-/// It creates no runner folders or execution pool, registers no runners, and keeps only the pairings in the Keychain.
+/// It creates no runner folders or execution pool, registers no runners, and keeps only its pairing in the Keychain.
 /// It stays in the menu bar after its window closes, and is in the Dock only while the window is open.
 @MainActor
 final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
-    private let hosts: PairedMacs
+    private let pairing: PairedMacs
     private var windowController: NSWindowController?
     private var settingsWindow: NSWindow?
     private lazy var openAtLogin = NSButton(
@@ -17,39 +17,28 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
     )
     private var content: DashboardSplitViewController? { windowController?.contentViewController as? DashboardSplitViewController }
     private var statusItem: NSStatusItem?
-    /// The menu bar item's menu. It lists the hosts as they were last read when it opens.
+    /// Shows the most recent status when the menu opens.
     let statusMenu = NSMenu()
-    /// Reads the hosts every few seconds while the dashboard runs, so that the menu shows their current jobs. The
-    /// main actor does not run while a menu is open, so the hosts cannot be read then, and they are otherwise read
-    /// once a minute.
     private var hostReading: Task<Void, Never>?
-    /// The hosts whose read has not ended. A host that does not answer is not read again before its request times
-    /// out, and does not keep the others waiting.
-    private var hostsBeingRead: Set<HostPairing.ID> = []
     private var stopped = false
 
-    init(hosts: PairedMacs) {
-        self.hosts = hosts
+    init(pairing: PairedMacs) {
+        self.pairing = pairing
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setUpLoginItem()
         installMainMenu()
         installStatusItem()
-        hosts.start()
-        // A command pairs and removes hosts in its own process, and saves them where this dashboard reads them.
+        pairing.start()
+        // A CLI command can change the pairing in a separate process.
         DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(hostsChangedByCommand(_:)), name: HostControl.dashboardHostsChangedNotification,
+            self, selector: #selector(hostChangedByCommand(_:)), name: HostControl.dashboardHostChangedNotification,
             object: nil
         )
         hostReading = Task {
             while true {
-                for host in hosts.macs where hostsBeingRead.insert(host.id).inserted {
-                    Task {
-                        await hosts.refresh(host.id)
-                        hostsBeingRead.remove(host.id)
-                    }
-                }
+                if let host = pairing.dashboardHost { await pairing.refresh(host.id) }
                 do { try await Task.sleep(for: PairedMacs.settingsInterval) } catch { return }
             }
         }
@@ -68,7 +57,7 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         if stopped { return .terminateNow }
         hostReading?.cancel()
         Task {
-            await hosts.shutDown()
+            await pairing.shutDown()
             stopped = true
             NSApplication.shared.reply(toApplicationShouldTerminate: true)
         }
@@ -78,7 +67,7 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
     private func showWindow(_ sender: Any?) {
         if windowController == nil {
             windowController = makePaneWindowController(
-                content: DashboardSplitViewController(model: DashboardWindowModel(hosts: hosts)),
+                content: DashboardSplitViewController(model: DashboardWindowModel(pairing: pairing)),
                 autosaveName: "XcodeHomeRunnerDashboard"
             )
             NotificationCenter.default.addObserver(
@@ -92,8 +81,8 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         windowController?.showWindow(nil)
     }
 
-    @objc private func hostsChangedByCommand(_ notification: Notification) {
-        hosts.reload()
+    @objc private func hostChangedByCommand(_ notification: Notification) {
+        pairing.reload()
     }
 
     @objc private func windowWillClose(_ notification: Notification) {
@@ -191,16 +180,23 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         statusItem = item
     }
 
-    /// Lists each host above the commands.
     private func updateStatusMenu() {
         statusMenu.removeAllItems()
-        for host in hosts.macs {
+        if let host = pairing.dashboardHost {
             let item = statusMenu.addItem(withTitle: host.name, action: #selector(showHost(_:)), keyEquivalent: "")
             item.target = self
-            item.representedObject = host.id
-        }
-        if hosts.macs.isEmpty {
-            statusMenu.addItem(withTitle: "Add Mac…", action: #selector(showMacOnDashboard(_:)), keyEquivalent: "").target = self
+            if let report = pairing.answer(of: host.id)?.report {
+                item.subtitle = "\(report.stateTitle) · \(report.jobSummary)"
+                item.image = NSImage(systemSymbolName: report.stateSymbol, accessibilityDescription: report.stateTitle)?
+                    .withSymbolConfiguration(.init(paletteColors: [report.stateTint]))
+            } else {
+                let connection = pairing.status(of: host.id)
+                item.subtitle = connection.title
+                item.image = NSImage(systemSymbolName: connection.systemImage, accessibilityDescription: connection.title)?
+                    .withSymbolConfiguration(.init(paletteColors: [connection.tint]))
+            }
+        } else {
+            statusMenu.addItem(withTitle: "Open Dashboard…", action: #selector(showHost(_:)), keyEquivalent: "").target = self
         }
         statusMenu.addItem(.separator())
         statusMenu.addItem(withTitle: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",").target = self
@@ -208,32 +204,11 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         statusMenu.addItem(
             withTitle: "Quit XcodeHomeRunner", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"
         ).target = NSApplication.shared
-        showHostStates()
     }
 
-    /// Shows each listed host's state and jobs on its item.
-    private func showHostStates() {
-        for item in statusMenu.items {
-            guard let host = item.representedObject as? HostPairing.ID else { continue }
-            // What the host last answered names its state, and its connection does while it does not answer.
-            if let report = hosts.answer(of: host)?.report {
-                item.subtitle = "\(report.stateTitle) · \(report.jobSummary)"
-                item.image = NSImage(systemSymbolName: report.stateSymbol, accessibilityDescription: report.stateTitle)?
-                    .withSymbolConfiguration(.init(paletteColors: [report.stateTint]))
-            } else {
-                let connection = hosts.status(of: host)
-                item.subtitle = connection.title
-                item.image = NSImage(systemSymbolName: connection.systemImage, accessibilityDescription: connection.title)?
-                    .withSymbolConfiguration(.init(paletteColors: [connection.tint]))
-            }
-        }
-    }
-
-    /// Opens the window on the settings of the host that the person chose in the menu bar item's menu.
-    @objc private func showHost(_ sender: NSMenuItem) {
-        guard let host = sender.representedObject as? HostPairing.ID else { return }
+    @objc private func showHost(_ sender: Any?) {
         showWindow(nil)
-        content?.show(.overview(host))
+        content?.showOverview()
     }
 
     @objc private func showHelp(_ sender: Any?) {
@@ -315,7 +290,7 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         application.mainMenu = main
     }
 
-    /// The File menu's Add Mac menu. It lists the commands for the hosts shown when it opens.
+    /// Rebuild the Add Mac menu for the current pairing when it opens.
     private func makeAddMacMenu() -> NSMenu {
         let menu = NSMenu(title: "Add Mac")
         menu.delegate = self
@@ -325,24 +300,19 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
     func menuNeedsUpdate(_ menu: NSMenu) {
         guard menu !== statusMenu else { return updateStatusMenu() }
         menu.removeAllItems()
-        menu.addItem(withTitle: "Show a Mac on This Dashboard…", action: #selector(showMacOnDashboard(_:)), keyEquivalent: "").target = self
-        for host in hosts.macs {
-            let item = menu.addItem(
-                withTitle: "Add a Mac for \(host.name) to Manage…", action: #selector(addManagedMac(_:)), keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = host.id
+        if pairing.dashboardHost != nil {
+            menu.addItem(withTitle: "Add Runner Mac…", action: #selector(addManagedMac(_:)), keyEquivalent: "").target = self
+        } else {
+            menu.addItem(withTitle: "Pair Host…", action: #selector(showMacOnDashboard(_:)), keyEquivalent: "").target = self
         }
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
-        // One sheet pairs at a time.
-        case #selector(showMacOnDashboard(_:)): return content?.isAddingMac != true
+        case #selector(showMacOnDashboard(_:)): return content?.isAddingMac != true && pairing.macs.isEmpty
         case #selector(addManagedMac(_:)):
-            // A host has to answer, and one that another Mac manages cannot pair with a Mac.
-            guard content?.isAddingMac != true, let host = item.representedObject as? HostPairing.ID else { return false }
-            return hosts.status(of: host) == .online && hosts.macsManaged(by: host).canAddMacs
+            guard content?.isAddingMac != true, let host = pairing.dashboardHost else { return false }
+            return pairing.status(of: host.id) == .online && pairing.macsManaged(by: host.id).canAddMacs
         default: return true
         }
     }
@@ -352,166 +322,118 @@ final class Dashboard: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuIt
         content?.showMacOnDashboard(sender)
     }
 
-    @objc private func addManagedMac(_ sender: NSMenuItem) {
-        guard let host = sender.representedObject as? HostPairing.ID else { return }
+    @objc private func addManagedMac(_ sender: Any?) {
         showWindow(nil)
-        content?.addMac(managedBy: host)
+        content?.addRunner()
     }
 }
 
-/// A pane in the dashboard window's sidebar, for one of the hosts.
-enum DashboardPane: Hashable {
-    /// The host's role, status, GitHub sign-in, repositories, and pairings.
-    case overview(HostPairing.ID)
-    /// The host's runner services and execution settings.
-    case mac(HostPairing.ID)
-    /// A Mac that the host manages, which the dashboard reaches through the host.
-    case managedMac(HostPairing.ID, host: HostPairing.ID)
-
-    var host: HostPairing.ID {
-        switch self {
-        case .overview(let host), .mac(let host), .managedMac(_, let host): host
-        }
-    }
+/// The host ID invalidates the displayed controller when a command changes the pairing.
+private struct DashboardPane: Hashable {
+    let host: HostPairing.ID
+    let pane: HostPane
 }
 
-/// What the dashboard window shows: the paired hosts and their panes in the sidebar, and the selected pane.
 @MainActor @Observable
 final class DashboardWindowModel: PaneWindowModel {
-    let hosts: PairedMacs
-    /// The pane that the person selected. One stays selected while a host is shown.
-    var pane: DashboardPane?
+    let pairing: PairedMacs
+    var pane: HostPane
 
-    /// - Parameter pane: The pane to show first, or `nil` for the first host's Settings.
-    init(hosts: PairedMacs, pane: DashboardPane? = nil) {
-        self.hosts = hosts
-        self.pane = pane ?? hosts.macs.first.map { .overview($0.id) }
+    init(pairing: PairedMacs, pane: HostPane = .overview) {
+        self.pairing = pairing
+        self.pane = pane
     }
 
-    /// The selected pane, while the dashboard still shows its host. A pane leaves with its host.
-    var shownPane: DashboardPane? { pane.flatMap { hosts.mac($0.host) == nil ? nil : $0 } }
-
-    /// A host's settings are those of everything that it manages, and the Macs that run its jobs follow under
-    /// Runners, the host among them, as in the host's own window. Several hosts are told apart by their names.
-    var sidebarGroups: [SidebarGroup] { Self.sidebarGroups(of: hosts, namingHosts: hosts.macs.count > 1) }
-
-    /// - Parameter namesHosts: Whether the headings name each host, which tells its panes from another Mac's.
-    static func sidebarGroups(of hosts: PairedMacs, namingHosts namesHosts: Bool) -> [SidebarGroup] {
-        hosts.macs.flatMap { host in
-            // What the host last answered names its state, and its connection does while it does not answer.
-            let answer = hosts.answer(of: host.id)
-            let connection = hosts.status(of: host.id)
-            let managed = hosts.macsManaged(by: host.id)
-            return [
-                SidebarGroup(title: namesHosts ? host.name : nil, rows: [
-                    SidebarRow(
-                        pane: DashboardPane.overview(host.id), title: "Settings",
-                        subtitle: answer?.report.stateTitle ?? connection.title, icon: HostPane.overview.icon,
-                        status: answer.map { .init(symbol: $0.report.stateSymbol, color: $0.report.stateTint) }
-                            ?? .init(symbol: connection.systemImage, color: connection.tint)
-                    ),
-                ]),
-                SidebarGroup(title: namesHosts ? "\(host.name) Runners" : "Runners", rows: [
-                    SidebarRow(
-                        pane: DashboardPane.mac(host.id), title: host.name, subtitle: answer?.report.runnerActivityTitle ?? connection.title,
-                        icon: HostPane.mac.icon
-                    ),
-                ] + managed.listedMacs.map { mac in
-                    // The host's list of Macs is as old as its last answer, so their states are not shown without one.
-                    let status = answer == nil ? nil : managed.status(of: mac.id)
-                    return SidebarRow(
-                        pane: DashboardPane.managedMac(mac.id, host: host.id), title: mac.name, subtitle: answer == nil ? connection.title : managed.runnerActivityTitle(of: mac),
-                        icon: HostPane.mac.icon, status: status.map { .init(symbol: $0.systemImage, color: $0.tint) }
-                    )
-                }),
-            ]
-        }
+    var shownPane: HostPane {
+        if case .managedMac(let id) = pane, let host = pairing.dashboardHost,
+           !pairing.macsManaged(by: host.id).listedMacs.contains(where: { $0.id == id }) { return .overview }
+        return pane
     }
 
-    var selectedPane: AnyHashable? { shownPane }
-
-    func select(_ pane: AnyHashable) {
-        if let pane = pane.base as? DashboardPane { self.pane = pane }
+    var sidebarGroups: [SidebarGroup] {
+        guard let host = pairing.dashboardHost else { return [] }
+        let answer = pairing.answer(of: host.id)
+        let connection = pairing.status(of: host.id)
+        let managed = pairing.macsManaged(by: host.id)
+        return [
+            SidebarGroup(title: nil, rows: [
+                SidebarRow(
+                    pane: DashboardPane(host: host.id, pane: .overview), title: "Settings",
+                    subtitle: answer?.report.stateTitle ?? connection.title, icon: HostPane.overview.icon,
+                    status: answer.map { .init(symbol: $0.report.stateSymbol, color: $0.report.stateTint) }
+                        ?? .init(symbol: connection.systemImage, color: connection.tint)
+                ),
+            ]),
+            SidebarGroup(title: "Runners", rows: [
+                SidebarRow(pane: DashboardPane(host: host.id, pane: .mac), title: host.name,
+                           subtitle: answer?.report.runnerActivityTitle ?? connection.title, icon: HostPane.mac.icon),
+            ] + managed.listedMacs.map { mac in
+                let status = answer == nil ? nil : managed.status(of: mac.id)
+                return SidebarRow(
+                    pane: DashboardPane(host: host.id, pane: .managedMac(mac.id)), title: mac.name,
+                    subtitle: answer == nil ? connection.title : managed.runnerActivityTitle(of: mac), icon: HostPane.mac.icon,
+                    status: status.map { .init(symbol: $0.systemImage, color: $0.tint) }
+                )
+            }),
+        ]
     }
 
-    /// The name of the shown pane, or of the window while no host is shown.
-    var title: String { shownPane.flatMap { Self.title(of: $0, in: hosts) } ?? "Dashboard" }
+    var selectedPane: AnyHashable? { pairing.dashboardHost.map { AnyHashable(DashboardPane(host: $0.id, pane: shownPane)) } }
 
-    /// The name of a pane, or `nil` for a pane whose host left the list.
-    static func title(of pane: DashboardPane, in hosts: PairedMacs) -> String? {
-        guard let host = hosts.mac(pane.host) else { return nil }
-        return switch pane {
+    func select(_ row: AnyHashable) {
+        if let selection = row.base as? DashboardPane { pane = selection.pane }
+    }
+
+    var title: String {
+        guard let host = pairing.dashboardHost else { return "Dashboard" }
+        return switch shownPane {
         case .overview: "Settings"
         case .mac: host.name
-        case .managedMac(let id, _): hosts.macsManaged(by: host.id).listedMacs.first { $0.id == id }?.name ?? "Mac"
+        case .managedMac(let id): pairing.macsManaged(by: host.id).listedMacs.first { $0.id == id }?.name ?? "Mac"
         }
     }
 }
 
-/// The dashboard window's content: the paired hosts and their panes in a sidebar beside the selected pane.
 @MainActor
 final class DashboardSplitViewController: PaneSplitViewController {
     private let model: DashboardWindowModel
-    private var hosts: PairedMacs { model.hosts }
+    private var pairing: PairedMacs { model.pairing }
+    private let canPairHost: @MainActor () -> Bool
 
-    init(model: DashboardWindowModel) {
+    init(model: DashboardWindowModel, canPairHost: @escaping @MainActor () -> Bool = { true }) {
         self.model = model
+        self.canPairHost = canPairHost
         super.init(model: model, autosaveName: "XcodeHomeRunnerDashboard")
     }
 
     required init?(coder: NSCoder) { nil }
 
     override func makePaneViewController() -> NSViewController {
-        guard let pane = model.shownPane, let host = hosts.mac(pane.host) else {
-            return NoMacsViewController(hosts: hosts) { [weak self] in self?.showMacOnDashboard(nil) }
+        guard let host = pairing.dashboardHost else {
+            return NoMacsViewController(pairing: pairing, canPairHost: canPairHost) { [weak self] in self?.showMacOnDashboard(nil) }
         }
-        return makeDashboardPaneViewController(
-            pane, of: host, in: hosts, addMac: { [weak self] in self?.addMac(managedBy: host.id) },
-            show: { [model] in model.pane = $0 }
-        )
+        switch model.shownPane {
+        case .overview:
+            return OverviewViewController(model: OverviewModel(hosts: pairing, host: host) { [weak self] in self?.addRunner() })
+        case .mac:
+            return MacViewController(model: MacPaneModel(macs: pairing, id: host.id, removed: { [model] in model.pane = .overview }))
+        case .managedMac(let id):
+            return MacViewController(model: MacPaneModel(
+                macs: pairing.macsManaged(by: host.id), id: id, relay: (pairing, host.id), removed: { [model] in model.pane = .overview }
+            ))
+        }
     }
 
-    /// Shows a pane of a host that the dashboard lists.
-    func show(_ pane: DashboardPane) {
-        model.pane = pane
-    }
+    func showOverview() { model.pane = .overview }
 
-    /// Pairs this dashboard with a Mac that runs a host, and shows that host.
     @objc func showMacOnDashboard(_ sender: Any?) {
-        guard !isAddingMac else { return }
-        presentAddMacSheet(for: hosts) { [model] host in model.pane = .overview(host.id) }
+        guard canPairHost(), !isAddingMac, pairing.macs.isEmpty else { return }
+        presentAddMacSheet(for: pairing) { [model] _ in model.pane = .overview }
     }
 
-    /// Pairs a host with a Mac for it to manage, and shows that Mac.
-    func addMac(managedBy host: HostPairing.ID) {
-        guard !isAddingMac else { return }
-        presentAddMacSheet(for: hosts.macsManaged(by: host)) { [model] mac in model.pane = .managedMac(mac.id, host: host) }
-    }
-}
-
-/// Creates a pane of a host that a window shows as a dashboard.
-///
-/// - Parameters:
-///   - addMac: Pairs the host with a Mac for it to manage.
-///   - show: Shows another of the hosts' panes after the pane's Mac was removed, or `nil` when no host is left.
-@MainActor
-func makeDashboardPaneViewController(
-    _ pane: DashboardPane, of host: PairedMac, in hosts: PairedMacs, addMac: @escaping @MainActor () -> Void,
-    show: @escaping @MainActor (DashboardPane?) -> Void
-) -> NSViewController {
-    switch pane {
-    case .overview:
-        OverviewViewController(model: OverviewModel(hosts: hosts, host: host, addMac: addMac))
-    case .mac:
-        // The host registers runners for a changed limit itself.
-        MacViewController(model: MacPaneModel(macs: hosts, id: host.id) { [hosts] in
-            show(hosts.macs.first.map { .overview($0.id) })
-        })
-    case .managedMac(let id, _):
-        // The host registers the Mac's runners, so it applies a changed limit to them.
-        MacViewController(model: MacPaneModel(
-            macs: hosts.macsManaged(by: host.id), id: id, relay: (hosts, host.id), removed: { show(.overview(host.id)) }
-        ))
+    func addRunner() {
+        guard !isAddingMac, let host = pairing.dashboardHost else { return }
+        presentAddMacSheet(for: pairing.macsManaged(by: host.id)) { [model] mac in model.pane = .managedMac(mac.id) }
     }
 }
 
@@ -519,8 +441,8 @@ func makeDashboardPaneViewController(
 @MainActor
 final class NoMacsViewController: NSHostingController<NoMacsView> {
     /// - Parameter addMac: Pairs the dashboard with a Mac that runs a host.
-    init(hosts: PairedMacs, addMac: @escaping @MainActor () -> Void) {
-        super.init(rootView: NoMacsView(hosts: hosts, addMac: addMac))
+    init(pairing: PairedMacs, canPairHost: @escaping @MainActor () -> Bool, addMac: @escaping @MainActor () -> Void) {
+        super.init(rootView: NoMacsView(pairing: pairing, canPairHost: canPairHost, addMac: addMac))
         sizingOptions = []
     }
 
@@ -529,19 +451,38 @@ final class NoMacsViewController: NSHostingController<NoMacsView> {
 
 @MainActor
 struct NoMacsView: View {
-    let hosts: PairedMacs
+    let pairing: PairedMacs
+    let canPairHost: @MainActor () -> Bool
     let addMac: @MainActor () -> Void
+
+    @State private var confirming: PairedMac?
 
     var body: some View {
         ContentUnavailableView {
-            Label("No Macs", systemImage: "desktopcomputer")
+            Label(pairing.hasLegacyHosts ? "Choose Your Host" : "No Paired Host", systemImage: "desktopcomputer")
         } description: {
-            Text("Add a Mac that runs XcodeHomeRunner to show it here. This Mac shows its status and changes its settings without running jobs itself.")
-            // A Mac's pane shows this message while one is listed. It also reports a Mac that was removed here but
-            // could not be told, and pairings that could not be read.
-            if let message = hosts.message { ErrorText(message) }
+            if let recovery = pairing.legacyHostMessage { Text(recovery) }
+            else if canPairHost() { Text("Pair this dashboard with the Mac that hosts your runners.") }
+            else { Text("Open Settings to manage the runners on this host.") }
+            if let message = pairing.message { ErrorText(message) }
         } actions: {
-            Button("Add Mac…", action: addMac)
+            if pairing.hasLegacyHosts {
+                Menu("Disconnect Host…") {
+                    ForEach(pairing.macs) { mac in
+                        Button("\(mac.name) (\(mac.id.uuidString))") { confirming = mac }
+                    }
+                }
+                .disabled(pairing.isDisconnectingLegacyHost)
+                .confirmationDialog("Disconnect \(confirming?.name ?? "Host")?", isPresented: Binding(
+                    get: { confirming != nil }, set: { if !$0 { confirming = nil } }
+                ), presenting: confirming) { mac in
+                    Button("Disconnect", role: .destructive) { Task { await pairing.remove(mac.id) } }
+                } message: { _ in
+                    Text("To connect to this host again, you will need to pair the Macs again.")
+                }
+            } else if canPairHost(), pairing.macs.isEmpty {
+                Button("Pair Host…", action: addMac)
+            }
         }
     }
 }
@@ -549,10 +490,10 @@ struct NoMacsView: View {
 #if DEBUG
 #Preview("Dashboard") { HostPreview.dashboard(hasHost: true) }
 #Preview("Dashboard Mac") {
-    HostPreview.dashboard(hasHost: true, pane: { .mac($0) })
+    HostPreview.dashboard(hasHost: true, pane: .mac)
 }
 #Preview("Dashboard Managed Mac") {
-    HostPreview.dashboard(hasHost: true, pane: { .managedMac(HostPreview.hostManagedMac.id, host: $0) })
+    HostPreview.dashboard(hasHost: true, pane: .managedMac(HostPreview.hostManagedMac.id))
 }
 #Preview("Dashboard Host Not Found") {
     HostPreview.dashboard(hasHost: true, notFound: true)

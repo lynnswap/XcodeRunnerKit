@@ -171,7 +171,7 @@ struct PairingWindowRows: View {
     private var instruction: String {
         switch window.role {
         case .manager: "On the host, choose Add Mac… in Settings and select \(HostPane.macName)."
-        case .dashboard: "On the other Mac, open XcodeHomeRunner, choose File > Add Mac > Show a Mac on This Dashboard…, and select \(HostPane.macName)."
+        case .dashboard: "On the other Mac, open the dashboard, choose Pair Host…, and select \(HostPane.macName)."
         }
     }
 }

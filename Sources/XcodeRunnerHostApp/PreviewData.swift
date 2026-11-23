@@ -12,6 +12,12 @@ final class PreviewSecretStore: SecretStore {
 
     func read() -> Data? { data.withLock { $0 } }
     func write(_ data: Data) { self.data.withLock { $0 = data } }
+    func insert(_ value: Data) throws {
+        try data.withLock {
+            guard $0 == nil else { throw CocoaError(.fileWriteFileExists) }
+            $0 = value
+        }
+    }
     func remove() { data.withLock { $0 = nil } }
 }
 
@@ -215,7 +221,7 @@ enum HostPreview {
 
     /// A dashboard window's content. Its host answers over the loopback interface unless it is `notFound`.
     static func dashboard(
-        hasHost: Bool, notFound: Bool = false, pane: (HostPairing.ID) -> DashboardPane = { .overview($0) }
+        hasHost: Bool, notFound: Bool = false, pane: HostPane = .overview
     ) -> DashboardSplitViewController {
         let store = PreviewSecretStore()
         let host = PairedMac(pairing: HostPairing(id: UUID(), name: "Mac mini", key: Data(count: 32)), hostID: UUID())
@@ -223,7 +229,7 @@ enum HostPreview {
         let hosts = PairedMacs(store: store, name: HostPane.macName, role: .dashboard, browses: false)
         if hasHost, !notFound { connect(host, to: hosts, stopsAnswering: false, managing: hostManagedMac) }
         return DashboardSplitViewController(
-            model: DashboardWindowModel(hosts: hosts, pane: hasHost ? pane(host.id) : nil)
+            model: DashboardWindowModel(pairing: hosts, pane: pane)
         )
     }
 }

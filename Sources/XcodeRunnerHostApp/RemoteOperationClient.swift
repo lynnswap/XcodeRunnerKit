@@ -387,28 +387,13 @@ enum RemoteOperationClient {
         }
     }
 
-    /// The host that this Mac's dashboard shows under `hostName`.
-    @MainActor static func pairedHosts(installation: HostInstallation) throws -> [PairedMac] {
-        let hosts = PairedMacs(
-            store: KeychainSecretStore.dashboardHosts(hostRoot: installation.hostRoot), name: HostPane.macName,
+    @MainActor static func pairedHost(installation: HostInstallation) throws -> PairedMac? {
+        let dashboard = PairedMacs(
+            store: KeychainSecretStore.dashboardHost(hostRoot: installation.hostRoot), name: HostPane.macName,
             role: .dashboard, browses: false
         )
-        if let message = hosts.message { throw RemoteOperationFailure(message) }
-        return hosts.macs
-    }
-
-    @MainActor static func host(named hostName: String, installation: HostInstallation) throws -> PairedMac {
-        let hosts = try pairedHosts(installation: installation)
-        let named = hosts.filter { $0.name.localizedCaseInsensitiveCompare(hostName) == .orderedSame }
-        guard let host = named.first else {
-            let shown = hosts.map(\.name).sorted().joined(separator: ", ")
-            throw RemoteOperationFailure("XcodeHomeRunner on this Mac shows no host named \(hostName). "
-                + (shown.isEmpty ? "Open XcodeHomeRunner and add the host first." : "It shows \(shown)."))
-        }
-        guard named.count == 1 else {
-            throw RemoteOperationFailure("XcodeHomeRunner on this Mac shows \(named.count) hosts named \(hostName). Remove the ones that you no longer use.")
-        }
-        return host
+        if let message = dashboard.legacyHostMessage ?? dashboard.message { throw RemoteOperationFailure(message) }
+        return dashboard.dashboardHost
     }
 
     /// Runs an `xcode-runner` command on a host for the command line: the checkout is the one that contains the
@@ -417,15 +402,14 @@ enum RemoteOperationClient {
     /// - Parameter command: The command and its options.
     /// - Returns: The process's exit status, which is the command's unless this Mac or the host could not run it.
     @MainActor static func run(
-        _ command: [String], onHostNamed hostName: String?, installation: HostInstallation, outputDirectory: URL
+        _ command: [String], installation: HostInstallation, outputDirectory: URL
     ) async -> Int32 {
         do {
-            let hosts = try hostName.map { [try self.host(named: $0, installation: installation)] } ?? pairedHosts(installation: installation)
-            guard !hosts.isEmpty else {
+            guard let host = try pairedHost(installation: installation) else {
                 throw RemoteOperationFailure("Pair a host in XcodeHomeRunner to run this checkout, or pass --local.")
             }
             let checkout = try await Checkout.containing(.currentDirectory())
-            return try await run(command, in: checkout, hosts: hosts, automatic: hostName == nil, outputDirectory: outputDirectory,
+            return try await run(command, in: checkout, host: host, outputDirectory: outputDirectory,
                                  endpoint: find) { try FileHandle.standardOutput.write(contentsOf: $0) }
         } catch {
             // The shell's status for a command that an interrupt ended.
@@ -443,12 +427,14 @@ enum RemoteOperationClient {
     }
 
     static func run(
-        _ command: [String], in checkout: Checkout, hosts: [PairedMac], automatic: Bool, outputDirectory: URL,
+        _ command: [String], in checkout: Checkout, host: PairedMac, outputDirectory: URL,
         endpoint: @Sendable (PairedMac) async throws -> NWEndpoint,
         output: @escaping @Sendable (Data) throws -> Void
     ) async throws -> Int32 {
         var allowRuntimeDownload = false
         while true {
+            try Task.checkCancellation()
+            let address = try await endpoint(host)
             let workflow: WorkflowInvocation?
             if command.first == "workflow" {
                 guard command.count == 5, let mode = WorkflowOutput(rawValue: command[4]) else { throw RemoteOperationFailure("Expected the workflow file, event and base branch.") }
@@ -458,36 +444,18 @@ enum RemoteOperationClient {
             } else {
                 workflow = nil
             }
-            var needsDownload = false
-            var busy = false
-            var reasons: [String] = []
-            for host in hosts {
-                try Task.checkCancellation()
-                let address: NWEndpoint
-                do { address = try await endpoint(host) }
-                catch where automatic {
-                    try Task.checkCancellation()
-                    reasons.append("\(host.name): \(error.localizedDescription)")
-                    continue
-                }
-                do {
-                    return try await run(command[0], arguments: workflow == nil ? Array(command.dropFirst()) : [], workflow: workflow, in: checkout, on: host, at: address,
-                                         outputDirectory: outputDirectory, automatic: automatic, allowRuntimeDownload: allowRuntimeDownload, output: output)
-                } catch HostAvailability.needsRuntimeDownload {
-                    needsDownload = true
-                } catch HostAvailability.busy {
-                    busy = true
-                } catch HostAvailability.unavailable(let reason) {
-                    reasons.append("\(host.name): \(reason)")
-                }
-            }
-            if needsDownload && !allowRuntimeDownload {
+            do {
+                return try await run(command[0], arguments: workflow == nil ? Array(command.dropFirst()) : [], workflow: workflow,
+                                     in: checkout, on: host, at: address, outputDirectory: outputDirectory, automatic: true,
+                                     allowRuntimeDownload: allowRuntimeDownload, output: output)
+            } catch HostAvailability.needsRuntimeDownload where !allowRuntimeDownload {
                 allowRuntimeDownload = true
-                continue
+            } catch HostAvailability.busy {
+                allowRuntimeDownload = false
+                try await Task.sleep(for: .seconds(1))
+            } catch HostAvailability.unavailable(let reason) {
+                throw RemoteOperationFailure("\(host.name): \(reason)")
             }
-            guard busy else { throw RemoteOperationFailure(reasons.joined(separator: "\n")) }
-            allowRuntimeDownload = false
-            try await Task.sleep(for: .seconds(1))
         }
     }
 

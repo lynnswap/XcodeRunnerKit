@@ -581,6 +581,23 @@ struct HostPairingTests {
         await open.shutDown()
     }
 
+    @Test func aDashboardKeepsItsExistingHostAfterLegacyPairingsAreDisconnected() async throws {
+        func mac(named name: String) -> PairedMac {
+            PairedMac(pairing: HostPairing(id: UUID(), name: name, key: Data(repeating: 1, count: 32)), hostID: UUID())
+        }
+        let keep = mac(named: "Host"), disconnect = mac(named: "Former Host")
+        let store = MemorySecretStore()
+        try store.write(JSONEncoder().encode([keep]))
+        let dashboard = PairedMacs(store: store, name: "Dashboard", role: .dashboard, browses: false)
+        #expect(dashboard.dashboardHost == keep)
+        try store.write(JSONEncoder().encode([keep, disconnect]))
+        dashboard.reload()
+        #expect(dashboard.dashboardHost == nil)
+        await dashboard.remove(disconnect.id)
+        #expect(dashboard.dashboardHost == keep)
+        #expect(try JSONDecoder().decode([PairedMac].self, from: #require(store.read())) == [keep])
+    }
+
     @Test func dashboardsPairWithAHostThatKeepsManagingItsMacs() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -610,21 +627,18 @@ struct HostPairingTests {
         #expect(second.status(of: alsoShown.id) == .online)
         #expect(second.settings[alsoShown.id]?.report?.poolStatus?.configuration.maximumConcurrentJobs == HostInstallation.defaultMaximumConcurrentJobs)
         // The menu bar item's menu names the host with its state and jobs.
-        let menuBar = Dashboard(hosts: second)
+        let menuBar = Dashboard(pairing: second)
         menuBar.menuNeedsUpdate(menuBar.statusMenu)
         #expect(menuBar.statusMenu.items.first?.title == "Managed")
         #expect(menuBar.statusMenu.items.first?.subtitle == "Starting · 0 running · 0 waiting · Limit 4")
 
-        // Pairing again replaces the dashboard's earlier pairing on the host as well.
-        let shownAgain = try await pair(first, with: host.management)
-        #expect(first.macs == [shownAgain])
-        #expect(first.message == nil)
-        #expect(host.management.dashboards.map(\.id) == [alsoShown.id, shownAgain.id])
+        // A dashboard already paired with a host refuses a second request before opening a connection.
+        await #expect(throws: HostSettingsError.self) { try await first.pair(at: otherEndpoint) }
+        #expect(first.dashboardHost == shown)
+        #expect(host.management.dashboards.map(\.id) == [shown.id, alsoShown.id])
 
         // Either Mac ends the pairing, and the other dashboard stays.
-        try await waitUntil { host.management.ports[shownAgain.id] != nil }
-        await first.checkStatus(of: shownAgain.id, at: try local(host.management.ports[shownAgain.id]))
-        await first.remove(shownAgain.id)
+        await first.remove(shown.id)
         #expect(first.macs.isEmpty)
         #expect(first.message == nil)
         try await waitUntil { host.management.dashboards.map(\.id) == [alsoShown.id] }
@@ -1188,7 +1202,7 @@ struct HostPairingTests {
         try await host.pool.withSlot {
             let contacts = Mutex(0)
             let result = try await RemoteOperationClient.run(
-                ["build", "--scheme=App"], in: checkout, hosts: [shown], automatic: true, outputDirectory: output,
+                ["build", "--scheme=App"], in: checkout, host: shown, outputDirectory: output,
                 endpoint: { _ in
                     let number = contacts.withLock { $0 += 1; return $0 }
                     if number == 2 {
@@ -1221,7 +1235,7 @@ struct HostPairingTests {
         let testing = Output()
         let test = Task {
             try await RemoteOperationClient.run(
-                ["test"], in: checkout, hosts: [shown], automatic: true, outputDirectory: output, endpoint: { _ in endpoint }
+                ["test"], in: checkout, host: shown, outputDirectory: output, endpoint: { _ in endpoint }
             ) { testing.append($0) }
         }
         try await waitUntil { testing.text.contains("started\n") }
