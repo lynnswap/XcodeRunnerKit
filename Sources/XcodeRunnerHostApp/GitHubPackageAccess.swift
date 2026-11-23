@@ -24,12 +24,22 @@ actor GitHubPackageAccess {
         catch CocoaError.fileReadNoSuchFile { return [] }
     }
 
-    func update(manager: UUID? = nil, repositories: [String]? = nil) throws {
+    struct Relay: Sendable {
+        let process: Process
+        let repositories: [String]
+
+        var routing: PackageRouting {
+            process.isRunning ? .applied(repositories) : .failed("The private package relay stopped.")
+        }
+    }
+
+    @discardableResult
+    func update(manager: UUID? = nil, repositories: [String]? = nil) throws -> Relay? {
         // Installation access may include repositories that the owner never intended CI jobs to read.
         let allowed = try repositories ?? Self.repositories(in: installation.packageRepositories)
         // GitHub evaluates repository access on every fetch, independently of listing installations.
         let names = Set(allowed)
-        guard !names.isEmpty else { stop(); return }
+        guard !names.isEmpty else { stop(); return nil }
         if process?.isRunning != true || manager != activeManager {
             stop()
             guard let relay = Bundle.module.url(forResource: "github-package-access", withExtension: "py") else {
@@ -78,9 +88,10 @@ actor GitHubPackageAccess {
         let access = ["repositories": names]
         do {
             try input?.write(contentsOf: JSONEncoder().encode(access) + Data([10]))
-            guard acknowledgment?.readData(ofLength: 6) == Data("ready\n".utf8) else {
+            guard acknowledgment?.readData(ofLength: 6) == Data("ready\n".utf8), let process else {
                 throw HostSettingsError("GitHub package access did not start.")
             }
+            return Relay(process: process, repositories: allowed)
         } catch {
             stop()
             throw error

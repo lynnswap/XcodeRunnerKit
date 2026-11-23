@@ -109,10 +109,10 @@ final class GitHubHostSettings {
     }
 
     private var routesFile: URL { installation.hostRoot.appending(path: "managed-package-repositories.json") }
-    private var managedPackageRepositories: [String] = []
+    private var managedPackageRelay: GitHubPackageAccess.Relay?
     var packageRouting: PackageRouting {
         if let packageAccessError { return .failed(packageAccessError) }
-        return .applied(managedPackageRepositories)
+        return managedPackageRelay?.routing ?? .applied([])
     }
 
     func packageRepositories() throws -> [String] {
@@ -151,7 +151,7 @@ final class GitHubHostSettings {
     }
 
     func packageManagerChanged() {
-        managedPackageRepositories = []
+        managedPackageRelay = nil
         Task { await preparePackageAccess() }
     }
 
@@ -168,13 +168,13 @@ final class GitHubHostSettings {
                 do { saved = try JSONDecoder().decode(ManagedPackages.self, from: Data(contentsOf: routesFile)) }
                 catch CocoaError.fileReadNoSuchFile { saved = nil }
                 let names = saved?.manager == manager.id ? saved?.repositories ?? [] : []
-                try await packageAccess.update(manager: manager.id, repositories: names)
-                if management?.manager?.id == manager.id { managedPackageRepositories = names }
+                let relay = try await packageAccess.update(manager: manager.id, repositories: names)
+                if management?.manager?.id == manager.id { managedPackageRelay = relay }
                 packageAccessError = nil
                 if errorMessage == previousError { errorMessage = nil }
                 return
             }
-            managedPackageRepositories = []
+            managedPackageRelay = nil
             let signedIn = if hasRestored { account != nil } else { try await authentication.account() != nil }
             guard management?.manager == nil, !isShuttingDown else { return }
             if signedIn {
@@ -185,7 +185,7 @@ final class GitHubHostSettings {
             packageAccessError = nil
             if errorMessage == previousError { errorMessage = nil }
         } catch {
-            managedPackageRepositories = []
+            managedPackageRelay = nil
             await packageAccess.stop()
             packageAccessError = "Could not configure private packages: \(error.localizedDescription)"
             if errorMessage == nil || errorMessage == previousError { errorMessage = packageAccessError }

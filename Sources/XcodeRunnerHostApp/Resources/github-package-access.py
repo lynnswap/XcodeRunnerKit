@@ -130,13 +130,8 @@ class Packages(http.server.BaseHTTPRequestHandler):
             path = "/" + repos[match[1].lower()] + ".git/" + match[2]
             upstream.request(self.command, path + ("?" + url.query if discovery else ""), body=body, headers=headers)
             response = upstream.getresponse()
-            self.send_response(response.status)
-            for field in ("Content-Type", "Content-Length", "Cache-Control"):
-                if response.getheader(field) is not None:
-                    self.send_header(field, response.getheader(field))
-            self.end_headers()
-            while data := response.read1(65536):
-                self.wfile.write(data)
+            self.send_git_response(response.status, response.getheader("Content-Type"), response.length,
+                                   iter(lambda: response.read1(65536), b""), response.getheader("Cache-Control"))
         finally:
             upstream.close()
 
@@ -162,37 +157,50 @@ class Packages(http.server.BaseHTTPRequestHandler):
                 errors.seek(0)
                 reason = next((line for line in errors if line.startswith(b"Error: ")),
                               b"The managing host could not fetch this repository.\n")
-                self.send_response(502)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Content-Length", str(len(reason)))
-                self.end_headers()
-                self.wfile.write(reason)
+                if discovery:
+                    self.send_git_response(502, "text/plain; charset=utf-8", len(reason), [reason])
+                else:
+                    # Git reads the upload-pack protocol for POST errors. A pkt-line is at most 65520 bytes.
+                    error = b"ERR " + reason.removeprefix(b"Error: ").rstrip()[:65511] + b"\n"
+                    packet = f"{len(error) + 4:04x}".encode() + error
+                    self.send_git_response(200, "application/x-git-upload-pack-result", len(packet), [packet])
                 return
             metadata = json.loads(first)
-            length = metadata.get("length")
-            chunked = length is None and self.request_version == "HTTP/1.1"
-            self.protocol_version = self.request_version
-            self.close_connection = True
-            self.send_response(metadata["status"])
-            if metadata.get("contentType"):
-                self.send_header("Content-Type", metadata["contentType"])
-            self.send_header("Connection", "close")
-            if length is not None:
-                self.send_header("Content-Length", str(length))
-            elif chunked:
-                self.send_header("Transfer-Encoding", "chunked")
-            self.end_headers()
-            try:
+
+            def chunks():
                 while data := child.stdout.read1(65536):
-                    if chunked:
-                        self.wfile.write(f"{len(data):x}\r\n".encode())
-                    self.wfile.write(data)
-                    if chunked:
-                        self.wfile.write(b"\r\n")
-                if child.wait() == 0 and chunked:
-                    self.wfile.write(b"0\r\n\r\n")
+                    yield data
+                if child.wait() != 0:
+                    raise ConnectionError("The managing host did not finish the package response.")
+
+            try:
+                self.send_git_response(metadata["status"], metadata.get("contentType"), metadata.get("length"), chunks())
             finally:
                 child.stdout.close()
+
+    def send_git_response(self, status, content_type, length, chunks, cache_control=None):
+        chunked = length is None and self.request_version == "HTTP/1.1" and status not in (204, 304)
+        self.protocol_version = self.request_version
+        self.close_connection = True
+        self.send_response(status)
+        self.send_header("Connection", "close")
+        if content_type:
+            self.send_header("Content-Type", content_type)
+        if cache_control:
+            self.send_header("Cache-Control", cache_control)
+        if length is not None:
+            self.send_header("Content-Length", str(length))
+        elif chunked:
+            self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for data in chunks:
+            if chunked:
+                self.wfile.write(f"{len(data):x}\r\n".encode())
+            self.wfile.write(data)
+            if chunked:
+                self.wfile.write(b"\r\n")
+        if chunked:
+            self.wfile.write(b"0\r\n\r\n")
 
 
 def write_atomic(path, content):
