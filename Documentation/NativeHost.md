@@ -267,7 +267,8 @@ package sources.
 
 The following commands in the bundled CLI address the dashboard’s paired host, including on a Mac that also runs jobs.
 On an installed Mac without a dashboard pairing they address the local host. Use `--mac` with a managed runner’s
-ID from `host runners` to address that runner. The pairing commands and the local settings commands below
+ID from `host runners` to address that runner. For maintenance on this Mac’s own runner service,
+use `--local`, for example `xcode-runner host restart --local`. The pairing commands and the local settings commands below
 operate on the Mac where you run them.
 
 ```sh

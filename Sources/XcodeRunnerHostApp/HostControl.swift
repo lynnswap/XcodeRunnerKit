@@ -11,7 +11,7 @@ import XcodeRunnerKit
 struct HostControl: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "xcode-runner host",
-        abstract: "Read and change the host on this Mac.",
+        abstract: "Manage the paired host and its runners, or the local service on an unpaired host Mac.",
         subcommands: [
             Status.self, Runners.self, Configure.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self, Macs.self,
         ]
@@ -85,7 +85,7 @@ struct HostControl: AsyncParsableCommand {
         }
 
         func run() async throws {
-            let host = try await HostControl.destination()
+            let host = try await mac.destination()
             for request in settingsRequests { try await HostControl.perform(request, host: host, mac: mac.mac) }
             if let selection { try await HostControl.perform(.github(.applySelection(selection)), on: host) }
         }
@@ -467,7 +467,7 @@ struct HostControl: AsyncParsableCommand {
 
         @OptionGroup var mac: MacOption
 
-        func run() async throws { try await HostControl.perform(.read, host: HostControl.destination(), mac: mac.mac) }
+        func run() async throws { try await HostControl.perform(.read, host: mac.destination(), mac: mac.mac) }
     }
 
     struct Runners: AsyncParsableCommand {
@@ -503,7 +503,7 @@ struct HostControl: AsyncParsableCommand {
 
         @OptionGroup var mac: MacOption
 
-        func run() async throws { try await HostControl.perform(.setPaused(true), host: HostControl.destination(), mac: mac.mac) }
+        func run() async throws { try await HostControl.perform(.setPaused(true), host: mac.destination(), mac: mac.mac) }
     }
 
     struct Resume: AsyncParsableCommand {
@@ -511,7 +511,7 @@ struct HostControl: AsyncParsableCommand {
 
         @OptionGroup var mac: MacOption
 
-        func run() async throws { try await HostControl.perform(.setPaused(false), host: HostControl.destination(), mac: mac.mac) }
+        func run() async throws { try await HostControl.perform(.setPaused(false), host: mac.destination(), mac: mac.mac) }
     }
 
     struct Restart: AsyncParsableCommand {
@@ -525,7 +525,7 @@ struct HostControl: AsyncParsableCommand {
         @OptionGroup var mac: MacOption
 
         func run() async throws {
-            let host = try await HostControl.destination()
+            let host = try await mac.destination()
             // The window names the running jobs before a person confirms, and a command is refused in their place.
             // The count is the host's last, as it is in the window: a job can start after it.
             if !stopJobs {
@@ -547,7 +547,7 @@ struct HostControl: AsyncParsableCommand {
 
     struct Labels: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Replace the labels of this Mac's runners. `status` prints the current ones."
+            abstract: "Replace the selected Mac's runner labels. `status` prints the current ones."
         )
 
         @Argument(help: "The labels that the runners get beside the ones that GitHub sets.")
@@ -563,7 +563,7 @@ struct HostControl: AsyncParsableCommand {
             }
         }
 
-        func run() async throws { try await HostControl.perform(.saveRunnerLabels(labels), host: HostControl.destination(), mac: mac.mac) }
+        func run() async throws { try await HostControl.perform(.saveRunnerLabels(labels), host: mac.destination(), mac: mac.mac) }
     }
 
     static var unexpectedAnswer: HostSettingsError {
@@ -827,4 +827,15 @@ extension PairingRole: ExpressibleByArgument {}
 struct MacOption: ParsableArguments {
     @Option(help: "A Mac that the host manages, by its name or ID. Without it, the host itself.")
     var mac: String?
+    @Flag(help: "Address the runner service on this Mac, even when this dashboard is paired.")
+    var local = false
+
+    func validate() throws {
+        if local, mac != nil { throw ValidationError("Choose either --local or --mac.") }
+    }
+
+    @MainActor func destination() throws -> PairedMac? {
+        if local { return nil }
+        return try HostControl.destination()
+    }
 }

@@ -5,7 +5,7 @@ import XcodeRunnerKit
 
 struct Host: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Manage the installed runner host.",
+        abstract: "Manage the paired host, its runners, and this Mac’s local service.",
         subcommands: [
             Status.self, Runners.self, Configure.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self,
             Macs.self, Storage.self, BuildService.self, Settings.self,
@@ -76,7 +76,7 @@ struct Host: AsyncParsableCommand {
     }
 
     struct Labels: ParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Replace the labels of this Mac's runners.")
+        static let configuration = CommandConfiguration(abstract: "Replace the selected Mac’s runner labels.")
         @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
         func run() throws { try HostApp.run(["labels"] + arguments) }
     }
