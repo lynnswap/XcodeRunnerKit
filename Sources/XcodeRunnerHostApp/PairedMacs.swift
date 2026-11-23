@@ -28,7 +28,11 @@ final class PairedMacSettings {
     var jobOptionsSyncError: String?
     var packageSyncError: String?
     /// Changes when a settings write finishes, including one whose acknowledgment was lost.
-    var settingsWriteRevision: UInt64 = 0
+    struct WriteRevision: Equatable, Sendable {
+        var packages: UInt64 = 0
+        var jobOptions: UInt64 = 0
+    }
+    var settingsWriteRevision = WriteRevision()
     var storageDirectoryInput = ""
     private(set) var isSaving = false
     private(set) var isSavingStorage = false
@@ -404,7 +408,7 @@ final class PairedMacs: MacList {
     private struct SettingsRead: Sendable {
         let report: HostSettingsReport
         /// The writes that had finished before the remote read started, even when several callers share that read.
-        let revision: UInt64?
+        let revision: PairedMacSettings.WriteRevision?
     }
     private var updates: [SyncTarget: (endpoint: NWEndpoint, task: Task<SettingsRead, any Error>)] = [:]
     private var writes: Set<SyncTarget> = []
@@ -813,6 +817,7 @@ final class PairedMacs: MacList {
             return try await requestSettings(.read, from: mac, at: endpoint)
         }
         var initial = report
+        var followedPackageRetry = false
         while true {
             let packagesApplied: Bool
             do {
@@ -829,12 +834,25 @@ final class PairedMacs: MacList {
             let current = read.report
             guard endpoints[mac.id] == endpoint else { throw HostLinkError.unreachable("\(mac.name)'s address changed.") }
             // A matching snapshot can predate a write still in flight. Join it before deciding what the job will use.
-            let writers = writes.filter { $0.mac == mac.id }.compactMap { updates[$0]?.task }
+            if !packagesApplied, !followedPackageRetry,
+               let retry = updates[SyncTarget(mac: mac.id, group: .packages)], retry.endpoint == endpoint {
+                followedPackageRetry = true
+                switch await retry.task.result {
+                case .success: continue
+                case .failure(let error): settings[mac.id]?.packageSyncError = error.localizedDescription
+                }
+                guard endpoints[mac.id] == endpoint else { throw HostLinkError.unreachable("\(mac.name)'s address changed.") }
+            }
+            let writers = writes.filter { $0.mac == mac.id && (packagesApplied || $0.group == .jobOptions) }
+                .compactMap { updates[$0]?.task }
             if !writers.isEmpty {
                 for writer in writers { _ = await writer.result }
                 continue
             }
-            if read.revision != settings[mac.id]?.settingsWriteRevision { continue }
+            let revision = settings[mac.id]?.settingsWriteRevision
+            if read.revision?.jobOptions != revision?.jobOptions || (packagesApplied && read.revision?.packages != revision?.packages) {
+                continue
+            }
             if try change(for: .jobOptions, in: current, owner: owner, mac: mac) != nil { continue }
             if packagesApplied {
                 do {
@@ -903,7 +921,10 @@ final class PairedMacs: MacList {
                     writes.insert(target)
                     defer {
                         writes.remove(target)
-                        settings[mac.id]?.settingsWriteRevision &+= 1
+                        switch group {
+                        case .packages: settings[mac.id]?.settingsWriteRevision.packages &+= 1
+                        case .jobOptions: settings[mac.id]?.settingsWriteRevision.jobOptions &+= 1
+                        }
                     }
                     reply = try await send(request, to: mac, at: endpoint)
                 }

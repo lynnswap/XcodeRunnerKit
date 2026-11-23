@@ -252,10 +252,21 @@ struct HostPairingTests {
             return await worker.answer(.read)
         }
         let holdRead = Mutex(false)
+        let concurrentReads = Mutex<Int?>(nil)
+        let firstRead = AsyncStream<Void>.makeStream()
+        let resumeRead = AsyncStream<Void>.makeStream()
         let captured = AsyncStream<Void>.makeStream()
         let release = AsyncStream<Void>.makeStream()
         let runner = try await listener(key: mac.pairing.symmetricKey, identity: mac.id.uuidString) { request, reply, _ in
             let snapshot = try await answer(request)
+            if case .settings(.read) = request, concurrentReads.withLock({ value in
+                guard let count = value else { return false }
+                value = count + 1
+                return count == 0
+            }) {
+                firstRead.continuation.yield(())
+                for await _ in resumeRead.stream {}
+            }
             if case .settings(.read) = request, holdRead.withLock({ value in
                 let hold = value
                 value = false
@@ -285,9 +296,21 @@ struct HostPairingTests {
         #expect(worker.github.packageRouting == .applied(grant))
 
         // Concurrent dispatches can share the same read when no write overlaps it.
-        async let one = macs.synchronizedSettings(of: mac, at: runner.endpoint)
-        async let two = macs.synchronizedSettings(of: mac, at: runner.endpoint)
-        let reports = try await [one, two]
+        concurrentReads.withLock { $0 = 0 }
+        let one = Task { try await macs.synchronizedSettings(of: mac, at: runner.endpoint) }
+        var reads = firstRead.stream.makeAsyncIterator()
+        _ = await reads.next()
+        let started = AsyncStream<Void>.makeStream()
+        let two = Task {
+            started.continuation.yield(())
+            return try await macs.synchronizedSettings(of: mac, at: runner.endpoint)
+        }
+        var callers = started.stream.makeAsyncIterator()
+        _ = await callers.next()
+        resumeRead.continuation.finish()
+        let reports = try await [one.value, two.value]
+        // The first read is shared. Each caller can then read defaults once.
+        #expect(concurrentReads.withLock { ($0 ?? 0) <= 3 })
         #expect(reports.allSatisfy { $0.packageRouting == .applied(grant) })
         await worker.github.shutDown()
         await worker.management.shutDown()
