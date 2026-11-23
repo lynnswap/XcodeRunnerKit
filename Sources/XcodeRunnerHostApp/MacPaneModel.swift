@@ -116,7 +116,30 @@ final class MacPaneModel: PaneSaving {
         }
     }
 
-    var resourceHistory: RunnerMetricHistory { thisMac?.resourceHistory ?? paired?.resourceHistory ?? RunnerMetricHistory() }
+    /// One-second samples from the selected runner. Settings reports supply the graph while this read is unavailable.
+    private var liveActivity: RunnerMetricHistory?
+    var resourceHistory: RunnerMetricHistory { thisMac?.resourceHistory ?? liveActivity ?? paired?.resourceHistory ?? RunnerMetricHistory() }
+
+    func watchActivity() async {
+        liveActivity = nil
+        guard case .listed(let macs, let id) = source, report?.supportsActivityHistory == true else { return }
+        while !Task.isCancelled {
+            do {
+                let clock = liveActivity?.samples.last?.clock
+                let samples = try await macs.readActivity(of: id, after: clock)
+                guard !Task.isCancelled else { return }
+                if !samples.isEmpty {
+                    var history = liveActivity ?? RunnerMetricHistory()
+                    for sample in samples { history.append(sample) }
+                    liveActivity = history
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                liveActivity = nil
+            }
+            do { try await Task.sleep(for: RunnerMetricSampler.interval) } catch { return }
+        }
+    }
 
     // MARK: Runner services
 

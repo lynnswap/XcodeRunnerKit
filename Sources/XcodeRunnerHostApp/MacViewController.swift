@@ -32,6 +32,7 @@ struct MacPaneView: View {
             Form {
                 if model.report?.resourceSample != nil {
                     RunnerResourceGraphs(history: model.resourceHistory)
+                        .task(id: model.report?.supportsActivityHistory) { await model.watchActivity() }
                 }
                 OverviewSection(model: model)
                 if let report = model.report {

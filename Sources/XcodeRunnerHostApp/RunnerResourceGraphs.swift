@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The runner's last two minutes on a fixed scale, with the newest sample on the right.
+/// Recent runner activity, with the newest sample on the right.
 struct RunnerResourceGraphs: View {
     let history: RunnerMetricHistory
 
@@ -47,8 +47,10 @@ private struct ResourceGraph: View {
             Divider().padding(.horizontal, 8)
             Canvas { context, size in
                 guard let last = samples.last else { return }
+                // Activity Monitor advances three points per second. A wide graph can show the full history.
+                let pointsPerSecond = max(3, size.width / RunnerMetricHistory.duration)
                 func x(_ time: TimeInterval) -> CGFloat {
-                    size.width * (1 + (time - last.plotTime) / RunnerMetricHistory.duration)
+                    size.width + (time - last.plotTime) * pointsPerSecond
                 }
                 func area(from left: CGPoint, to right: CGPoint, color: Color, opacity: Double) {
                     var line = Path()
@@ -66,6 +68,7 @@ private struct ResourceGraph: View {
                     // After sleep or a disconnected read, leave the unobserved interval empty.
                     let left = sample.plotTime - previous.plotTime <= 15 ? previous : sample
                     let end = x(sample.plotTime)
+                    guard end >= 0 else { continue }
                     let start = min(x(left.plotTime), end - 1)
                     switch kind {
                     case .cpu:
@@ -97,6 +100,7 @@ private struct ResourceGraph: View {
                 }
             }
             .frame(height: 64)
+            .clipped()
         }
         .padding(4)
         .frame(minWidth: 136, maxWidth: .infinity)
@@ -104,6 +108,6 @@ private struct ResourceGraph: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(title)
         .accessibilityValue(accessibleValue)
-        .help(kind == .cpu ? "Last two minutes. Cyan is user CPU and red is system CPU." : "Last two minutes. Green is normal, orange is warning, and red is critical.")
+        .help(kind == .cpu ? "Cyan is user CPU and red is system CPU." : "Green is normal, orange is warning, and red is critical.")
     }
 }

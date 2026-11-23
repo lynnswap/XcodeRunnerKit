@@ -248,6 +248,8 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
     /// Missing on hosts from before working-tree capacity reporting.
     let runnerSlots: RunnerSlots?
     let resourceSample: RunnerMetricSample?
+    /// Older runners and relays only pass the latest sample in their settings reports.
+    let supportsActivityHistory: Bool?
     let hostState: HostState
     let isPaused: Bool
     let runnerLabels: [String]
@@ -279,6 +281,7 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
     @MainActor init(_ settings: HostSettingsModel) {
         runnerSlots = settings.runnerSlots
         resourceSample = settings.resourceHistory.samples.last
+        supportsActivityHistory = true
         hostState = settings.hostState
         isPaused = settings.isPaused
         runnerLabels = settings.runnerLabels

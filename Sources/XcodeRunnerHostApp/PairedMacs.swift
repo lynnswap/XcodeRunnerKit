@@ -965,6 +965,22 @@ final class PairedMacs: MacList {
         return try await requestSettings(.read, from: mac)
     }
 
+    func readActivity(of id: HostPairing.ID, after clock: RunnerMetricSample.SampleClock?) async throws -> [RunnerMetricSample] {
+        try await readActivity(of: nil, through: id, after: clock)
+    }
+
+    func readActivity(
+        of managedMac: HostPairing.ID?, through id: HostPairing.ID, after clock: RunnerMetricSample.SampleClock?
+    ) async throws -> [RunnerMetricSample] {
+        guard let mac = mac(id), let endpoint = endpoints[id] else { throw HostLinkError.unreachable("The Mac was not found.") }
+        let request = HostLinkRequest.activity(mac: managedMac, after: clock)
+        switch try await send(request, to: mac, at: endpoint, timeout: request.replyTimeout) {
+        case .activity(let samples): return samples
+        case .refused(let reason): throw HostLinkError.refused(reason)
+        default: throw HostLinkError.unexpectedReply
+        }
+    }
+
     /// Sends a request about a Mac's runner folders, and throws the Mac's refusal.
     func requestRunners(_ request: RunnerRequest, from id: HostPairing.ID) async throws -> HostLinkReply {
         guard let mac = mac(id) else { throw HostLinkError.unreachable("The Mac is no longer paired.") }
@@ -1116,6 +1132,7 @@ extension HostLinkRequest {
             default: HostLink.requestTimeout
             }
         case .runnerSlots: HostLink.requestTimeout * 2
+        case .activity(let mac, _): mac == nil ? HostLink.requestTimeout : HostLink.requestTimeout * 2
         case .operation, .unpair:
             HostLink.requestTimeout
         }

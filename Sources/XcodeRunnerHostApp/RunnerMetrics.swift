@@ -29,6 +29,11 @@ struct RunnerMetricHistory {
     static let duration: TimeInterval = 120
     private(set) var samples: [RunnerMetricSample] = []
 
+    func samples(after clock: RunnerMetricSample.SampleClock?) -> [RunnerMetricSample] {
+        guard let clock, samples.last?.clock?.session == clock.session else { return samples }
+        return Array(samples.drop { $0.plotTime <= clock.elapsed })
+    }
+
     mutating func append(_ sample: RunnerMetricSample) {
         if let last = samples.last {
             if last.clock?.session != sample.clock?.session { samples.removeAll() }
@@ -40,6 +45,7 @@ struct RunnerMetricHistory {
 }
 
 struct RunnerMetricSampler {
+    static let interval = Duration.seconds(1)
     private let session = UUID()
     private let start = ContinuousClock.now
     private var previousCPU: host_cpu_load_info_data_t?
