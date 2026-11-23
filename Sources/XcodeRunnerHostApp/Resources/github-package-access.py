@@ -21,6 +21,16 @@ REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 GIT_PATH = re.compile(r"/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/(info/refs|git-upload-pack)")
 
 
+def approved_repositories(config):
+    try:
+        names = json.loads(config.with_name("github-package-repositories.json").read_bytes())
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+        return set()
+    return {name.lower() for name in names}
+
+
 def request_body(stream, remaining):
     while remaining:
         chunk = stream.read(min(remaining, 65536))
@@ -71,13 +81,7 @@ class Packages(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
             return
         # Revocation applies to the next fetch even if registration synchronization is still busy.
-        try:
-            approved = json.loads(self.server.approvals.read_text())
-        except (OSError, ValueError):
-            approved = []
-        if not isinstance(approved, list) or not any(
-            isinstance(name, str) and name.lower() == match[1].lower() for name in approved
-        ):
+        if match[1].lower() not in approved_repositories(self.server.config):
             self.send_error(403)
             return
         discovery = self.command == "GET"
@@ -163,11 +167,16 @@ def publish(config, port, authorization, names):
 
 def remote(config, name, url):
     # Use Git's own HTTP transport for both routes, including the caller's normal GitHub credentials.
-    settings = json.loads(config.with_suffix(".json").read_text())
     parsed = urlsplit(url)
     repository = parsed.path.strip("/").removesuffix(".git").lower()
-    allowed = {n.lower(): n for n in settings["repositories"]}
-    if parsed.netloc == "github.com" and not parsed.query and not parsed.fragment and repository in allowed:
+    if parsed.netloc == "github.com" and not parsed.query and not parsed.fragment and repository in approved_repositories(config):
+        try:
+            settings = json.loads(config.with_suffix(".json").read_bytes())
+        except FileNotFoundError:
+            os.execlp("git", "git", "remote-https", name, url)
+        allowed = {n.lower(): n for n in settings["repositories"]}
+        if repository not in allowed:
+            os.execlp("git", "git", "remote-https", name, url)
         # Explicit push URLs bypass pushInsteadOf. Leave a remote with a matching explicit push URL to Git.
         push_urls = subprocess.run(["git", "config", "--get-all", "remote." + name + ".pushurl"],
                                    stdout=subprocess.PIPE, text=True, check=False).stdout.splitlines()
@@ -181,7 +190,7 @@ def main(config):
     with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Packages) as server:
         server.authorization = "Bearer " + secrets.token_hex(32)
         server.repositories = {}
-        server.approvals = config.with_name("github-package-repositories.json")
+        server.config = config
         server.credential_lock = threading.Lock()
         server.credentials = queue.Queue()
         threading.Thread(target=server.serve_forever, daemon=True).start()
