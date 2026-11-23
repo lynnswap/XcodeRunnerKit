@@ -27,6 +27,13 @@ def run(engine, checkout, output, file, event, repository, sha, ref, base, prese
         for key in ('DEVELOPER_DIR', 'XCODE_RUNNER_HOST_ROOT', 'XCODE_RUNNER_HOST_STORAGE_DIRECTORY'):
             if key in os.environ:
                 env[key] = os.environ[key]
+        # Forward only the host's package configuration into this isolated Actions environment.
+        if 'SWIFTPM_MIRROR_CONFIG' in os.environ and 'XCODE_RUNNER_HOST_ROOT' in env:
+            for prefix in ('', 'TEST_RUNNER_'):
+                env[prefix + 'SWIFTPM_MIRROR_CONFIG'] = os.environ['SWIFTPM_MIRROR_CONFIG']
+                env[prefix + 'GIT_CONFIG_COUNT'] = '1'
+                env[prefix + 'GIT_CONFIG_KEY_0'] = 'include.path'
+                env[prefix + 'GIT_CONFIG_VALUE_0'] = str(Path(env['XCODE_RUNNER_HOST_ROOT']) / 'github-packages.gitconfig')
         if plan:
             env['XCODE_RUNNER_PLAN'] = '1'
         if 'XCODE_RUNNER_HOST_ROOT' in env:

@@ -283,11 +283,25 @@ package struct HostInstallation: Sendable {
         }
     }
 
+    package var packageRepositories: URL { hostRoot.appending(path: "github-package-repositories.json") }
+    package var packageGitConfiguration: URL { hostRoot.appending(path: "github-packages.gitconfig") }
+
     package func environment(for storage: Storage) -> [String: String] {
-        [
+        var values = [
             "XCODE_RUNNER_HOST_STORAGE_DIRECTORY": storage.directory.path(percentEncoded: false),
             "XCODE_RUNNER_HOST_ROOT": hostRoot.path(percentEncoded: false),
         ]
+        guard FileManager.default.fileExists(atPath: packageRepositories.path) else { return values }
+        for prefix in ["", "TEST_RUNNER_"] {
+            let countKey = prefix + "GIT_CONFIG_COUNT"
+            let count = Int(ProcessInfo.processInfo.environment[countKey] ?? "0") ?? 0
+            values[countKey] = String(count + 1)
+            values[prefix + "GIT_CONFIG_KEY_\(count)"] = "include.path"
+            values[prefix + "GIT_CONFIG_VALUE_\(count)"] = packageGitConfiguration.path
+            values[prefix + "SWIFTPM_MIRROR_CONFIG"] = packageGitConfiguration.deletingPathExtension()
+                .appendingPathExtension("json").path
+        }
+        return values
     }
 
     package static func hostedConfiguration(

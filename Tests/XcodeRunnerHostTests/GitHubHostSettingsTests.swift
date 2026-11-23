@@ -11,6 +11,44 @@ struct GitHubHostSettingsTests {
         await model.shutDown()
     }
 
+    @Test func hostedPackagesUseOnlyApprovedPrivateRepositories() async throws {
+        struct Mirrors: Decodable {
+            struct Entry: Decodable { let original: String; let mirror: URL }
+            let object: [Entry]
+        }
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = HostInstallation(homeDirectory: root)
+        try FileManager.default.createDirectory(at: installation.hostRoot, withIntermediateDirectories: true)
+        let auth = GitHubAuthentication(clientID: "app", client: GitHubClient(), store: MemorySecretStore())
+        let relay = GitHubPackageAccess(installation: installation, authentication: auth)
+        let storage = HostInstallation.Storage(directory: root.appending(path: "Storage"))
+        #expect(installation.environment(for: storage)["SWIFTPM_MIRROR_CONFIG"] == nil)
+        try JSONEncoder().encode(["owner/library", "owner/Public"]).write(to: installation.packageRepositories)
+        try await relay.update(repositories: [
+            .init(id: 1, fullName: "owner/Library", isPrivate: true),
+            .init(id: 2, fullName: "owner/Public", isPrivate: false),
+            .init(id: 3, fullName: "owner/LibraryTools", isPrivate: true),
+        ])
+        do {
+            let path = try #require(installation.environment(for: storage)["SWIFTPM_MIRROR_CONFIG"])
+            let mirrors = try JSONDecoder().decode(Mirrors.self, from: Data(contentsOf: URL(filePath: path)))
+            let urls = Set(mirrors.object.map(\.original))
+            #expect(urls == Set(["Library", "library"].flatMap { name in
+                ["https://github.com/owner/\(name)", "https://github.com/owner/\(name).git"]
+            }))
+            let mirror = try #require(mirrors.object.first?.mirror)
+            let (_, response) = try await URLSession.shared.data(from: mirror.appending(path: "info/refs"))
+            #expect((response as? HTTPURLResponse)?.statusCode == 403)
+            try await relay.update(repositories: [])
+            #expect(!FileManager.default.fileExists(atPath: path))
+            #expect(!FileManager.default.fileExists(atPath: installation.packageGitConfiguration.path))
+        } catch {
+            await relay.stop()
+            throw error
+        }
+    }
+
     @Test(arguments: [false, true])
     func unsuccessfulSignInKeepsTheRepositorySelection(isCancelled: Bool) async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)

@@ -312,6 +312,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         }
         super.init()
         if settingsService {
+            settings.github.enablePackageAccess(on: installation)
             settingsServer = HostSettingsServer(settings: settings)
             // Only the installed LaunchAgent starts the host with its settings service, and launchd starts that host
             // again after it exits unsuccessfully.
@@ -354,6 +355,10 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 }
                 try Task.checkCancellation()
                 environment = installation.environment(for: storage)
+                if environment["SWIFTPM_MIRROR_CONFIG"] != nil {
+                    await settings.github.restore()
+                    try Task.checkCancellation()
+                }
                 settings.storageDidBecomeAvailable(storage)
                 settings.hostState = .running
                 startRunnerMonitoring()
