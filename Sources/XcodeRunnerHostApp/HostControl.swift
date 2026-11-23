@@ -748,11 +748,9 @@ struct HostControl: AsyncParsableCommand {
 
     /// Resolve once per command so a pairing change cannot redirect the second half of an operation.
     @MainActor static func destination() throws -> PairedMac? {
-        if runsHost { return nil }
-        guard let host = try RemoteOperationClient.pairedHost(installation: HostInstallation()) else {
-            throw HostSettingsError("Pair a host in XcodeHomeRunner first.")
-        }
-        return host
+        if let host = try RemoteOperationClient.pairedHost(installation: HostInstallation()) { return host }
+        guard runsHost else { throw HostSettingsError("Pair a host in XcodeHomeRunner first.") }
+        return nil
     }
 
     /// The host paired with this dashboard.

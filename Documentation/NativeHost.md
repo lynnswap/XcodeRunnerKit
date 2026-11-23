@@ -265,9 +265,10 @@ package sources.
 
 ## Commands for the host
 
-Use the CLI embedded in the installed app. Administration commands on a dashboard address its paired host automatically.
-On an installed host they address this Mac. Use `--mac` to address one of its managed runners.
-Use the identifiers returned by `host runners`.
+The following commands in the bundled CLI address the dashboard’s paired host, including on a Mac that also runs jobs.
+On an installed Mac without a dashboard pairing they address the local host. Use `--mac` with a managed runner’s
+ID from `host runners` to address that runner. The pairing commands and the local settings commands below
+operate on the Mac where you run them.
 
 ```sh
 xcode-runner host runners         # runner Macs and free Xcode slots, including the host itself
