@@ -172,7 +172,11 @@ final class RelayedMacs: MacList {
             // The host may still be pairing for this attempt, with no dashboard left to show the code: this sheet was
             // cancelled, or a request to the host failed. The task that ends here may be cancelled, so another one
             // tells the host.
-            Task { [host] in _ = try? await hosts.requestManagedMacs(.cancelPairing(attempt: attempt), from: host) }
+            Task {
+                if let report = try? await hosts.requestManagedMacs(.cancelPairing(attempt: attempt), from: host) {
+                    show(report)
+                }
+            }
             throw error
         }
     }
