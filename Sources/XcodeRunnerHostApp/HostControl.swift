@@ -13,7 +13,7 @@ struct HostControl: AsyncParsableCommand {
         commandName: "xcode-runner host",
         abstract: "Read and change the host on this Mac.",
         subcommands: [
-            Status.self, Runners.self, Configure.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self, Macs.self,
+            Status.self, Runners.self, Configure.self, Settings.self, Pause.self, Resume.self, Restart.self, Labels.self, GitHub.self, Pairing.self, Macs.self,
         ]
     )
 
@@ -87,6 +87,39 @@ struct HostControl: AsyncParsableCommand {
         func run() async throws {
             for request in settingsRequests { try await HostControl.perform(request, host: host.host, mac: mac.mac) }
             if let selection { try await HostControl.perform(.github(.applySelection(selection)), on: host.host) }
+        }
+    }
+
+    struct Settings: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(subcommands: [PackageAccess.self])
+    }
+
+    struct PackageAccess: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Read or change the repositories jobs can fetch with the host’s GitHub sign-in.",
+            subcommands: [List.self, Add.self, Remove.self]
+        )
+
+        static func perform(_ change: PackageAccessChange, host: String?) async throws {
+            guard case .packageRepositories(let names) = try await HostControl.reply(to: .packageAccess(change), on: host) else {
+                throw HostControl.unexpectedAnswer
+            }
+            try HostControl.write(names)
+        }
+
+        struct List: AsyncParsableCommand {
+            @OptionGroup var target: HostOption
+            func run() async throws { try await perform(.list, host: target.host) }
+        }
+        struct Add: AsyncParsableCommand {
+            @Argument(help: "GitHub dependency repository, as OWNER/REPO.") var repository: String
+            @OptionGroup var target: HostOption
+            func run() async throws { try await perform(.add(repository), host: target.host) }
+        }
+        struct Remove: AsyncParsableCommand {
+            @Argument(help: "GitHub dependency repository, as OWNER/REPO.") var repository: String
+            @OptionGroup var target: HostOption
+            func run() async throws { try await perform(.remove(repository), host: target.host) }
         }
     }
 

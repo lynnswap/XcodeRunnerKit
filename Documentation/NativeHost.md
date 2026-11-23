@@ -238,26 +238,29 @@ Xcode. **System selection** uses `xcode-select`.
 ### Private SwiftPM dependencies
 
 Install the XcodeHomeRunner GitHub App on the dependency repositories and grant
-**Contents: read**. On the runner Mac, sign in to the app. List the
-packages jobs may fetch in
-`~/Library/Application Support/XcodeRunnerKit/github-package-repositories.json`.
-Use the owner and repository names from their package URLs.
+**Contents: read**. Sign in to GitHub on the managing host, then allow
+each dependency that jobs on this host and its runners may read. From a
+paired dashboard, run the embedded CLI with the name of that host.
 
-```json
-["my-org/PrivateLibrary", "my-org/DesignKit"]
+```sh
+xcode-runner host settings package-access add my-org/DesignKit --host "$host"
+xcode-runner host settings package-access list --host "$host"
+xcode-runner host settings package-access remove my-org/DesignKit --host "$host"
 ```
 
-Choose **Reload** under **Repositories** to apply the list. Keep the ordinary
-GitHub HTTPS package URLs in the project. Jobs on this signed-in Mac receive
-the Git configuration automatically. Adding a dependency to this list
-does not register a GitHub Actions runner for it.
+On the host itself, omit `--host`. Keep the normal GitHub HTTPS package URLs
+in the project. Both dashboard builds and GitHub Actions jobs receive the Git
+configuration on the executing Mac. For a managed runner, the signed app asks
+its managing host to fetch the package over their pairing. The host checks the
+current grant for each request and keeps its GitHub credentials on that Mac.
+Removing a grant takes effect on the next fetch through the host. Jobs that
+already downloaded a dependency can still read their copy.
 
-The host authenticates Git fetches to GitHub through a read-only relay bound to
-its loopback interface. A job can read the listed packages. The GitHub user
-token stays with the host. Each runner using these credentials needs its own
-authorized sign-in. A dashboard submits its checkout without credentials.
-Jobs share the runner account’s access to files, including the approved
-package sources.
+The CLI reads existing entries in the managing host’s
+`github-package-repositories.json`. When updating a group of Macs, update
+the host and runners and add any dependencies previously allowed only on an
+individual runner to the managing host. Select repositories for Actions runner
+registration separately under **Repositories**.
 
 ## Commands for the host
 

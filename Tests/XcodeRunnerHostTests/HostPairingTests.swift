@@ -26,7 +26,7 @@ struct HostPairingTests {
 
     /// A Mac that answers requests with `handle`, in place of a paired Mac's settings.
     private func listener(
-        key: SymmetricKey,
+        key: SymmetricKey, identity: String = "listener",
         handle: @escaping @Sendable (
             HostLinkRequest, _ reply: @escaping @Sendable (HostLinkReply) async throws -> Void,
             _ next: @escaping @Sendable () async throws -> HostLinkRequest
@@ -35,7 +35,7 @@ struct HostPairingTests {
         let (ports, port) = AsyncStream<NWEndpoint.Port>.makeStream()
         let task = Task {
             try await HostLink.listen(
-                key: key, identity: "listener", advertising: nil, ready: { port.yield($0) }, connected: { _ in }, handle: handle
+                key: key, identity: identity, advertising: nil, ready: { port.yield($0) }, connected: { _ in }, handle: handle
             )
         }
         var found = ports.makeAsyncIterator()
@@ -256,6 +256,95 @@ struct HostPairingTests {
         #expect(settings.readAt == readAt)
 
         await macs.shutDown()
+    }
+
+    @Test func managedRunnerFetchesOnlyPackagesGrantedByItsHost() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = managedMac(named: "Host", at: root)
+        let runner = managedMac(at: root.appending(path: "Runner"))
+        runner.github.enablePackageAccess(on: runner.installation)
+        let mac = try await pair(host.managedMacs, with: runner.management)
+        try await waitUntil { runner.management.managementPort != nil }
+        await host.managedMacs.checkStatus(of: mac.id, at: try local(runner.management.managementPort))
+        let name = "owner/Library"
+        guard case .packageRepositories([name]) = await host.github.changePackageAccess(.add(name)) else {
+            Issue.record("The manager could not save the package grant.")
+            return
+        }
+        #expect(runner.github.managedPackageRepositories == [name])
+        #expect(try runner.github.packageRepositories().isEmpty)
+
+        // Hold the last bytes until the runner has received the start of the Git response.
+        let result = root.appending(path: "response")
+        let relay = Process()
+        relay.executableURL = URL(filePath: "/usr/bin/python3")
+        relay.arguments = ["-I", "-c", """
+            from http.server import BaseHTTPRequestHandler, HTTPServer
+            import os, sys, time
+            class Git(BaseHTTPRequestHandler):
+                def log_message(self, *args): pass
+                def do_POST(self):
+                    body = self.rfile.read(int(self.headers['Content-Length']))
+                    valid = (self.path == '/owner/Library.git/git-upload-pack' and
+                             self.headers['Authorization'] == 'Bearer test' and self.headers['Git-Protocol'] == 'version=2')
+                    self.send_response(200 if valid else 403)
+                    self.send_header('Content-Type', 'application/x-git-upload-pack-result')
+                    self.end_headers()
+                    self.wfile.write(body[:65536])
+                    self.wfile.flush()
+                    deadline = time.monotonic() + 10
+                    while os.stat(sys.argv[1]).st_size < 65536:
+                        if time.monotonic() > deadline: return
+                        time.sleep(.02)
+                    self.wfile.write(body[65536:])
+            server = HTTPServer(('127.0.0.1', 0), Git)
+            print(server.server_port, flush=True)
+            server.timeout = 30
+            server.handle_request()
+            """, result.path(percentEncoded: false)]
+        let portPipe = Pipe()
+        relay.standardOutput = portPipe
+        try relay.run()
+        defer { if relay.isRunning { relay.terminate() } }
+        portPipe.fileHandleForWriting.closeFile()
+        let portText = String(decoding: portPipe.fileHandleForReading.availableData, as: UTF8.self)
+        let port = try #require(UInt16(portText.trimmingCharacters(in: .whitespacesAndNewlines)))
+        let config = host.installation.packageGitConfiguration.deletingPathExtension().appendingPathExtension("json")
+        try JSONSerialization.data(withJSONObject: ["port": Int(port), "authorization": "Bearer test"]).write(to: config)
+
+        let (server, endpoint) = try await listener(key: mac.pairing.symmetricKey, identity: mac.id.uuidString) {
+            request, reply, next in
+            try await host.managedMacs.answerPackageRequest(request, from: mac.pairing, reply: reply, next: next)
+        }
+        defer { server.cancel() }
+        let body = Data((0..<(96 * 1024)).map { UInt8(truncatingIfNeeded: $0) })
+        let source = root.appending(path: "request")
+        try body.write(to: source)
+        try Data().write(to: result)
+        let input = try FileHandle(forReadingFrom: source)
+        let output = try FileHandle(forWritingTo: result)
+        defer { try? input.close(); try? output.close() }
+        let fetch = PackageFetch(repository: name, operation: .uploadPack, protocolV2: true, gzip: false)
+        try await fetch.transfer(to: endpoint, manager: mac.pairing, input: input, output: output)
+        let received = try Data(contentsOf: result)
+        let newline = try #require(received.firstIndex(of: 10))
+        let headers = try JSONDecoder().decode(PackageFetch.Response.self, from: received[..<newline])
+        #expect(headers.status == 200)
+        #expect(received.suffix(from: newline + 1) == body)
+
+        guard case .packageRepositories([]) = await host.github.changePackageAccess(.remove(name)) else {
+            Issue.record("The manager could not remove the package grant.")
+            return
+        }
+        #expect(runner.github.managedPackageRepositories.isEmpty)
+        let denied = await #expect(throws: HostSettingsError.self) {
+            try await fetch.transfer(to: endpoint, manager: mac.pairing, input: input, output: output)
+        }
+        #expect(denied?.message.contains("not allowed") == true)
+        await runner.github.shutDown()
+        await runner.management.shutDown()
+        await host.managedMacs.shutDown()
     }
 
     @Test func damagedJobDefaultsDoNotPreventEndingManagement() async throws {

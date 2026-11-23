@@ -69,7 +69,7 @@ final class OverviewModel: PaneSaving {
     /// be told. Removing one of the host's Macs returns to this pane, where its notice stays visible.
     var notices: [String] {
         if case .thisMac(let settings) = source {
-            return settings.managedMacs.jobOptionsSyncErrors
+            return settings.managedMacs.jobOptionsSyncErrors + settings.managedMacs.packageSyncErrors
         }
         guard case .host(let hosts, let host) = source, let answer = hosts.answer(of: host.id) else { return [] }
         return [answer.settings.githubError, hosts.macsManaged(by: host.id).message].compactMap { $0 }
@@ -227,7 +227,7 @@ final class OverviewModel: PaneSaving {
                     switch source {
                     case .thisMac(let settings):
                         try settings.saveJobOptions(edits)
-                        await settings.managedMacs.distributeJobOptions()
+                        await settings.managedMacs.distributeSettings()
                     case .host(let hosts, let host):
                         try await hosts.saveJobOptions(edits, of: host.id)
                     }

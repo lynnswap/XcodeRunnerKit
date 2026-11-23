@@ -143,7 +143,13 @@ struct Host: AsyncParsableCommand {
     }
 
     struct Settings: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Inspect or update host settings as JSON.", subcommands: [Get.self, Update.self])
+        static let configuration = CommandConfiguration(abstract: "Inspect or update host settings as JSON.", subcommands: [Get.self, Update.self, PackageAccess.self])
+
+        struct PackageAccess: ParsableCommand {
+            static let configuration = CommandConfiguration(abstract: "List, add, or remove private package repositories on the managing host.")
+            @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
+            func run() throws { try HostApp.run(["settings", "package-access"] + arguments) }
+        }
 
         struct Get: AsyncParsableCommand {
             @Option(help: "Return only this scope: pool, buildService, xcode, storage, githubRepositories, runnerLabels, or paused.")

@@ -95,6 +95,11 @@ final class HostManagement {
     }
 
     /// Accepts the connections of the Macs paired with this Mac.
+    private func managementChanged() {
+        settings?.refreshJobOptions()
+        settings?.github.packageManagerChanged()
+    }
+
     func start() {
         if let manager { listen(to: manager, as: .manager) }
         for dashboard in dashboards { listen(to: dashboard, as: .dashboard) }
@@ -131,12 +136,27 @@ final class HostManagement {
                         } else {
                             try await reply(.activity(await settings.resourceHistory.samples(after: clock)))
                         }
+                    case .packageAccess(let change):
+                        guard role == .dashboard, let settings = await self.settings else {
+                            return try await reply(.refused("Edit package access on the managing host."))
+                        }
+                        try await reply(await settings.github.changePackageAccess(change))
+                    case .fetchPackage, .packageData, .packageEnd:
+                        try await reply(.refused("Use the managing host’s package service."))
                     case .runnerSlots:
                         guard let settings = await self.settings else {
                             try await reply(.refused("\(self.name) cannot report runner slots."))
                             return
                         }
                         try await reply(.runnerSlots(await settings.readRunnerSlots()))
+                    case .syncPackageRepositories(let names):
+                        guard role == .manager, let settings = await self.settings else {
+                            return try await reply(.refused("Only the managing host can supply package repositories."))
+                        }
+                        do {
+                            try await settings.github.routePackages(names, from: pairing.id)
+                            try await reply(.settings(await HostSettingsReport(settings)))
+                        } catch { try await reply(.refused(error.localizedDescription)) }
                     case .syncJobOptions(let options):
                         guard role == .manager, let settings = await self.settings else {
                             try await reply(.refused("Only the managing host can supply job defaults."))
@@ -393,7 +413,7 @@ final class HostManagement {
         if open.role == .manager, let previous = manager { stopListening(to: previous.id) }
         manager = record.manager
         dashboards = record.dashboards
-        if open.role == .manager { settings?.refreshJobOptions() }
+        if open.role == .manager { managementChanged() }
         listen(to: pairing, as: open.role)
     }
 
@@ -423,7 +443,7 @@ final class HostManagement {
         let managerChanged = manager?.id != record.manager?.id
         manager = record.manager
         dashboards = record.dashboards
-        if managerChanged { settings?.refreshJobOptions() }
+        if managerChanged { managementChanged() }
         errorMessage = nil
         return .success(())
     }

@@ -95,6 +95,8 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
             let reply = await settings.answer(request)
             let followUp: FollowUp = { await settings.finish(request, answeredWith: reply, registersRunners: true) }
             return (reply, followUp)
+        case .packageAccess(let change):
+            return (await github.changePackageAccess(change), nil)
         case .github(let request):
             let reply = await github.answer(request)
             // The selection is saved, and its runners are registered and removed after the answer.
