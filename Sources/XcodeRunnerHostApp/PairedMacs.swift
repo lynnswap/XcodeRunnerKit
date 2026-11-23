@@ -27,6 +27,8 @@ final class PairedMacSettings {
     let runnerSave = SettingsSave<RunnerSetting>()
     var jobOptionsSyncError: String?
     var packageSyncError: String?
+    /// Changes when a settings write finishes, including one whose acknowledgment was lost.
+    var settingsWriteRevision: UInt64 = 0
     var storageDirectoryInput = ""
     private(set) var isSaving = false
     private(set) var isSavingStorage = false
@@ -817,10 +819,14 @@ final class PairedMacs: MacList {
             }
             initial = nil
             // The other group may have changed while packages were synchronizing. Read a fresh report for this phase.
+            let revision = settings[mac.id]?.settingsWriteRevision
+            let joiningOlderRead = updates[SyncTarget(mac: mac.id, group: .jobOptions)] != nil
             let current = try await synchronize(.jobOptions, of: mac, at: endpoint)
             guard endpoints[mac.id] == endpoint else { throw HostLinkError.unreachable("\(mac.name)'s address changed.") }
             // A matching snapshot can predate a write still in flight. Join it before deciding what the job will use.
-            if updates.keys.contains(where: { $0.mac == mac.id }) { continue }
+            if joiningOlderRead || revision != settings[mac.id]?.settingsWriteRevision || updates.keys.contains(where: { $0.mac == mac.id }) {
+                continue
+            }
             if try change(for: .jobOptions, in: current, owner: owner, mac: mac) != nil { continue }
             if packagesApplied {
                 do {
@@ -881,7 +887,11 @@ final class PairedMacs: MacList {
             guard endpoints[mac.id] == endpoint else { throw HostLinkError.unreachable("\(mac.name)'s address changed.") }
             while let request = try change(for: group, in: report, owner: owner, mac: mac) {
                 guard endpoints[mac.id] == endpoint else { throw HostLinkError.unreachable("\(mac.name)'s address changed.") }
-                let reply = try await send(request, to: mac, at: endpoint)
+                let reply: HostLinkReply
+                do {
+                    defer { settings[mac.id]?.settingsWriteRevision &+= 1 }
+                    reply = try await send(request, to: mac, at: endpoint)
+                }
                 if case .refused(let reason) = reply { throw HostLinkError.refused(reason) }
                 guard case .settings(let saved) = reply else { throw HostLinkError.unexpectedReply }
                 switch request {

@@ -251,12 +251,37 @@ struct HostPairingTests {
             }
             return await worker.answer(.read)
         }
+        let holdRead = Mutex(false)
+        let captured = AsyncStream<Void>.makeStream()
+        let release = AsyncStream<Void>.makeStream()
         let runner = try await listener(key: mac.pairing.symmetricKey, identity: mac.id.uuidString) { request, reply, _ in
-            try await reply(try await answer(request))
+            let snapshot = try await answer(request)
+            if case .settings(.read) = request, holdRead.withLock({ value in
+                let hold = value
+                value = false
+                return hold
+            }) {
+                captured.continuation.yield(())
+                for await _ in release.stream {}
+            }
+            try await reply(snapshot)
         }
         defer { runner.task.cancel() }
         await macs.checkStatus(of: mac.id, at: runner.endpoint)
         #expect(worker.jobOptions?.environment == second[.environment])
+        #expect(worker.github.packageRouting == .applied(grant))
+
+        // While the job-defaults read is in transit, deliver a removal and save a new grant of the same repository.
+        let report = HostSettingsReport(worker)
+        holdRead.withLock { $0 = true }
+        let dispatch = Task { try await macs.synchronizedSettings(of: mac, at: runner.endpoint, report: report) }
+        var snapshots = captured.stream.makeAsyncIterator()
+        _ = await snapshots.next()
+        _ = await manager.github.changePackageAccess(.remove(grant[0]))
+        #expect(worker.github.packageRouting == .applied([]))
+        try JSONEncoder().encode(grant).write(to: manager.installation.packageRepositories, options: .atomic)
+        release.continuation.finish()
+        _ = try await dispatch.value
         #expect(worker.github.packageRouting == .applied(grant))
         await worker.github.shutDown()
         await worker.management.shutDown()
