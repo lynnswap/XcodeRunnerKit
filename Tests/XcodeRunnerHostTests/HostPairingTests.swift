@@ -325,6 +325,33 @@ struct HostPairingTests {
         await macs.shutDown()
     }
 
+    @Test func dispatchSkipsARunnerAfterOneUnansweredSettingsRead() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manager = managedMac(at: root.appending(path: "Manager"))
+        let worker = managedMac(at: root.appending(path: "Worker"))
+        let macs = manager.managedMacs
+        let mac = try await pair(macs, with: worker.management)
+        let unanswered = Mutex<Int?>(nil)
+        let runner = try await listener(key: mac.pairing.symmetricKey, identity: mac.id.uuidString) { _, reply, _ in
+            if unanswered.withLock({ count in
+                guard let current = count else { return false }
+                count = current + 1
+                return true
+            }) { return }
+            try await reply(await worker.answer(.read))
+        }
+        defer { runner.task.cancel() }
+        await macs.checkStatus(of: mac.id, at: runner.endpoint)
+        unanswered.withLock { $0 = 0 }
+        await #expect(throws: HostLinkError.timedOut) {
+            try await macs.synchronizedSettings(of: mac, at: runner.endpoint)
+        }
+        #expect(unanswered.withLock { $0 } == 1)
+        await worker.management.shutDown()
+        await macs.shutDown()
+    }
+
     @Test func theManagingHostReadsAndChangesAPairedMacsSettings() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

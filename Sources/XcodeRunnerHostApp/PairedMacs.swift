@@ -848,6 +848,9 @@ final class PairedMacs: MacList {
                 _ = try await synchronize(.packages, of: mac, at: endpoint, report: initial)
                 packagesApplied = true
                 if endpoints[mac.id] == endpoint { settings[mac.id]?.packageSyncError = nil }
+            } catch HostLinkError.timedOut {
+                // Both groups need the same settings read. A runner that never answered it cannot take this job.
+                throw HostLinkError.timedOut
             } catch {
                 packagesApplied = false
                 if endpoints[mac.id] == endpoint { settings[mac.id]?.packageSyncError = error.localizedDescription }
@@ -954,6 +957,8 @@ final class PairedMacs: MacList {
                         }
                     }
                     reply = try await send(request, to: mac, at: endpoint)
+                } catch HostLinkError.timedOut where group == .packages {
+                    throw HostSettingsError("The runner did not confirm its package routes in time.")
                 }
                 if case .refused(let reason) = reply { throw HostLinkError.refused(reason) }
                 guard case .settings(let saved) = reply else { throw HostLinkError.unexpectedReply }
