@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Network
+import Observation
 import Security
 import Synchronization
 import Testing
@@ -128,6 +129,52 @@ struct HostPairingTests {
         await macs.shutDown()
     }
 
+    @Test func aMacChangesEndpointsWhileReceivingJobDefaults() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manager = managedMac(at: root.appending(path: "Manager"))
+        let worker = managedMac(at: root.appending(path: "Worker"))
+        let macs = manager.managedMacs
+        let mac = try await pair(macs, with: worker.management)
+        try manager.saveJobOptions([.environment: [.init(name: "LANG", value: "en")]])
+
+        @Sendable @MainActor func answer(_ request: HostLinkRequest) async throws -> HostLinkReply {
+            if case .syncJobOptions(let options) = request { try worker.applyJobOptions(options, from: mac.id) }
+            return await worker.answer(.read)
+        }
+
+        let requested = AsyncStream<Void>.makeStream()
+        let release = AsyncStream<Void>.makeStream()
+        let old = try await listener(key: mac.pairing.symmetricKey, identity: mac.id.uuidString) { request, reply, _ in
+            if case .syncJobOptions = request {
+                requested.continuation.yield(())
+                for await _ in release.stream {}
+            }
+            try await reply(try await answer(request))
+        }
+        let replacement = try await listener(key: mac.pairing.symmetricKey, identity: mac.id.uuidString) { request, reply, _ in
+            let snapshot = try await answer(request)
+            // This first read matches the latest defaults, but predates the write accepted at the old endpoint.
+            release.continuation.finish()
+            try await reply(snapshot)
+        }
+        let first = Task { await macs.checkStatus(of: mac.id, at: old.endpoint) }
+        var arrivals = requested.stream.makeAsyncIterator()
+        _ = await arrivals.next()
+        try manager.saveJobOptions([.environment: []])
+        await macs.checkStatus(of: mac.id, at: replacement.endpoint)
+        release.continuation.finish()
+        await first.value
+
+        #expect(macs.status(of: mac.id) == .online)
+        #expect(worker.jobOptions?.environment == [])
+        #expect(macs.settingsSyncErrors.isEmpty)
+        old.task.cancel()
+        replacement.task.cancel()
+        await worker.management.shutDown()
+        await macs.shutDown()
+    }
+
     @Test func theManagingHostReadsAndChangesAPairedMacsSettings() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -139,7 +186,10 @@ struct HostPairingTests {
         try await waitUntil { managed.management.managementPort != nil }
         let endpoint = try local(managed.management.managementPort)
 
-        await macs.checkStatus(of: mac.id, at: endpoint)
+        // Leaving the pane as its shared read starts must still deliver the answer to the other observers.
+        let read = Task { await macs.checkStatus(of: mac.id, at: endpoint) }
+        withObservationTracking { _ = macs.status(of: mac.id) } onChange: { read.cancel() }
+        await read.value
         let settings = try #require(macs.settings[mac.id])
         #expect(macs.status(of: mac.id) == .online)
         #expect(settings.report?.poolStatus?.configuration.maximumConcurrentJobs == HostInstallation.defaultMaximumConcurrentJobs)
@@ -827,8 +877,14 @@ struct HostPairingTests {
         #expect(settings.github?.addOrganizationURL == URL(string: "https://github.com/apps/host-app/installations/new"))
         await dashboard.reloadRepositories(of: shown.id)
         #expect(settings.github?.selectableRepositories == [repository, organizationRepository])
-        settings.selectedRepositoryIDs = [organizationRepository.id]
-        await dashboard.applyRepositorySelection(of: shown.id)
+        let overview = OverviewModel(hosts: dashboard, host: shown, addMac: {})
+        overview.selection = [organizationRepository.id]
+        overview.save()
+        let reopened = OverviewModel(hosts: dashboard, host: shown, addMac: {})
+        #expect(reopened.isSaving)
+        try await waitUntil { !reopened.isSaving }
+        // The reply acknowledges the write before the dashboard has read the result of runner registration.
+        #expect(settings.github?.isSavingSelection == true)
         #expect(settings.githubError == nil)
         #expect(settings.github?.savedRepositoryIDs == [organizationRepository.id])
         let record = host.installation.hostRoot.appending(path: "github-host.json")
@@ -839,6 +895,18 @@ struct HostPairingTests {
         try await waitUntil { !host.github.isSavingSelection }
         await dashboard.checkStatus(of: shown.id, at: endpoint)
         #expect(settings.github?.errorMessage?.contains("pending until host storage is ready") == true)
+
+        // Another dashboard edits the host before this one retries registration alongside a build option.
+        let latest: Set<Int> = [repository.id, organizationRepository.id]
+        try host.github.saveSelection(latest)
+        let option = HostJobOptions.Entry(name: "LANG", value: "en_US.UTF-8")
+        reopened[jobOptions: .environment] = [option]
+        reopened.save()
+        try await waitUntil { !reopened.isSaving }
+        #expect(host.github.savedRepositoryIDs == latest)
+        #expect(reopened.selection == latest)
+        try await waitUntil { !host.github.isSavingSelection }
+        #expect(host.jobOptions?.environment == [option])
 
         await dashboard.signOut(of: shown.id, confirmedLogin: "previous-account")
         #expect(settings.github?.accountLogin == "owner")

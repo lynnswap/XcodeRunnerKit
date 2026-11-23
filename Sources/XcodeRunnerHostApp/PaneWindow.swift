@@ -20,10 +20,8 @@ protocol PaneWindowModel: AnyObject, Observable {
 protocol PaneSaving: AnyObject, Observable {
     /// Whether the pane has a value to save now: an edited one, or one whose last save failed.
     var canSave: Bool { get }
-    /// Whether a save from the pane runs now.
-    var isSaving: Bool { get }
-    /// How many of the values of the running save are saved, and how many it saves in all.
-    var saveProgress: (completed: Int, total: Int) { get }
+    /// Completed and total writes for the current save, or nil while idle.
+    var saveProgress: (completed: Int, total: Int)? { get }
     /// Whether a value in the pane differs from the saved one.
     var hasEdits: Bool { get }
     /// Shows the saved values again in place of the edited ones.
@@ -32,52 +30,20 @@ protocol PaneSaving: AnyObject, Observable {
     func save()
 }
 
-/// A thin bar under the toolbar that fills while the shown pane saves, as a browser's does while a page loads. A save
-/// does not tell how far a value is, so the bar moves on by itself within each value and jumps when one is saved.
+extension PaneSaving {
+    var isSaving: Bool { saveProgress != nil }
+}
+
 private struct SaveProgressBar: View {
     let saving: (any PaneSaving)?
-    /// When the save that the bar shows began. `nil` hides the bar.
-    @State private var startedAt: Date?
-    /// Whether the save ended, so that the bar fills before it fades.
-    @State private var isComplete = false
 
     var body: some View {
-        let isSaving = saving?.isSaving == true
-        TimelineView(.animation(paused: startedAt == nil || isComplete)) { timeline in
-            GeometryReader { geometry in
-                Capsule()
-                    .fill(.tint)
-                    .frame(width: geometry.size.width * fraction(at: timeline.date))
-                    .animation(.easeOut(duration: 0.25), value: saving?.saveProgress.completed)
-                    .animation(.easeOut(duration: 0.25), value: isComplete)
-            }
+        if let progress = saving?.saveProgress {
+            ProgressView(value: progress.total > 1 ? Double(progress.completed) : nil, total: Double(progress.total))
+                .progressViewStyle(.linear)
+                .controlSize(.mini)
+                .accessibilityLabel("Saving")
         }
-        .frame(height: 3)
-        .opacity(startedAt == nil ? 0 : 1)
-        .accessibilityHidden(true)
-        .onChange(of: isSaving, initial: true) { _, isSaving in
-            if isSaving {
-                isComplete = false
-                startedAt = .now
-            } else if startedAt != nil {
-                isComplete = true
-                Task {
-                    try? await Task.sleep(for: .milliseconds(450))
-                    // A save that began meanwhile keeps its bar.
-                    if isComplete { withAnimation(.easeOut(duration: 0.3)) { startedAt = nil } }
-                }
-            }
-        }
-    }
-
-    private func fraction(at date: Date) -> Double {
-        guard let startedAt, let saving else { return 0 }
-        if isComplete { return 1 }
-        let progress = saving.saveProgress
-        let total = Double(max(progress.total, 1))
-        // Within the value being saved the bar nears its end without reaching it.
-        let within = 0.9 * (1 - exp(-date.timeIntervalSince(startedAt) / 3))
-        return min((Double(progress.completed) + within) / total, 1)
     }
 }
 
@@ -87,26 +53,19 @@ private struct SaveToolbarButton: View {
     let saving: (any PaneSaving)?
 
     var body: some View {
-        let isSaving = saving?.isSaving == true
-        ZStack {
-            if isSaving {
-                ProgressView()
-                    .controlSize(.small)
-                    .accessibilityLabel("Saving")
-                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
-            } else {
-                Button("Save") { saving?.save() }
-                    // The toolbar item draws the button's shape, tinted while there is a value to save.
-                    .buttonStyle(.borderless)
-                    .disabled(saving?.canSave != true)
-                    // The host's own window has no menu bar, so the button takes the shortcut itself.
-                    .keyboardShortcut("s", modifiers: .command)
-                    .help("Save the changes in this pane")
-                    .accessibilityIdentifier("save-pane")
-                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
-            }
+        if saving?.isSaving == true {
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityLabel("Saving")
+        } else {
+            Button("Save") { saving?.save() }
+                .buttonStyle(.borderless)
+                .disabled(saving?.canSave != true)
+                // The host's own window has no menu bar, so the button takes the shortcut itself.
+                .keyboardShortcut("s", modifiers: .command)
+                .help("Save the changes in this pane")
+                .accessibilityIdentifier("save-pane")
         }
-        .animation(.default, value: isSaving)
     }
 }
 
@@ -123,6 +82,7 @@ final class PaneContainerViewController: NSViewController {
 
     override func loadView() {
         view = NSView()
+        progressBar.sizingOptions = [.intrinsicContentSize]
         progressBar.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(progressBar)
         NSLayoutConstraint.activate([
@@ -164,9 +124,6 @@ class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSMenuI
     private var shownPane: AnyHashable??
     /// What the toolbar's Save button saves: the shown pane's values, when it has any.
     private var saving: (any PaneSaving)?
-    /// The view controllers of panes that were left while they saved. A pane that is shown again before its save
-    /// ended is the same one, so that the values still to save take no edits.
-    private var panesLeftSaving: [AnyHashable?: NSViewController] = [:]
     private let saveItem = NSToolbarItem(itemIdentifier: NSToolbarItem.Identifier("save"))
     private let saveButton = NSHostingView(rootView: SaveToolbarButton(saving: nil))
     /// Drops the shown pane's edits. The toolbar shows it only while the pane has any.
@@ -200,12 +157,8 @@ class PaneSplitViewController: NSSplitViewController, NSToolbarDelegate, NSMenuI
         }
         self.title = title
         guard pane != shownPane else { return }
-        if let shown = shownPane, let left = detail.children.first, saving?.isSaving == true {
-            panesLeftSaving[shown] = left
-        }
-        panesLeftSaving = panesLeftSaving.filter { ($0.value as? any SavingPaneViewController)?.saving.isSaving == true }
         shownPane = pane
-        let controller = panesLeftSaving.removeValue(forKey: pane) ?? makePaneViewController()
+        let controller = makePaneViewController()
         detail.show(controller)
         saving = (controller as? any SavingPaneViewController)?.saving
         saveButton.rootView = SaveToolbarButton(saving: saving)

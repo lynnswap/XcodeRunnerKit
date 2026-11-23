@@ -60,7 +60,10 @@ struct HostSettingsTests {
         settings.poolDraft.keepsSimulatorsForever = true
         settings.poolDraft.simulatorIdleRetentionInput = "not used for indefinite retention"
 
-        await settings.applyPoolConfiguration()
+        MacPaneModel(settings: settings).save()
+        let runnerPane = MacPaneModel(settings: settings)
+        #expect(runnerPane.isApplyingPoolConfiguration)
+        try await waitUntil { !runnerPane.isSaving }
 
         #expect(settings.savedSimulatorRetention == .forever)
         #expect(settings.saveError == nil)

@@ -507,10 +507,12 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         storagePreparation?.cancel()
         Task {
             for runner in runners.values { runner.task.cancel() }
+            // Registration and management requests can both be waiting for a read from a managed Mac.
+            async let stopManagedMacs: Void = settings.managedMacs.shutDown()
             await settings.github.shutDown()
             await settings.management.shutDown()
             await settings.managedMacsRelay.shutDown()
-            await settings.managedMacs.shutDown()
+            await stopManagedMacs
             await dashboardHosts.shutDown()
             await storagePreparation?.value
             await monitoring?.value

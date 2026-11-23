@@ -45,6 +45,8 @@ struct GitHubReport: Codable, Equatable, Sendable {
     let isLoadingRepositories: Bool
     let isSavingSelection: Bool
     let isSynchronizing: Bool
+    /// Older hosts can reconcile periodically, but a dashboard can only request it by replacing their selection.
+    let supportsRegistrationRetry: Bool?
     /// The repositories that can be selected: the saved ones and the ones that GitHub lists.
     let selectableRepositories: [GitHubRepository]
     /// Whether GitHub listed a repository that the app is installed on.
@@ -60,4 +62,6 @@ struct GitHubReport: Codable, Equatable, Sendable {
     /// The Mac that manages the host and registers its runners in its place.
     let managerName: String?
     let managesMacs: Bool
+
+    var hasRegistrationError: Bool { errorMessage != nil || runnerStatuses.contains { $0.errorMessage != nil } }
 }

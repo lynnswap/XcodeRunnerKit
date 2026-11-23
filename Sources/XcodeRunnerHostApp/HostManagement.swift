@@ -195,7 +195,7 @@ final class HostManagement {
                         // The selection is saved, so registering its runners does not depend on the reply arriving.
                         let delivery: Result<Void, any Error>
                         do { delivery = .success(try await reply(answer)) } catch { delivery = .failure(error) }
-                        if case .applySelection = request, case .github = answer { await github.synchronizeDashboardSelection() }
+                        if request.updatesRunnerRegistrations, case .github = answer { await github.synchronizeSavedSelection() }
                         try delivery.get()
                     case .macs(let request):
                         // The Macs that this Mac manages accept it, and a dashboard reaches them through it.
