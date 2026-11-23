@@ -225,7 +225,8 @@ struct HostPairingTests {
         await macs.shutDown()
     }
 
-    @Test func dispatchReconcilesChangesMadeDuringEitherSettingsWrite() async throws {
+    @Test(arguments: [false, true])
+    func dispatchReconcilesChangesMadeDuringEitherSettingsWrite(initialPackageReadFails: Bool) async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let manager = managedMac(at: root.appending(path: "Manager"))
@@ -251,6 +252,7 @@ struct HostPairingTests {
             }
             return await worker.answer(.read)
         }
+        let refuseRead = Mutex(false)
         let holdRead = Mutex(false)
         let concurrentReads = Mutex<Int?>(nil)
         let firstRead = AsyncStream<Void>.makeStream()
@@ -258,6 +260,11 @@ struct HostPairingTests {
         let captured = AsyncStream<Void>.makeStream()
         let release = AsyncStream<Void>.makeStream()
         let runner = try await listener(key: mac.pairing.symmetricKey, identity: mac.id.uuidString) { request, reply, _ in
+            if case .settings(.read) = request, refuseRead.withLock({ value in
+                let refuse = value
+                value = false
+                return refuse
+            }) { return try await reply(.refused("Package routing temporarily unavailable")) }
             let snapshot = try await answer(request)
             if case .settings(.read) = request, concurrentReads.withLock({ value in
                 guard let count = value else { return false }
@@ -283,7 +290,8 @@ struct HostPairingTests {
         #expect(worker.github.packageRouting == .applied(grant))
 
         // While the job-defaults read is in transit, deliver a removal and save a new grant of the same repository.
-        let report = HostSettingsReport(worker)
+        let report = initialPackageReadFails ? nil : HostSettingsReport(worker)
+        refuseRead.withLock { $0 = initialPackageReadFails }
         holdRead.withLock { $0 = true }
         let dispatch = Task { try await macs.synchronizedSettings(of: mac, at: runner.endpoint, report: report) }
         var snapshots = captured.stream.makeAsyncIterator()

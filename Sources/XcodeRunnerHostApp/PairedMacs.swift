@@ -30,6 +30,7 @@ final class PairedMacSettings {
     /// Changes when a settings write finishes, including one whose acknowledgment was lost.
     struct WriteRevision: Equatable, Sendable {
         var packages: UInt64 = 0
+        var confirmedPackages: UInt64 = 0
         var jobOptions: UInt64 = 0
     }
     var settingsWriteRevision = WriteRevision()
@@ -850,7 +851,10 @@ final class PairedMacs: MacList {
                 continue
             }
             let revision = settings[mac.id]?.settingsWriteRevision
-            if read.revision?.jobOptions != revision?.jobOptions || (packagesApplied && read.revision?.packages != revision?.packages) {
+            // After a failure, a successful retry invalidates the old snapshot. Further refusals can be reported without delaying a public job.
+            let packagesChanged = packagesApplied ? read.revision?.packages != revision?.packages
+                : read.revision?.confirmedPackages != revision?.confirmedPackages
+            if read.revision?.jobOptions != revision?.jobOptions || packagesChanged {
                 continue
             }
             if try change(for: .jobOptions, in: current, owner: owner, mac: mac) != nil { continue }
@@ -931,7 +935,8 @@ final class PairedMacs: MacList {
                 if case .refused(let reason) = reply { throw HostLinkError.refused(reason) }
                 guard case .settings(let saved) = reply else { throw HostLinkError.unexpectedReply }
                 switch request {
-                case .syncPackageRepositories(let names) where saved.packageRouting == .applied(names): break
+                case .syncPackageRepositories(let names) where saved.packageRouting == .applied(names):
+                    settings[mac.id]?.settingsWriteRevision.confirmedPackages &+= 1
                 case .syncJobOptions(let options) where saved.jobOptions == options: break
                 default: throw HostLinkError.unexpectedReply
                 }
