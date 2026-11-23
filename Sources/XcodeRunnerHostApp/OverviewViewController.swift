@@ -142,7 +142,7 @@ struct OverviewView: View {
                     Text(repository.fullName)
                     if let status = statuses[repository.id] { registrationStatus(status) }
                 }
-                .disabled(github.isBusy || !isSignedIn)
+                .disabled(model.isSavingRepositories || github.isBusy || !isSignedIn)
             }
             // A repository that the app can no longer reach has no switch, and its runners are listed all the same.
             ForEach(github.runnerStatuses.filter { !listed.contains($0.id) }) { status in
@@ -156,9 +156,13 @@ struct OverviewView: View {
                     .foregroundStyle(.secondary)
             }
             if isSignedIn, let error = github.errorMessage { ErrorText(error) }
+            if isSignedIn, github.supportsRegistrationRetry != true, github.hasRegistrationError {
+                Text("This host checks runner registrations periodically. Update XcodeHomeRunner on the host to retry immediately.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
             if isSignedIn {
                 HStack {
-                    if github.isSynchronizing {
+                    if github.isSavingSelection || github.isSynchronizing {
                         ProgressView().controlSize(.small)
                         Text("Synchronizing runner registrations…").foregroundStyle(.secondary)
                     } else if model.selection != github.savedRepositoryIDs {

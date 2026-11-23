@@ -98,8 +98,8 @@ final class HostSettingsRequestHandler: NSObject, HostSettingsBridgeProtocol {
         case .github(let request):
             let reply = await github.answer(request)
             // The selection is saved, and its runners are registered and removed after the answer.
-            guard case .applySelection = request, case .github = reply else { return (reply, nil) }
-            let followUp: FollowUp = { await settings.github.synchronizeDashboardSelection() }
+            guard request.updatesRunnerRegistrations, case .github = reply else { return (reply, nil) }
+            let followUp: FollowUp = { await settings.github.synchronizeSavedSelection() }
             return (reply, followUp)
         case .macs(let request):
             let answer = await settings.managedMacsRelay.answer(request, from: Self.commands)

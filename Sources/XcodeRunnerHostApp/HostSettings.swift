@@ -316,6 +316,51 @@ struct HostSettingsReport: Codable, Equatable, Sendable {
 // encode and decode it.
 extension HostSettingsReport: HostSettingsDisplay {}
 
+/// One Mac's save. A new window can read the same pending settings while the writes finish in order.
+@MainActor @Observable
+final class SettingsSave<Field: Hashable> {
+    private(set) var pending: Set<Field> = []
+    private var total = 0
+
+    var progress: (completed: Int, total: Int)? {
+        pending.isEmpty ? nil : (total - pending.count, total)
+    }
+
+    func start(_ fields: [Field], apply: @escaping @MainActor (Field) async -> Void) {
+        guard pending.isEmpty, !fields.isEmpty else { return }
+        pending = Set(fields)
+        total = fields.count
+        Task {
+            for field in fields {
+                await apply(field)
+                pending.remove(field)
+            }
+        }
+    }
+}
+
+enum RunnerSetting {
+    case pool, runnerLabels, xcode, buildService, storage
+}
+
+@MainActor @Observable
+final class HostSettingsDraft {
+    enum Field { case jobOptions, repositories }
+
+    let save = SettingsSave<Field>()
+    var jobOptions: HostJobOptions.Edits = [:]
+    var jobOptionsError: String?
+
+    func saveJobOptions(using write: (HostJobOptions.Edits) async throws -> Void) async {
+        let edits = jobOptions
+        do {
+            try await write(edits)
+            if jobOptions == edits { jobOptions = [:] }
+            jobOptionsError = nil
+        } catch { jobOptionsError = error.localizedDescription }
+    }
+}
+
 @MainActor @Observable
 final class HostSettingsModel: HostSettingsDisplay {
     let installation: HostInstallation
@@ -353,7 +398,8 @@ final class HostSettingsModel: HostSettingsDisplay {
     private(set) var isSaving = false
     private(set) var hasLoadedPoolStatus = false
     var poolDraft = PoolSettingsDraft()
-    var jobOptionEdits: HostJobOptions.Edits = [:]
+    let hostDraft = HostSettingsDraft()
+    let runnerSave = SettingsSave<RunnerSetting>()
     private(set) var activeStorageDirectory: URL?
     private(set) var storageError: String?
     private(set) var storageSaveError: String?
