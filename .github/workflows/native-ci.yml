@@ -59,7 +59,7 @@ jobs:
           path: |
             ${{ runner.temp }}/XcodeRunnerKit-macos/*/xcodebuild.log
             ${{ runner.temp }}/XcodeRunnerKit-macos/*/Results.xcresult
-          retention-days: 1
+          retention-days: 7
           if-no-files-found: ignore
 
   cli:
