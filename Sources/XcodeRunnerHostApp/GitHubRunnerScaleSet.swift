@@ -187,12 +187,18 @@ package struct GitHubRunnerScaleSet: Sendable {
                     do {
                         let capacity = { @MainActor @Sendable in jobs.holdsSlot || hasCapacity() ? 1 : 0 }
                         guard let message = try await next(after: last, capacity: capacity, ended: { jobs.ended }) else {
-                            if !jobs.ended && !jobs.holdsSlot { try await whileAuthorized(.checkConnection) }
+                            if !jobs.ended {
+                                if jobs.holdsSlot {
+                                    if !jobs.started, try workerIsRunning() { jobs.workerStarted() }
+                                    if jobs.awaitsPickup { try await jobs.receive([], statistics: currentStatistics()) }
+                                } else { try await whileAuthorized(.checkConnection) }
+                            }
                             retryUntil = nil
                             continue
                         }
                         let body = message.body ?? ""
                         let events = body.isEmpty ? [] : try JSONDecoder().decode([Offer].self, from: Data(body.utf8))
+                        if jobs.holdsSlot, !jobs.started, try workerIsRunning() { jobs.workerStarted() }
                         try await jobs.receive(events, statistics: message.statistics)
                         try await acknowledge(message.messageId)
                         last = message.messageId
@@ -238,6 +244,8 @@ package struct GitHubRunnerScaleSet: Sendable {
         private var request: Int64?
         private(set) var started = false
         private var wasAssigned = false
+        var awaitsPickup: Bool { holdsSlot && wasAssigned && !started }
+        func workerStarted() { started = true }
 
         init(pool: HostExecutionPool, set: GitHubRunnerScaleSet, authorize: @escaping @MainActor @Sendable () async throws -> Void,
              begin: @escaping @MainActor @Sendable () throws -> Void, finish: @escaping @MainActor @Sendable () -> Void, run: @escaping @MainActor @Sendable (Int32) async throws -> Void) {
@@ -306,8 +314,14 @@ package struct GitHubRunnerScaleSet: Sendable {
             try begin()
             holdsSlot = true
             defer { holdsSlot = false; finish() }
-            if !assigned, let id, try await !set.acquire(id) { return }
+            if !assigned, let id {
+                guard try await set.acquire(id) else { return }
+                wasAssigned = true
+            }
             try await run(slot)
+            if !started, !Task.isCancelled, let demand = try await set.currentStatistics(), demand.totalAssignedJobs > 0 {
+                throw HostSettingsError("The GitHub runner exited while a job was still awaiting pickup. See the runner log.")
+            }
         }
     }
 
@@ -344,6 +358,15 @@ package struct GitHubRunnerScaleSet: Sendable {
         let (data, response) = try await Self.send(request, transport: transport)
         if response.statusCode == 202 { return nil }
         return try JSONDecoder().decode(Message.self, from: data)
+    }
+
+    private func currentStatistics() async throws -> Statistics? {
+        struct State: Decodable { let statistics: Statistics? }
+        let url = Self.versioned(endpoint).appending(queryItems: [.init(name: "includeStatistics", value: "true")])
+        let state: State = try await admin.perform { credentials in
+            try await Self.json(url, authorization: "Bearer " + credentials.token, transport: transport)
+        }
+        return state.statistics
     }
 
     private func availableJob() async throws -> Int64? {

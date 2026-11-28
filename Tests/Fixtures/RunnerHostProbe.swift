@@ -49,6 +49,8 @@ private actor Actions {
             }
             switch (request.httpMethod, parts.last) {
             case ("GET", "runnerscalesets"): response = ["value": []]
+            case ("GET", _) where parts.dropLast().last == "runnerscalesets":
+                response = ["statistics": ["totalAssignedJobs": 1, "totalAvailableJobs": 0]]
             case ("POST", "runnerscalesets"): response = ["id": id, "labels": [["name": "fixture", "type": "System"]]]
             case ("POST", "sessions"):
                 delivered.remove(id)

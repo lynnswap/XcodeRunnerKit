@@ -674,7 +674,8 @@ extension GitHubHostSettings {
             let endpoint = NWEndpoint.service(name: PackageFetch.serviceName(manager.id), type: HostLink.managementService,
                                               domain: "local.", interface: nil)
             let reply = try await HostLink.send(.runnerAdmission(repositoryID: repositoryID, access: access),
-                to: endpoint, key: manager.symmetricKey, identity: manager.id.uuidString, timeout: PairedMacs.changeTimeout)
+                to: endpoint, key: manager.symmetricKey, identity: manager.id.uuidString,
+                timeout: access == .connect ? PairedMacs.changeTimeout : HostLink.requestTimeout)
             if case .refused(let reason) = reply { throw HostSettingsError(reason) }
             return reply
         }
