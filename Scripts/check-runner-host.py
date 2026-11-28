@@ -381,7 +381,13 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost admission ') as temporary:
             os.kill(pid, signal.SIGTERM)
             wait_for(lambda:not alive(pid), 'The accepted job did not finish')
             # A new session connects on the next retry. The completed job and an idle registration use no slot.
-            fcntl.flock(slot, fcntl.LOCK_EX)
+            def reclaim_slot():
+                try:
+                    fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return True
+                except BlockingIOError:
+                    return False
+            wait_for(reclaim_slot, 'The completed GitHub job kept the slot')
             second_id = json.loads((second/'.runner').read_text())['agentId']
             wait_for(lambda:(home/f'denied-{second_id}').exists(), 'The disconnected host still authorized a new runner')
             assert not (second/'provisioned').exists()

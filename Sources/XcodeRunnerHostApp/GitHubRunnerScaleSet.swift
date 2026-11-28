@@ -35,6 +35,7 @@ package struct GitHubRunnerScaleSet: Sendable {
     struct Offer: Decodable, Sendable {
         let messageType: String
         let runnerRequestId: Int64?
+        let runnerName: String?
     }
 
     struct Message: Decodable, Sendable {
@@ -62,6 +63,7 @@ package struct GitHubRunnerScaleSet: Sendable {
         struct Reference: Decodable { let id: Int }
     }
     private let id: Int
+    private let name: String
     let session: Session
     private let endpoint: URL
     private let runnersURL: URL
@@ -138,7 +140,7 @@ package struct GitHubRunnerScaleSet: Sendable {
                     method: "PATCH", authorization: "Bearer " + credentials.token, transport: transport)
             }
         }
-        return Self(id: id, session: session, endpoint: endpoint,
+        return Self(id: id, name: name, session: session, endpoint: endpoint,
                     runnersURL: credentials.url.appending(path: "_apis/distributedtask/pools/0/agents"),
                     admin: admin, queue: queue, transport: transport)
     }
@@ -240,6 +242,8 @@ package struct GitHubRunnerScaleSet: Sendable {
                     request = event.runnerRequestId
                     started = true
                 }
+                // A completion naming our worker also confirms it ran, even if its start event was truncated.
+                if events.contains(where: { $0.messageType == "JobCompleted" && $0.runnerName == set.name }) { started = true }
                 if !started, let request, completed.contains(request) { current?.cancel() }
                 else if !started, (!holdsSlot || wasAssigned), statistics?.totalAssignedJobs == 0, statistics?.totalAvailableJobs == 0 {
                     current?.cancel()
@@ -329,11 +333,13 @@ package struct GitHubRunnerScaleSet: Sendable {
 
     private func availableJob() async throws -> Int64? {
         struct Available: Decodable { let runnerRequestId: Int64 }
-        let available: Listing<Available> = try await admin.perform { credentials in
-            try await Self.json(Self.versioned(endpoint.appending(path: "acquirablejobs")),
-                                authorization: "Bearer " + credentials.token, transport: transport)
+        return try await admin.perform { credentials in
+            var request = URLRequest(url: Self.versioned(endpoint.appending(path: "acquirablejobs")))
+            request.setValue("Bearer " + credentials.token, forHTTPHeaderField: "Authorization")
+            let (data, response) = try await Self.send(request, transport: transport)
+            if response.statusCode == 204 { return nil }
+            return try JSONDecoder().decode(Listing<Available>.self, from: data).value.first?.runnerRequestId
         }
-        return available.value.first?.runnerRequestId
     }
 
     func acquire(_ job: Int64) async throws -> Bool {

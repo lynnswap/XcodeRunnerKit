@@ -154,7 +154,7 @@ struct BuildOptions: ParsableArguments {
         runner.buildServiceExecutableURL = buildServicePath.map(Self.url) ?? host?.buildServiceExecutableURL
         let requestedPool = poolDirectory.map(Self.url)
         if let host, ProcessInfo.processInfo.environment["XCODE_RUNNER_GITHUB_JOB_POOL"] == host.poolDirectory.path,
-           requestedPool == nil || requestedPool?.resolvingSymlinksInPath().standardizedFileURL == host.poolDirectory.resolvingSymlinksInPath().standardizedFileURL {
+           requestedPool == nil || requestedPool?.resolvingSymlinksInPath().standardizedFileURL.pathComponents == host.poolDirectory.resolvingSymlinksInPath().standardizedFileURL.pathComponents {
             runner.simulatorPool = HostExecutionPool(directory: host.poolDirectory).simulatorPool
         } else if let requestedPool {
             runner.executionPool = HostExecutionPool(directory: requestedPool)

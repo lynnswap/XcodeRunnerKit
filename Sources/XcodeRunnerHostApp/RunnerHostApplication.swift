@@ -2,6 +2,7 @@ import AppKit
 import ArgumentParser
 import Darwin
 import Foundation
+import Observation
 import Subprocess
 import XcodeRunnerHostSupport
 import XcodeRunnerKit
@@ -278,6 +279,29 @@ private final class RunnerService {
     }
 }
 
+/// Advertise each idle host slot to one scale set at a time. GitHub only reveals queued work to a
+/// set advertising capacity, so rotate idle offers across repositories without holding a build slot.
+@MainActor @Observable final class GitHubJobCapacity {
+    private(set) var offered: Set<String> = []
+    private var nextName: String?
+    private var rotateAt = ContinuousClock.now
+
+    func update(listening: [Int: [String]], freeSlots: Int, now: ContinuousClock.Instant = .now) {
+        let repositories = listening.keys.sorted().map { listening[$0, default: []].sorted() }
+        let names = (0..<(repositories.map(\.count).max() ?? 0)).flatMap { index in
+            repositories.compactMap { $0.indices.contains(index) ? $0[index] : nil }
+        }
+        let count = min(max(0, freeSlots), names.count)
+        if count == 0 { offered = []; return }
+        if now < rotateAt, offered.count == count, offered.isSubset(of: names) { return }
+        let index = nextName.flatMap { names.firstIndex(of: $0) } ?? 0
+        let round = names[index...] + names[..<index]
+        offered = Set(round.prefix(count))
+        nextName = names[(index + count) % names.count]
+        rotateAt = now.advanced(by: .seconds(6))
+    }
+}
+
 @MainActor
 private final class RunnerHost: NSObject, NSApplicationDelegate {
     private let root: URL
@@ -293,6 +317,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         var problem: String?
     }
     private var runners: [URL: HostedRunner] = [:]
+    private let githubCapacity = GitHubJobCapacity()
     private let authorization: RunnerHostApplication.Authorization
     private let transport: RunnerHostApplication.Transport
     private let settings: HostSettingsModel
@@ -431,6 +456,15 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             while !Task.isCancelled {
                 await settings.trimSimulatorPool()
                 await settings.refreshPoolStatus()
+                var listening: [Int: [String]] = [:]
+                for runner in runners.values where runner.state == .listening {
+                    listening[runner.registration.repositoryID, default: []].append(runner.registration.name)
+                }
+                let freeSlots: Int
+                if let status = settings.poolStatus, !settings.isPaused, status.waitingJobCount == 0 {
+                    freeSlots = status.configuration.maximumConcurrentJobs - status.activeJobCount
+                } else { freeSlots = 0 }
+                githubCapacity.update(listening: listening, freeSlots: freeSlots)
                 updatePoolMenuItem()
                 do { try await Task.sleep(for: .seconds(2)) }
                 catch { break }
@@ -720,8 +754,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 runners[directory.url]?.problem = nil
                 do {
                     try await set.listen(pool: settings.pool, hasCapacity: {
-                        guard let status = self.settings.poolStatus, !self.settings.isPaused else { return false }
-                        return status.activeJobCount < status.configuration.maximumConcurrentJobs && status.waitingJobCount == 0
+                        self.githubCapacity.offered.contains(name)
                     }, whileAuthorized: { access in
                         try Task.checkCancellation()
                         guard !self.installation.isPaused(), try !directory.isRemoved(),

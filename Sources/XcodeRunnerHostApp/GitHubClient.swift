@@ -166,12 +166,26 @@ struct GitHubClient: Sendable {
         try await api(path: "repos/\(fullName)", accessToken: accessToken)
     }
 
+    /// Admission uses the selected repository ID for visibility, fork policy, and the registration token.
+    /// Names can be reused after a transfer or rename.
+    func authorizeJob(in repositoryID: Int, issueToken: Bool, accessToken: String) async throws -> GitHubRunnerScaleSet.Grant? {
+        let path = "repositories/\(repositoryID)"
+        let repository: GitHubRepository = try await api(path: path, accessToken: accessToken, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
+        try await requireForkApproval(for: repository, path: path, accessToken: accessToken)
+        guard issueToken else { return nil }
+        return .init(repository: repository.fullName, registrationToken: try await registrationToken(path: path, accessToken: accessToken))
+    }
+
     /// Reads the repository settings GitHub uses before it assigns a fork workflow to a runner.
     func requireForkApproval(for repository: GitHubRepository, accessToken: String) async throws {
+        try await requireForkApproval(for: repository, path: "repos/\(repository.fullName)", accessToken: accessToken)
+    }
+
+    private func requireForkApproval(for repository: GitHubRepository, path: String, accessToken: String) async throws {
         guard let isPrivate = repository.isPrivate else {
             throw ProvisioningError("GitHub did not report the visibility of \(repository.fullName). Cannot verify fork workflow settings.")
         }
-        let path = "repos/\(repository.fullName)/actions/permissions"
+        let path = path + "/actions/permissions"
         if isPrivate {
             struct Policy: Decodable {
                 let run_workflows_from_fork_pull_requests: Bool
@@ -195,9 +209,13 @@ struct GitHubClient: Sendable {
     }
 
     func registrationToken(repository: GitHubRepository, accessToken: String) async throws -> String {
+        try await registrationToken(path: "repos/\(repository.fullName)", accessToken: accessToken)
+    }
+
+    private func registrationToken(path: String, accessToken: String) async throws -> String {
         struct Token: Decodable { let token: String }
         let result: Token = try await api(
-            path: "repos/\(repository.fullName)/actions/runners/registration-token", method: "POST", accessToken: accessToken
+            path: path + "/actions/runners/registration-token", method: "POST", accessToken: accessToken
         )
         return result.token
     }

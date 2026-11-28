@@ -467,6 +467,18 @@ struct RunnerProvisionerTests {
         #expect(await client.archiveRequests == 0)
     }
 
+    @MainActor @Test func oneFreeSlotIsOfferedToOneRepositoryAtATime() {
+        let capacity = GitHubJobCapacity()
+        let listeners = [1: ["first-a", "first-b"], 2: ["second"]]
+        let now = ContinuousClock.now
+        capacity.update(listening: listeners, freeSlots: 1, now: now)
+        #expect(capacity.offered == ["first-a"])
+        capacity.update(listening: listeners, freeSlots: 1, now: now.advanced(by: .seconds(10)))
+        #expect(capacity.offered == ["second"])
+        capacity.update(listening: listeners, freeSlots: 0, now: now.advanced(by: .seconds(11)))
+        #expect(capacity.offered.isEmpty)
+    }
+
     @Test func expiringTheOfflineRegistrationKeepsTheScaleSetAndWorkFolder() async throws {
         let (root, client, provisioner) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

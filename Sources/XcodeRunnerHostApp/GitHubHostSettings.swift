@@ -683,26 +683,17 @@ extension GitHubHostSettings {
 
     func authorizeRunner(repositoryID: Int, access: GitHubRunnerAccess) async throws -> HostLinkReply {
         guard management?.manager == nil, !isShuttingDown, let login = account?.login else { throw GitHubError.notSignedIn }
-        guard let selected = configuration.repositories.first(where: { $0.id == repositoryID }) else {
+        guard configuration.repositories.contains(where: { $0.id == repositoryID }) else {
             throw HostSettingsError("The repository is no longer selected on the managing host.")
         }
         if access == .checkConnection { return .completed }
-        let reply: HostLinkReply = try await authenticated { token in
-            let listed = repositories.first { $0.id == repositoryID } ?? selected
-            let repository: GitHubRepository
-            if listed.isPrivate == nil {
-                repository = try await client.repository(fullName: listed.fullName, accessToken: token)
-                guard repository.id == repositoryID else { throw GitHubError.authenticationChanged }
-            } else { repository = listed }
-            try await client.requireForkApproval(for: repository, accessToken: token)
-            if access == .acceptJob { return .completed }
-            return .runnerGrant(.init(repository: repository.fullName,
-                registrationToken: try await client.registrationToken(repository: repository, accessToken: token)))
+        let grant = try await authenticated { token in
+            try await client.authorizeJob(in: repositoryID, issueToken: access == .connect, accessToken: token)
         }
         guard account?.login == login, configuration.repositories.contains(where: { $0.id == repositoryID }) else {
             throw GitHubError.authenticationChanged
         }
-        return reply
+        return grant.map(HostLinkReply.runnerGrant) ?? .completed
     }
 
     /// Only a current managed runner can open this connection. The local relay rechecks the grant on each Git request.
