@@ -296,7 +296,7 @@ package struct GitHubRunnerScaleSet: Sendable {
                 // A completion naming our worker also confirms it ran, even if its start event was truncated.
                 if let runnerID, events.contains(where: { $0.messageType == "JobCompleted" && $0.runnerId == runnerID }) { started = true }
                 if !started, let request, completed.contains(request) { current?.cancel() }
-                else if !started, (!holdsSlot || wasAssigned), statistics?.totalAssignedJobs == 0, statistics?.totalAvailableJobs == 0 {
+                else if !started, statistics?.totalAssignedJobs == 0, wasAssigned || (!holdsSlot && statistics?.totalAvailableJobs == 0) {
                     current?.cancel()
                 }
                 return

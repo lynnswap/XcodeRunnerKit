@@ -51,7 +51,7 @@ private actor Actions {
             case ("GET", "runnerscalesets"): response = ["value": []]
             case ("GET", _) where parts.dropLast().last == "runnerscalesets":
                 let withdrawn = folder.map { FileManager.default.fileExists(atPath: $0.appending(path: "withdrawn").path) } ?? false
-                response = ["statistics": ["totalAssignedJobs": withdrawn ? 0 : 1, "totalAvailableJobs": 0]]
+                response = ["statistics": ["totalAssignedJobs": withdrawn ? 0 : 1, "totalAvailableJobs": withdrawn ? 1 : 0]]
             case ("POST", "runnerscalesets"): response = ["id": id, "labels": [["name": "fixture", "type": "System"]]]
             case ("POST", "sessions"):
                 delivered.remove(id)

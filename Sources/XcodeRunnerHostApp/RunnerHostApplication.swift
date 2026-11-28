@@ -336,6 +336,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private var dashboardItem: NSMenuItem?
     private var monitoring: Task<Void, Never>?
     private var poolMonitoring: Task<Void, Never>?
+    private var simulatorMaintenance: Task<Void, Never>?
     private var resourceMonitoring: Task<Void, Never>?
     private var githubMonitoring: Task<Void, Never>?
     private var storagePreparation: Task<Void, Never>?
@@ -455,11 +456,15 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 do { try await Task.sleep(for: RunnerMetricSampler.interval) } catch { return }
             }
         }
-        poolMonitoring = Task {
-            // Pool reads and writes can wait for another process's pool lock, so they stay out of runner startup.
+        simulatorMaintenance = Task {
             await settings.configureDefaultPool()
             while !Task.isCancelled {
                 await settings.trimSimulatorPool()
+                do { try await Task.sleep(for: .seconds(2)) } catch { break }
+            }
+        }
+        poolMonitoring = Task {
+            while !Task.isCancelled {
                 await settings.refreshPoolStatus()
                 var listening: [Int: [String]] = [:]
                 for runner in runners.values where runner.state == .listening {
@@ -584,6 +589,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         settingsServer?.stop()
         monitoring?.cancel()
         poolMonitoring?.cancel()
+        simulatorMaintenance?.cancel()
         resourceMonitoring?.cancel()
         githubMonitoring?.cancel()
         storagePreparation?.cancel()
@@ -599,6 +605,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             await storagePreparation?.value
             await monitoring?.value
             await poolMonitoring?.value
+            await simulatorMaintenance?.value
             await githubMonitoring?.value
             for runner in runners.values { await runner.task.value }
             stopped = true
