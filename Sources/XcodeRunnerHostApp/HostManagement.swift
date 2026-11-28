@@ -141,7 +141,7 @@ final class HostManagement {
                             return try await reply(.refused("Edit package access on the managing host."))
                         }
                         try await reply(await settings.github.changePackageAccess(change))
-                    case .fetchPackage, .packageData, .packageEnd:
+                    case .runnerAdmission, .fetchPackage, .packageData, .packageEnd:
                         try await reply(.refused("Use the managing host’s package service."))
                     case .runnerSlots:
                         guard let settings = await self.settings else {

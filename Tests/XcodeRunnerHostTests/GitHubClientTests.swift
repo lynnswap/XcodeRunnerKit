@@ -68,6 +68,18 @@ struct GitHubClientTests {
         ) == true)
     }
 
+    @Test func jobGrantUsesTheSelectedRepositoryIDAfterARename() async throws {
+        let transport = GitHubTestTransport([
+            .init(path: "/repositories/1", body: #"{"id":1,"full_name":"owner/Renamed","private":false}"#),
+            .init(path: "/repositories/1/actions/permissions/fork-pr-contributor-approval", body: #"{"approval_policy":"all_external_contributors"}"#),
+            .init(path: "/repositories/1/actions/runners/registration-token", body: #"{"token":"registration"}"#),
+        ])
+        let client = await transport.client
+        let grant = try await client.authorizeJob(in: 1, issueToken: true, accessToken: "token")
+        #expect(grant?.repository == "owner/Renamed")
+        #expect(grant?.registrationToken == "registration")
+    }
+
     @Test func runnerRegistrationUsesTheRepositoryEndpoint() async throws {
         let transport = GitHubTestTransport([
             .init(path: "/repos/owner/repository/actions/runners", body: #"{"runners":[{"id":3,"name":"runner-1","status":"online","busy":true,"labels":[{"name":"xcode-runner"}]}]}"#),

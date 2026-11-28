@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import Network
 import XcodeRunnerHostSupport
 import XcodeRunnerKit
 
@@ -64,6 +65,7 @@ final class GitHubHostSettings {
     private(set) var isLoadingRepositories = false
     private(set) var hasRestored = false
     private(set) var isSavingSelection = false
+    let reservations = GitHubJobReservations()
     private var isShuttingDown = false
     var storageIsReady = false
 
@@ -88,7 +90,7 @@ final class GitHubHostSettings {
         self.provisioner = provisioner ?? RunnerProvisioner(
             installation: installation,
             installerURL: Bundle.main.bundleURL.appending(path: "Contents/Resources/HostSetup/install-github-runner.sh"),
-            client: client
+            reservations: reservations, client: client
         )
         do {
             configuration = try GitHubHostConfiguration.load(from: record)
@@ -461,7 +463,7 @@ final class GitHubHostSettings {
         }
         guard !configuration.repositories.isEmpty || !configuration.unlinkedRepositories.isEmpty else { runnerStatuses = []; return }
         guard account != nil else {
-            errorMessage = "Sign in to synchronize runner registrations. Existing jobs continue using the saved execution limit."
+            errorMessage = "Sign in to manage runners and accept new GitHub jobs. Accepted jobs finish."
             return
         }
         isSynchronizing = true
@@ -596,7 +598,7 @@ final class GitHubHostSettings {
     func answer(_ request: RunnerRequest) async -> HostLinkReply {
         switch request {
         case .hostName, .inventory, .markLabelsApplied: break
-        case .prepareArchive, .install, .markUnregistering, .markRemoved:
+        case .prepareArchive, .install, .configureJobRunner, .markUnregistering, .retainRegistration, .markRemoved:
             guard storageIsReady, !isShuttingDown else {
                 return .refused("Runner changes wait until storage is ready and the runner host is running.")
             }
@@ -608,7 +610,11 @@ final class GitHubHostSettings {
                 case .inventory: return .runners(try await mac.runners())
                 case .prepareArchive(let download): return .archive(try await mac.prepareArchive(download))
                 case .install(let installation): try await mac.install(installation)
-                case let .markUnregistering(runner, repositoryID): try await mac.markUnregistering(runner, from: repositoryID)
+                case let .markUnregistering(runner, repositoryID):
+                    return try await mac.markUnregistering(runner, from: repositoryID) ? .completed : .finishingGitHubJob
+                case let .configureJobRunner(runner, repositoryID, labels):
+                    try await mac.configureJobRunner(runner, repositoryID: repositoryID, labels: labels)
+                case .retainRegistration(let runner): try await mac.retainRegistration(runner)
                 case .markRemoved(let runner): try await mac.markRemoved(runner)
                 case .markLabelsApplied(let labels): try await mac.markLabelsApplied(labels)
                 }
@@ -662,6 +668,35 @@ final class GitHubHostSettings {
 }
 
 extension GitHubHostSettings {
+    /// Only the managing host uses its account token. Its runner receives a short-lived registration token.
+    func runnerAdmission(repositoryID: Int, access: GitHubRunnerAccess) async throws -> HostLinkReply {
+        if let manager = management?.manager {
+            let endpoint = NWEndpoint.service(name: PackageFetch.serviceName(manager.id), type: HostLink.managementService,
+                                              domain: "local.", interface: nil)
+            let reply = try await HostLink.send(.runnerAdmission(repositoryID: repositoryID, access: access),
+                to: endpoint, key: manager.symmetricKey, identity: manager.id.uuidString,
+                timeout: access == .connect ? PairedMacs.changeTimeout : HostLink.requestTimeout)
+            if case .refused(let reason) = reply { throw HostSettingsError(reason) }
+            return reply
+        }
+        return try await authorizeRunner(repositoryID: repositoryID, access: access)
+    }
+
+    func authorizeRunner(repositoryID: Int, access: GitHubRunnerAccess) async throws -> HostLinkReply {
+        guard management?.manager == nil, !isShuttingDown, let login = account?.login else { throw GitHubError.notSignedIn }
+        guard configuration.repositories.contains(where: { $0.id == repositoryID }) else {
+            throw HostSettingsError("The repository is no longer selected on the managing host.")
+        }
+        if access == .checkConnection { return .completed }
+        let grant = try await authenticated { token in
+            try await client.authorizeJob(in: repositoryID, issueToken: access == .connect, accessToken: token)
+        }
+        guard account?.login == login, configuration.repositories.contains(where: { $0.id == repositoryID }) else {
+            throw GitHubError.authenticationChanged
+        }
+        return grant.map(HostLinkReply.runnerGrant) ?? .completed
+    }
+
     /// Only a current managed runner can open this connection. The local relay rechecks the grant on each Git request.
     func servePackage(
         _ fetch: PackageFetch, reply: @escaping @Sendable (HostLinkReply) async throws -> Void,

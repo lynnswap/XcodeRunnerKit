@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zlib
 
 # Pass an ad-hoc signed app from build-runner-host.sh; the installer must reject it.
 if len(sys.argv) != 3:
@@ -92,7 +93,10 @@ def fixture(root, name):
     home = root.parents[2]
     work = home/'Library/Application Support/XcodeRunnerKit/Storage/Work'/name
     work.mkdir(parents=True, exist_ok=True)
-    (directory / '.runner').write_text(json.dumps({'agentName': name, 'workFolder': str(work.resolve())}))
+    (directory / '.runner').write_text(json.dumps({'agentId': zlib.crc32(name.encode()), 'agentName': name,
+                                                        'gitHubUrl': 'https://github.com/fixture/Project', 'workFolder': str(work.resolve())}))
+    (directory / '.xcode-home-runner-job.json').write_text(json.dumps({
+        'name': name + '-ci-fixture', 'repositoryID': zlib.crc32(name.encode()), 'labels': ['fixture']}))
     (directory / '.xcode-runner-host').touch()
     (directory / 'worker.py').write_text('''import json, os, signal, time
 from pathlib import Path
@@ -111,7 +115,7 @@ pending.write_text(json.dumps({'pid':os.getpid(), 'group':os.getpgrp(),
 pending.replace('pid.json')
 while True: time.sleep(1)
 ''')
-    (directory / 'runsvc.sh').write_text('''#!/bin/bash
+    (directory / 'fixture-job.sh').write_text('''#!/bin/bash
 trap 'kill -INT "$PID"' TERM INT
 python3 worker.py &
 PID=$!
@@ -119,6 +123,13 @@ wait "$PID"
 trap - TERM INT
 wait "$PID"
 ''')
+    (directory/'bin').mkdir()
+    (directory/'externals').mkdir()
+    # The credential from the local Actions service identifies the fixture assigned to this runner.
+    service = '#!/bin/bash\nif [[ -n "${ACTIONS_RUNNER_INPUT_JITCONFIG:-}" ]]; then cd "$ACTIONS_RUNNER_INPUT_JITCONFIG" || exit 1; fi\nexec /bin/bash ./fixture-job.sh\n'
+    for script in [directory/'bin/runsvc.sh', directory/'runsvc.sh']:
+        script.write_text(service)
+        script.chmod(0o755)
     return directory
 
 
@@ -146,6 +157,11 @@ with tempfile.TemporaryDirectory(prefix='Dashboard test ') as temporary:
     assert not (Path(temporary)/'XcodeRunnerOutput').exists(), 'The CLI ran the build on the dashboard'
     assert not any(home.iterdir()), f'An operation for a host created host files: {sorted(home.rglob("*"))}'
 
+
+# The probe runs the same host with a local Actions message queue and a registration grant.
+probe_build = ['xcrun', 'swift', 'build', '--package-path', str(scripts.parent), '--product', 'RunnerHostProbe']
+subprocess.run(probe_build, check=True)
+executable = str(Path(subprocess.check_output(probe_build + ['--show-bin-path'], text=True).strip()) / 'RunnerHostProbe')
 
 with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as temporary:
     root = Path(temporary)
@@ -184,7 +200,6 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
             legacy = fixture(runners, 'legacy-migration')
             (legacy/'.xcode-runner-host').unlink()
             (legacy/'stop-delay').write_text('8')
-            (legacy/'bin').mkdir()
             (legacy/'bin/runsvc.sh').write_text((legacy/'runsvc.sh').read_text())
             legacy_label = f'lynnpd.xcodehomerunner.legacy.{os.getpid()}'
             legacy_target = f'gui/{os.getuid()}/{legacy_label}'
@@ -216,15 +231,17 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
             assert alive(first_pid) and alive(second_pid)
             (crashed/'.xcode-runner-host').unlink()
             instant = fixture(runners, 'instant-exit')
-            (instant/'runsvc.sh').write_text('#!/bin/bash\nexit 0\n')
+            (instant/'fixture-job.sh').write_text('#!/bin/bash\nexit 0\n')
             instant_log = host_root/'logs/runners/instant-exit.log'
             wait_for(lambda:instant_log.exists() and 'Official runner service ended' in instant_log.read_text(), 'Immediate service exit was not observed')
             (first/'.xcode-runner-host').unlink()
+            os.kill(first_pid, signal.SIGTERM)
             wait_for(lambda:(first/'stopped').exists() and not alive(first_pid), 'Removed runner did not stop')
             unregistered = fixture(runners, 'unregistered')
             wait_for(lambda:(unregistered/'pid.json').exists(), 'Runner to remove did not start')
             unregistered_pid = json.loads((unregistered/'pid.json').read_text())['pid']
             (unregistered/'.xcode-runner-removed').touch()
+            os.kill(unregistered_pid, signal.SIGTERM)
             wait_for(lambda:not unregistered.exists(), 'Runner removed from GitHub kept its folder')
             assert not alive(unregistered_pid)
             host.send_signal(signal.SIGTERM)
@@ -236,19 +253,27 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
         print(host_log)
         assert 'service ended: Error' not in host_log
 
+    # Like the installed app, launchd's executable lives on the Mac even when the checkout is on a removable volume.
+    launchd_executable = shutil.copy2(executable, root/'RunnerHostProbe')
     launched = fixture(runners, 'launchd')
     (launched/'stop-delay').write_text('8')
     label = f'lynnpd.xcodehomerunner.test.{os.getpid()}'
     target = f'gui/{os.getuid()}/{label}'
     plist = root/'service.plist'
     plist.write_bytes(plistlib.dumps({
-        'Label':label, 'ProgramArguments':arguments, 'RunAtLoad':True, 'ThrottleInterval':1,
+        'Label':label, 'ProgramArguments':[str(launchd_executable), *arguments[1:]], 'RunAtLoad':True, 'ThrottleInterval':1,
+        'KeepAlive':{'SuccessfulExit':False},
         'StandardOutPath':str(root/'launchd.stdout'),
         'StandardErrorPath':str(root/'launchd.stderr'),
     }))
     subprocess.run(['launchctl','bootstrap',f'gui/{os.getuid()}',str(plist)],check=True)
     try:
-        wait_for(lambda:(launched/'pid.json').exists(), 'LaunchAgent runner did not start')
+        try:
+            wait_for(lambda:(launched/'pid.json').exists(), 'LaunchAgent runner did not start')
+        except AssertionError:
+            for output in [root/'launchd.stdout', root/'launchd.stderr', host_root/'logs/runners/launchd.log']:
+                if output.exists(): print(output.name, output.read_text()[-2000:], file=sys.stderr)
+            raise
         process = json.loads((launched/'pid.json').read_text())
         subprocess.run(['launchctl','kill','SIGKILL',target],check=True)
         wait_for(lambda:(launched/'stopping').exists(), 'Old service did not start shutdown')
@@ -257,11 +282,10 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
         failed_start = subprocess.run(arguments, capture_output=True, timeout=HANG_LIMIT)
         assert failed_start.returncode != 0 and b'Another runner host' in failed_start.stderr
         assert json.loads((launched/'pid.json').read_text())['pid'] == process['pid']
-        subprocess.run(['launchctl','kickstart',target],check=True)
         wait_for(lambda:not alive(process['pid']), 'Runner helper left a runner alive after host crash')
-        (launched/'pid.json').unlink()
-        subprocess.run(['launchctl','kickstart',target],check=True)
-        wait_for(lambda:(launched/'pid.json').exists(), 'LaunchAgent did not restart')
+        # The installed LaunchAgent retries while any old helper holds the shared ownership lock.
+        wait_for(lambda:json.loads((launched/'pid.json').read_text())['pid'] != process['pid'],
+                 'LaunchAgent did not restart')
         restarted = json.loads((launched/'pid.json').read_text())
         assert restarted['pid'] != process['pid']
     finally:
@@ -296,43 +320,94 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost pause ') as temporary:
     runners.mkdir(parents=True)
     idle = fixture(runners, 'idle')
     busy = fixture(runners, 'busy')
-    # The official runner starts a process of this name for each job, in its service's process group.
-    # The host finds the worker by its executable's name, which a script or a link to another tool does not have.
-    subprocess.run(['xcrun', 'clang', '-x', 'c', '-', '-o', str(busy/'Runner.Worker')], check=True,
-                   input=b'#include <unistd.h>\nint main(void) { sleep(600); return 0; }\n')
-    # A runner whose repository has jobs waiting takes the next one as soon as a job ends.
-    (busy/'runsvc.sh').write_text('''#!/bin/bash
-trap 'kill -INT "$PID"' TERM INT
-./Runner.Worker &
-echo $! > job.pid
-(while ps -o stat= -p $(cat job.pid) | grep -qv Z; do sleep 0.02; done; ./Runner.Worker) &
-python3 worker.py &
-PID=$!
-# Waiting also returns when another child ends, as the first job does.
-while kill -0 "$PID" 2>/dev/null; do wait "$PID"; done
-''')
+    (idle/'no-work').touch()
     with (root/'host.log').open('wb') as log:
         watched = HostOutput([executable, '--host', '--home-directory', str(home)], log, env={**os.environ, 'HOME':str(home)})
         try:
-            wait_for(lambda:(idle/'pid.json').exists() and (busy/'pid.json').exists(), 'Runners did not start')
-            idle_pid = json.loads((idle/'pid.json').read_text())['pid']
+            wait_for(lambda:(idle/'subscribed').exists() and (busy/'pid.json').exists(), 'Runner did not accept its job')
             busy_pid = json.loads((busy/'pid.json').read_text())['pid']
             (host_root/'paused').touch()
-            wait_for(lambda:watched.contains('Paused idle.'), 'A paused host did not stop an idle runner')
-            assert not alive(idle_pid)
-            # The host scans its runners every two seconds, so several scans leave the busy runner alone.
-            time.sleep(6)
-            assert alive(busy_pid) and not (busy/'stopping').exists(), 'A paused host stopped a runner during its job'
-            os.kill(int((busy/'job.pid').read_text()), signal.SIGKILL)
-            wait_for(lambda:watched.contains('Paused busy.'), 'A paused host did not stop a runner after its job')
-            assert not alive(busy_pid)
+            (idle/'no-work').unlink()
+            time.sleep(3)
+            assert not (idle/'acquired').exists() and alive(busy_pid)
+            os.kill(busy_pid, signal.SIGTERM)
+            wait_for(lambda:not alive(busy_pid), 'The completed job did not exit')
             (host_root/'paused').unlink()
-            wait_for(lambda:all(json.loads((directory/'pid.json').read_text())['pid'] not in (idle_pid, busy_pid)
-                                and alive(json.loads((directory/'pid.json').read_text())['pid'])
-                                for directory in (idle, busy)), 'A resumed host did not start its runners')
+            wait_for(lambda:(idle/'pid.json').exists(), 'The resumed runner did not take its queued job')
         finally:
             stop_host(watched.process, runners)
             watched.close()
+
+# With one direct build in the pool, a GitHub offer remains unacquired. Disconnecting drains an accepted job.
+with tempfile.TemporaryDirectory(prefix='RunnerHost admission ') as temporary:
+    root = Path(temporary)
+    home = root/'home'
+    runners = home/'Library/XcodeRunnerKit/runners'
+    runners.mkdir(parents=True)
+    job = fixture(runners, 'github')
+    (job/'recover-offer').touch()
+    malformed = fixture(runners, 'damaged')
+    (malformed/'.xcode-home-runner-job.json').write_text('{')
+    (job/'expire-credentials').touch()
+    (job/'retry-poll').touch()
+    (job/'stale-demand').touch()
+    host_root = home/'Library/Application Support/XcodeRunnerKit'
+    pool = host_root/'Pool'
+    pool.mkdir(parents=True)
+    subprocess.run([cli, 'pool', 'configure', '--pool-directory', pool, '--maximum-concurrent-jobs', '1'], check=True, capture_output=True)
+    with (pool/'slot-0.lock').open('wb') as slot, (root/'host.log').open('wb') as log:
+        fcntl.flock(slot, fcntl.LOCK_EX)
+        host = subprocess.Popen([executable, '--host', '--home-directory', str(home)], stdout=log, stderr=log)
+        try:
+            wait_for(lambda:list(pool.glob('waiter-*.lock')), 'The GitHub offer did not reach the occupied pool')
+            wait_for(lambda:(job/'capacity-after-offer').exists(), 'The host did not report capacity after the offer')
+            assert (job/'capacity-after-offer').read_text() == '0'
+            assert not (job/'provisioned').exists()
+            assert (job/'acknowledged').exists()
+            stop_host(host, runners)
+            host = subprocess.Popen([executable, '--host', '--home-directory', str(home)], stdout=log, stderr=log)
+            wait_for(lambda:(job/'recovered-offer').exists(), 'An acknowledged offer was lost when the host restarted')
+            assert not (job/'provisioned').exists()
+            fcntl.flock(slot, fcntl.LOCK_UN)
+            wait_for(lambda:(job/'pid.json').exists(), 'No job started after the slot opened')
+            wait_for(lambda:(job/'poll-recovered').exists(), 'The queue did not resume polling during worker startup')
+            wait_for(lambda:(job/'acknowledged-stale-demand').exists() and (job/'verified-demand').exists(),
+                     'The queue did not acknowledge the stale snapshot and recover current demand')
+            pid = json.loads((job/'sent-stale-demand').read_text())['pid']
+            assert json.loads((job/'pid.json').read_text())['pid'] == pid and alive(pid) and not (job/'stopping').exists()
+            (job/'no-work').touch()
+            (home/'disconnected').touch()
+            second = fixture(runners, 'next')
+            (second/'unused-worker').touch()
+            try:
+                fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                raise AssertionError('The job released its slot while its runner was still executing')
+            os.kill(pid, signal.SIGTERM)
+            wait_for(lambda:not alive(pid), 'The accepted job did not finish')
+            # A new session connects on the next retry. The completed job and an idle registration use no slot.
+            def reclaim_slot():
+                try:
+                    fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return True
+                except BlockingIOError:
+                    return False
+            wait_for(reclaim_slot, 'The completed GitHub job kept the slot')
+            second_id = json.loads((second/'.runner').read_text())['agentId']
+            wait_for(lambda:(home/f'denied-{second_id}').exists(), 'The disconnected host still authorized a new runner')
+            assert not (second/'provisioned').exists()
+            (home/'disconnected').unlink()
+            fcntl.flock(slot, fcntl.LOCK_UN)
+            wait_for(lambda:(second/'pid.json').exists(), 'GitHub intake did not resume after reconnecting')
+            unused_pid = json.loads((second/'pid.json').read_text())['pid']
+            (second/'no-work').touch()
+            (second/'withdrawn').touch()
+            wait_for(lambda:not alive(unused_pid), 'An unused worker kept its slot after GitHub withdrew the job')
+            wait_for(reclaim_slot, 'The withdrawn job left its host slot occupied')
+        finally:
+            stop_host(host, runners)
 
 with tempfile.TemporaryDirectory(prefix='RunnerHost blocked storage ') as temporary:
     root = Path(temporary)
@@ -458,18 +533,14 @@ with open(sys.argv[1], 'a+b') as coordinator:
         with (root/'host.log').open('w') as log:
             host = subprocess.Popen(arguments, stdout=log, stderr=log)
             try:
-                wait_for(lambda:(first/'pid.json').exists(), 'Pool status wait prevented initial runner discovery')
-                first_pid = json.loads((first/'pid.json').read_text())['pid']
+                wait_for(lambda:(first/'subscribed').exists(), 'Pool status wait prevented initial runner discovery')
                 second = fixture(runners, 'second')
-                wait_for(lambda:(second/'pid.json').exists(), 'Pool status wait prevented new runner discovery')
-                second_pid = json.loads((second/'pid.json').read_text())['pid']
+                wait_for(lambda:(second/'subscribed').exists(), 'Pool status wait prevented new runner discovery')
+                assert not (first/'acquired').exists() and not (second/'acquired').exists()
                 (first/'.xcode-runner-host').unlink()
-                wait_for(lambda:(first/'stopped').exists() and not alive(first_pid), 'Pool status wait prevented runner removal')
-                assert holder.poll() is None
                 host.send_signal(signal.SIGTERM)
                 assert host.wait(timeout=HANG_LIMIT) == 0
-                assert (second/'stopped').exists() and not alive(second_pid)
-                assert holder.poll() is None, 'Pool coordinator must remain held throughout host shutdown'
+                assert holder.poll() is None, 'The pool coordinator must remain held throughout host shutdown'
             finally:
                 stop_host(host, runners)
     finally:

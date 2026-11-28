@@ -318,9 +318,17 @@ struct PairedRunnerMac: RunnerMac {
         try await change(.install(request))
     }
 
-    func markUnregistering(_ runner: String, from repositoryID: Int) async throws {
-        try await change(.markUnregistering(runner: runner, repositoryID: repositoryID))
+    func markUnregistering(_ runner: String, from repositoryID: Int) async throws -> Bool {
+        switch try await macs.requestRunners(.markUnregistering(runner: runner, repositoryID: repositoryID), from: id) {
+        case .completed: true
+        case .finishingGitHubJob: false
+        default: throw HostLinkError.unexpectedReply
+        }
     }
+    func configureJobRunner(_ runner: String, repositoryID: Int, labels: [String]) async throws {
+        try await change(.configureJobRunner(runner: runner, repositoryID: repositoryID, labels: labels))
+    }
+    func retainRegistration(_ runner: String) async throws { try await change(.retainRegistration(runner: runner)) }
 
     func markRemoved(_ runner: String) async throws { try await change(.markRemoved(runner: runner)) }
 
@@ -551,6 +559,11 @@ final class PairedMacs: MacList {
         }
         guard let owner = managingHost, owner.management.manager == nil, mac(pairing.id)?.pairing == pairing else {
             return try await reply(.refused("This Mac is no longer managed by this host."))
+        }
+        if case let .runnerAdmission(repositoryID, access) = request {
+            do { try await reply(try await owner.github.authorizeRunner(repositoryID: repositoryID, access: access)) }
+            catch { try await reply(.refused(error.localizedDescription)) }
+            return
         }
         guard case .fetchPackage(let fetch) = request else {
             return try await reply(.refused("Runners can only fetch approved packages here."))
@@ -1453,7 +1466,7 @@ extension HostLinkRequest {
         switch self {
         case .settings(.read), .github(.read):
             HostLink.requestTimeout
-        case .settings, .syncJobOptions, .syncPackageRepositories, .github, .packageAccess, .fetchPackage, .packageData, .packageEnd:
+        case .settings, .syncJobOptions, .syncPackageRepositories, .github, .packageAccess, .runnerAdmission, .fetchPackage, .packageData, .packageEnd:
             PairedMacs.changeTimeout
         case .macs(let request):
             // The host reads or changes one of its Macs before it answers, within its own time limits.

@@ -28,6 +28,7 @@ struct HostPairing: Codable, Equatable, Identifiable, Sendable {
 enum HostLinkRequest: Codable, Sendable {
     case packageAccess(PackageAccessChange)
     case fetchPackage(PackageFetch)
+    case runnerAdmission(repositoryID: Int, access: GitHubRunnerAccess)
     case packageData(Data)
     case packageEnd
     case runnerSlots
@@ -97,6 +98,8 @@ enum RunnerRequest: Codable, Sendable {
     case inventory
     case prepareArchive(GitHubRunnerDownload)
     case install(RunnerProvisioner.InstallationRequest)
+    case configureJobRunner(runner: String, repositoryID: Int, labels: [String])
+    case retainRegistration(runner: String)
     case markUnregistering(runner: String, repositoryID: Int)
     case markRemoved(runner: String)
     case markLabelsApplied([String])
@@ -177,6 +180,8 @@ enum RemoteOperationEvent: Codable, Sendable {
 
 enum HostLinkReply: Codable, Sendable {
     case runnerSlots(RunnerSlots)
+    case runnerGrant(GitHubRunnerScaleSet.Grant)
+    case finishingGitHubJob
     case activity([RunnerMetricSample])
     case packageRepositories([String])
     case packageResponse(PackageFetch.Response)
@@ -369,7 +374,7 @@ enum HostLink {
     /// - A new value in a reply or a report is optional.
     /// - A state that a report names is a type that keeps a raw value it does not know, as `HostState` does. Enums
     ///   that reports carry gain no cases.
-    static let version = 17
+    static let version = 18
     /// The oldest version whose messages this version reads. A Mac that runs an earlier one is shown as running
     /// another version, and the Macs do not pair. Versions before 7 answered only their own version.
     ///

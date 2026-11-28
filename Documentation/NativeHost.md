@@ -168,16 +168,26 @@ Open **Settings…** on the host or its paired dashboard.
 Enter the device code shown by your own app. Runner management requires
 repository administration access and the [XcodeHomeRunner GitHub
 App](https://github.com/apps/xcodehomerunner) installation. The host keeps
-sign-in tokens in Keychain. Disconnecting pauses registration management.
-Existing runner services and their jobs continue.
+sign-in tokens in Keychain. Disconnecting lets accepted jobs finish. New GitHub
+jobs stay queued until the managing host reconnects. Direct builds and tests
+still use the Mac's available slots.
 
 ### Set a concurrency limit
 
 In the runner’s pane, set **Maximum concurrent jobs** and choose **Save**.
-All repositories and direct jobs share that Mac’s Xcode slots. Each selected
-repository gets enough GitHub runner registrations to use the whole limit.
-GitHub also counts checkout, uploads and jobs waiting for Xcode, so its
-in-progress count can exceed the number of occupied slots.
+GitHub jobs and direct submissions share the same slots on that Mac. When all
+slots are occupied, new GitHub jobs stay queued on GitHub. The host reserves a
+slot before accepting a job and releases it after the runner finishes its
+post-job steps. An idle registration uses no slot.
+
+Each managed registration has a GitHub runner scale set with its routing
+labels. The host starts a one-job runner for an accepted job. It uses the
+registration’s work folder and has a stable job runner name, recorded in
+`.xcode-home-runner-job.json` along with the repository ID and routing labels. The host keeps using the same
+folder if GitHub expires the offline bootstrap registration. A workflow that keys its own cache by `RUNNER_NAME` creates a new cache on its first run
+after the upgrade. Run workflow steps with `"$XCODE_RUNNER_HOST_ROOT/bin/xcode-runner"`.
+A separately installed CLI from before job reservations requests a second slot
+and can wait for its own job on a one-slot Mac. Update that CLI before switching hosts.
 
 Lowering the limit lets running operations finish. Extra registrations may
 remain. Deselecting a repository removes its managed runners after active jobs
@@ -187,13 +197,15 @@ runner’s [managed Simulators](CLI.md#ios-simulators).
 ### Pause a Mac
 
 Turn off **Take new jobs** in the runner pane to drain that Mac. Existing
-operations finish. A GitHub job accepted while a runner service is stopping
-can be cancelled. Turn the setting back on to resume the registered services.
+operations finish, including post-job cleanup. Turn the setting back on to
+accept queued jobs again.
 
 ## Pair other Macs
 
 To add execution capacity, install a runner on the additional Mac and pair it
-with the managing host.
+with the managing host. Upgrade the managing host first, then its runner Macs.
+An upgraded runner Mac waits for its manager to supply the repository and labels
+before it can take GitHub jobs. Direct submissions can continue during the upgrade.
 
 1. On the Mac to add, open **Settings…** and turn off **Host** under **Roles**.
    The Mac waits five minutes for a host.
@@ -388,3 +400,4 @@ bash Scripts/enable-hosted-runner.sh "$HOME/Library/XcodeRunnerKit/runners/runne
 ```
 
 This transfers the service to the host and keeps its registration and credentials.
+Sign in on the managing host and select the repository to accept jobs.

@@ -61,6 +61,13 @@ let package = Package(
             resources: [.process("Resources")],
             swiftSettings: [.swiftLanguageMode(.v6), .defaultIsolation(nil)]
         ),
+        .executableTarget(
+            name: "RunnerHostProbe",
+            dependencies: ["XcodeRunnerHostApp"],
+            path: "Tests/Fixtures",
+            exclude: ["BuildProbe", "ExecutionPoolProbe.swift"],
+            sources: ["RunnerHostProbe.swift"]
+        ),
         .testTarget(
             name: "XcodeRunnerKitTests",
             dependencies: ["XcodeRunnerKit"],

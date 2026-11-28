@@ -201,8 +201,15 @@ public struct HostExecutionPool: Sendable {
     public func withSlot<Result: Sendable>(
         operation: @Sendable () async throws -> Result
     ) async throws -> Result {
-        let outcome = await slotOutcome { () async -> Swift.Result<Result, any Error> in
-            do { return .success(try await operation()) }
+        try await withSlotDescriptor { _ in try await operation() }
+    }
+
+    /// Gives a job supervisor the live descriptor so a surviving child keeps the job's slot.
+    package func withSlotDescriptor<Result: Sendable>(
+        _ operation: @Sendable (Int32) async throws -> Result
+    ) async throws -> Result {
+        let outcome = await slotOutcomeWithDescriptor { descriptor async -> Swift.Result<Result, any Error> in
+            do { return .success(try await operation(descriptor)) }
             catch { return .failure(error) }
         }
         let operationResult = outcome.value.flatMap { $0 }
@@ -217,6 +224,12 @@ public struct HostExecutionPool: Sendable {
     /// The value is a failure only when the operation did not start.
     func slotOutcome<Value: Sendable>(
         operation: @Sendable () async -> Value
+    ) async -> CleanupOutcome<Value> {
+        await slotOutcomeWithDescriptor { _ in await operation() }
+    }
+
+    private func slotOutcomeWithDescriptor<Value: Sendable>(
+        operation: @Sendable (Int32) async -> Value
     ) async -> CleanupOutcome<Value> {
         let waiter: Waiter
         let ownership: FileHandle
@@ -236,7 +249,7 @@ public struct HostExecutionPool: Sendable {
     }
 
     private func runWaiting<Value: Sendable>(
-        _ waiter: Waiter, operation: @Sendable () async -> Value
+        _ waiter: Waiter, operation: @Sendable (Int32) async -> Value
     ) async -> CleanupOutcome<Value> {
         while true {
             let slot: FileHandle?
@@ -252,7 +265,7 @@ public struct HostExecutionPool: Sendable {
             if Task.isCancelled {
                 outcome = CleanupOutcome(value: .failure(CancellationError()))
             } else {
-                outcome = CleanupOutcome(value: .success(await operation()))
+                outcome = CleanupOutcome(value: .success(await operation(slot.fileDescriptor)))
             }
             do { try slot.close() } catch { outcome.cleanupErrors.append(error) }
             return outcome
@@ -274,11 +287,47 @@ public struct HostExecutionPool: Sendable {
         try await claimSlot(for: nil).map(Reservation.init)
     }
 
+    /// The official runner closes unrelated descriptors before starting workflow steps. Its supervisor
+    /// holds a separate lock so a nested CLI can verify that this particular job is still running.
+    package static func withGitHubJob<Result: Sendable>(
+        slot: Int32, operation: @Sendable (String) async throws -> Result
+    ) async throws -> Result {
+        let file = try slotFile(slot)
+        let name = file.deletingPathExtension().lastPathComponent
+        let marker = try open(file.deletingLastPathComponent().appending(path: "github-" + name))
+        let token = UUID().uuidString
+        return try await withHandle(marker) {
+            // The caller already holds the unique slot lock. Publish its new token before marking it active.
+            try marker.truncate(atOffset: 0)
+            try marker.write(contentsOf: Data(token.utf8))
+            try await lock(marker)
+            return try await operation(name + ":" + token)
+        }
+    }
+
+    package func hasGitHubJob(_ value: String) throws -> Bool {
+        let parts = value.split(separator: ":", maxSplits: 1)
+        guard parts.count == 2, let index = Int(parts[0].dropFirst(5)), index >= 0,
+              parts[0] == "slot-\(index)", UUID(uuidString: String(parts[1])) != nil else { return false }
+        let marker: FileHandle
+        do { marker = try Self.open(directory.appending(path: "github-" + parts[0]), create: false) }
+        catch let error as NSError where error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT) { return false }
+        return try Self.withHandle(marker) {
+            if flock(marker.fileDescriptor, LOCK_SH | LOCK_NB) == 0 { return false }
+            guard errno == EWOULDBLOCK else { throw Self.posixError() }
+            return try marker.readToEnd() == Data(parts[1].utf8)
+        }
+    }
+
+    private static func slotFile(_ descriptor: Int32) throws -> URL {
+        var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard fcntl(descriptor, F_GETPATH, &path) == 0 else { throw posixError() }
+        return URL(filePath: String(decoding: path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self))
+    }
+
     /// Confirms that the inherited descriptor holds a slot of this pool before using it for the build.
     package func useInheritedSlot(_ descriptor: Int32) throws {
-        var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-        guard fcntl(descriptor, F_GETPATH, &path) == 0 else { throw Self.posixError() }
-        let file = URL(filePath: String(decoding: path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self))
+        let file = try Self.slotFile(descriptor)
         let name = file.lastPathComponent
         guard file.deletingLastPathComponent().standardizedFileURL.path == directory.standardizedFileURL.path,
               let index = Int(name.dropFirst(5).dropLast(5)), index >= 0, name == "slot-\(index).lock" else {

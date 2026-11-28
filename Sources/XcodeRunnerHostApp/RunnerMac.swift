@@ -11,10 +11,27 @@ protocol RunnerMac: Sendable {
     /// - Returns: The archive's location on the Mac.
     func prepareArchive(_ download: GitHubRunnerDownload) async throws -> URL
     func install(_ request: RunnerProvisioner.InstallationRequest) async throws
-    func markUnregistering(_ runner: String, from repositoryID: Int) async throws
+    func markUnregistering(_ runner: String, from repositoryID: Int) async throws -> Bool
+    func configureJobRunner(_ runner: String, repositoryID: Int, labels: [String]) async throws
+    func retainRegistration(_ runner: String) async throws
     func markRemoved(_ runner: String) async throws
     /// Records the labels of the Mac's lists that its runners have, after the host put them on the runners.
     func markLabelsApplied(_ labels: [String]) async throws
+}
+
+/// Owned by the executing host. Admission and the decision to remove a registration run on the same actor.
+@MainActor final class GitHubJobReservations {
+    private var runners: Set<String> = []
+
+    nonisolated init() {}
+
+    func contains(_ directory: URL) -> Bool { runners.contains(directory.lastPathComponent) }
+    func begin(_ directory: RunnerDirectory, installation: HostInstallation) throws {
+        guard !installation.isPaused(), try directory.isHosted(), try !directory.isRemoved(),
+              try directory.unregisteringRepository() == nil else { throw CancellationError() }
+        runners.insert(directory.name)
+    }
+    func finish(_ directory: URL) { runners.remove(directory.lastPathComponent) }
 }
 
 /// A Mac's runner folders, read at once so that a Mac can send them to its managing host.
@@ -46,6 +63,13 @@ struct RunnerFolder: Codable, Sendable {
         let agentName: String?
         let gitHubUrl: String?
         let serverUrl: String?
+
+        var repositoryFullName: String? {
+            guard let value = gitHubUrl ?? serverUrl, let url = URL(string: value),
+                  url.host()?.lowercased() == "github.com" else { return nil }
+            let name = url.path(percentEncoded: false).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            return name.split(separator: "/").count == 2 ? name : nil
+        }
     }
 
     /// A file's contents, or the description of the error that reading it threw.
@@ -76,8 +100,10 @@ struct RunnerFolder: Codable, Sendable {
     private let installationOwner: Reading<String?>
     /// `nil` when the folder has no registration settings or their presence could not be read.
     private let registrationSettings: Reading<Registration>?
+    private let jobSettings: Reading<RunnerDirectory.JobRegistration?>?
 
     init(reading directory: RunnerDirectory) {
+        jobSettings = Reading(directory.jobRegistration)
         name = directory.name
         path = directory.url.path(percentEncoded: false)
         hosted = Reading(directory.isHosted)
@@ -102,6 +128,9 @@ struct RunnerFolder: Codable, Sendable {
     func unregisteringRepository() throws -> String? { try unregistering.get() }
     func incompleteInstallationOwner() throws -> String? { try installationOwner.get() }
 
+    var supportsJobRegistration: Bool { jobSettings != nil }
+    func jobRegistration() throws -> RunnerDirectory.JobRegistration? { try jobSettings?.get() }
+
     func registration() throws -> Registration {
         guard try registered.get(), let registrationSettings else {
             throw ProvisioningError("\(registrationFile) does not exist.")
@@ -113,6 +142,7 @@ struct RunnerFolder: Codable, Sendable {
 /// This Mac's runner folders, which the provisioner reads and changes directly.
 struct LocalRunnerMac: RunnerMac {
     let installation: HostInstallation
+    var reservations = GitHubJobReservations()
     let resolveHostName: @Sendable () -> String
     let prepare: @Sendable (GitHubRunnerDownload) async throws -> URL
     let installRunner: @Sendable (RunnerProvisioner.InstallationRequest) async throws -> Void
@@ -135,9 +165,17 @@ struct LocalRunnerMac: RunnerMac {
 
     func install(_ request: RunnerProvisioner.InstallationRequest) async throws { try await installRunner(request) }
 
-    func markUnregistering(_ runner: String, from repositoryID: Int) throws {
-        try directory(named: runner).markUnregistering(from: repositoryID)
+    @MainActor func markUnregistering(_ runner: String, from repositoryID: Int) throws -> Bool {
+        let folder = try directory(named: runner)
+        try folder.markUnregistering(from: repositoryID)
+        return !reservations.contains(folder.url)
     }
+
+    func configureJobRunner(_ runner: String, repositoryID: Int, labels: [String]) throws {
+        try directory(named: runner).configureJobRunner(repositoryID: repositoryID, labels: labels)
+    }
+
+    func retainRegistration(_ runner: String) throws { try directory(named: runner).clearUnregistering() }
 
     func markRemoved(_ runner: String) throws { try directory(named: runner).markRemoved() }
 

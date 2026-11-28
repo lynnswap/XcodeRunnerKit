@@ -43,6 +43,34 @@ package struct RunnerDirectory: Sendable, Hashable {
     /// The repository ID recorded while a managed installation is incomplete, or nil.
     package func incompleteInstallationOwner() throws -> String? { try text(of: ".xcode-runner-installation") }
 
+    /// The repository and routing labels survive GitHub's expiry of the offline bootstrap runner.
+    package struct JobRegistration: Codable, Equatable, Sendable {
+        package let name: String
+        package let repositoryID: Int
+        package let labels: [String]
+    }
+
+    package func jobRegistration() throws -> JobRegistration? {
+        do { return try JSONDecoder().decode(JobRegistration.self, from: Data(contentsOf: url.appending(path: ".xcode-home-runner-job.json"))) }
+        catch CocoaError.fileReadNoSuchFile { return nil }
+    }
+
+    @discardableResult package func configureJobRunner(repositoryID: Int, labels: [String]) throws -> JobRegistration {
+        let existing = try jobRegistration()
+        let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(16)
+        let value = JobRegistration(name: existing?.name ?? "\(name.prefix(42))-ci-\(suffix)",
+                                    repositoryID: repositoryID, labels: labels)
+        if value != existing {
+            try JSONEncoder().encode(value).write(to: url.appending(path: ".xcode-home-runner-job.json"), options: .atomic)
+        }
+        return value
+    }
+
+    package func clearUnregistering() throws {
+        do { try FileManager.default.removeItem(at: url.appending(path: ".xcode-runner-unregistering")) }
+        catch CocoaError.fileNoSuchFile { }
+    }
+
     /// Decodes the registration fields that `Fields` declares, leaving the others unchecked.
     package func registration<Fields: Decodable>(as fields: Fields.Type) throws -> Fields {
         try JSONDecoder().decode(Fields.self, from: Data(contentsOf: registrationFile))
