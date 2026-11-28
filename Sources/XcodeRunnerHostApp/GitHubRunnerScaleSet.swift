@@ -213,7 +213,7 @@ package struct GitHubRunnerScaleSet: Sendable {
                             if !jobs.ended {
                                 if jobs.holdsSlot {
                                     if !jobs.started, try workerIsRunning() { jobs.workerStarted() }
-                                    try await jobs.verifyPickup()
+                                    jobs.checkPickup()
                                 } else { try await whileAuthorized(.checkConnection) }
                             }
                             retryUntil = nil
@@ -222,12 +222,10 @@ package struct GitHubRunnerScaleSet: Sendable {
                         let body = message.body ?? ""
                         let events = body.isEmpty ? [] : try JSONDecoder().decode([Offer].self, from: Data(body.utf8))
                         if jobs.holdsSlot, !jobs.started, try workerIsRunning() { jobs.workerStarted() }
+                        if message.statistics?.totalAssignedJobs == 0 { jobs.checkPickup() }
                         try await jobs.receive(events, statistics: message.statistics)
                         try await acknowledge(message.messageId)
                         last = message.messageId
-                        // The message has been handled. A separate demand read must not prevent delivery of
-                        // a later start or completion if the statistics endpoint is briefly unavailable.
-                        if message.statistics?.totalAssignedJobs == 0 { try await jobs.verifyPickup() }
                         retryUntil = nil
                     } catch {
                         try Task.checkCancellation()
@@ -272,12 +270,29 @@ package struct GitHubRunnerScaleSet: Sendable {
         private var runnerID: Int?
         private(set) var started = false
         private var wasAssigned = false
-        /// Queue snapshots can precede a concurrent acquisition. Read current demand before retiring its worker.
-        func verifyPickup() async throws {
-            guard holdsSlot, wasAssigned, !started, !ended else { return }
-            if try await set.currentStatistics()?.totalAssignedJobs == 0, !ended {
-                if try workerIsRunning() { started = true }
-                if !started { current?.cancel() }
+        private var pickupRead: Task<Void, Never>?
+
+        /// The queue and the statistics endpoint can fail independently. Keep polling and acknowledging
+        /// messages while confirming whether an acquisition that raced an older snapshot still has a job.
+        func checkPickup() {
+            guard holdsSlot, wasAssigned, !started, !ended, pickupRead == nil else { return }
+            pickupRead = Task {
+                defer { pickupRead = nil }
+                let deadline = ContinuousClock.now.advanced(by: .seconds(60))
+                while !Task.isCancelled && holdsSlot && !started && !ended {
+                    do {
+                        let demand = try await set.currentStatistics()
+                        guard !Task.isCancelled, holdsSlot, !started, !ended else { return }
+                        if try workerIsRunning() { started = true }
+                        else if demand?.totalAssignedJobs == 0 { current?.cancel() }
+                        return
+                    } catch {
+                        guard !Task.isCancelled, holdsSlot, !started, !ended else { return }
+                        if (try? workerIsRunning()) == true { started = true; return }
+                        if ContinuousClock.now >= deadline { current?.cancel(); return }
+                        do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                    }
+                }
             }
         }
 
@@ -342,6 +357,8 @@ package struct GitHubRunnerScaleSet: Sendable {
                     if !Task.isCancelled { failure = error }
                 }
                 ended = true
+                pickupRead?.cancel()
+                await pickupRead?.value
             }
         }
 

@@ -114,6 +114,7 @@ private actor Actions {
                 }
                 if delivered.contains(id), FileManager.default.fileExists(atPath: folder.appending(path: "pid.json").path),
                    !FileManager.default.fileExists(atPath: folder.appending(path: "unused-worker").path),
+                   !FileManager.default.fileExists(atPath: stale.path),
                    (!FileManager.default.fileExists(atPath: folder.appending(path: "sent-stale-demand").path) ||
                     FileManager.default.fileExists(atPath: folder.appending(path: "verified-demand").path)), started.insert(id).inserted {
                     response = ["messageId": 2, "body": "[{\"messageType\":\"JobStarted\",\"runnerRequestId\":\(id)}]"]
