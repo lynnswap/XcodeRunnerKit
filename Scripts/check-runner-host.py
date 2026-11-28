@@ -253,13 +253,15 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
         print(host_log)
         assert 'service ended: Error' not in host_log
 
+    # Like the installed app, launchd's executable lives on the Mac even when the checkout is on a removable volume.
+    launchd_executable = shutil.copy2(executable, root/'RunnerHostProbe')
     launched = fixture(runners, 'launchd')
     (launched/'stop-delay').write_text('8')
     label = f'lynnpd.xcodehomerunner.test.{os.getpid()}'
     target = f'gui/{os.getuid()}/{label}'
     plist = root/'service.plist'
     plist.write_bytes(plistlib.dumps({
-        'Label':label, 'ProgramArguments':arguments, 'RunAtLoad':True, 'ThrottleInterval':1,
+        'Label':label, 'ProgramArguments':[str(launchd_executable), *arguments[1:]], 'RunAtLoad':True, 'ThrottleInterval':1,
         'KeepAlive':{'SuccessfulExit':False},
         'StandardOutPath':str(root/'launchd.stdout'),
         'StandardErrorPath':str(root/'launchd.stderr'),
