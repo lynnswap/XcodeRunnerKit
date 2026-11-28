@@ -58,7 +58,8 @@ private actor Actions {
                 if let folder {
                     try Data().write(to: folder.appending(path: "subscribed"))
                     if FileManager.default.fileExists(atPath: folder.appending(path: "recover-offer").path),
-                       FileManager.default.fileExists(atPath: folder.appending(path: "acknowledged").path) {
+                       FileManager.default.fileExists(atPath: folder.appending(path: "acknowledged").path),
+                       !FileManager.default.fileExists(atPath: folder.appending(path: "acquired").path) {
                         delivered.insert(id)
                         available = 1
                     }
