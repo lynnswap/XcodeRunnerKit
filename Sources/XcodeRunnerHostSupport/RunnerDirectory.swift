@@ -43,6 +43,17 @@ package struct RunnerDirectory: Sendable, Hashable {
     /// The repository ID recorded while a managed installation is incomplete, or nil.
     package func incompleteInstallationOwner() throws -> String? { try text(of: ".xcode-runner-installation") }
 
+    /// The scale set and its single job runner share this installation's name on GitHub.
+    package func jobRunnerName() throws -> String? { try text(of: ".xcode-home-runner-job-name") }
+
+    package func prepareJobRunnerName() throws -> String {
+        if let existing = try jobRunnerName() { return existing }
+        let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(16)
+        let value = "\(name.prefix(42))-ci-\(suffix)"
+        try Data(value.utf8).write(to: url.appending(path: ".xcode-home-runner-job-name"), options: .atomic)
+        return value
+    }
+
     /// Decodes the registration fields that `Fields` declares, leaving the others unchecked.
     package func registration<Fields: Decodable>(as fields: Fields.Type) throws -> Fields {
         try JSONDecoder().decode(Fields.self, from: Data(contentsOf: registrationFile))

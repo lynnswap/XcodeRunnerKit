@@ -87,6 +87,7 @@ protocol RunnerProvisioningClient: Sendable {
     func listRunners(repository: GitHubRepository, accessToken: String) async throws -> [GitHubRunner]
     func registrationToken(repository: GitHubRepository, accessToken: String) async throws -> String
     func runnerDownload(accessToken: String) async throws -> GitHubRunnerDownload
+    func updateJobScaleSet(_ name: String, labels: [String]?, in repository: GitHubRepository, accessToken: String) async throws
     func removeRunner(_ id: Int, from repository: GitHubRepository, accessToken: String) async throws
     func setCustomLabels(_ labels: [String], ofRunner id: Int, in repository: GitHubRepository, accessToken: String) async throws
 }
@@ -111,13 +112,6 @@ actor RunnerProvisioner {
         let hasIndividualService: Bool
         let isHosted: Bool
 
-        var repositoryFullName: String? {
-            guard let rawURL = registration.gitHubUrl ?? registration.serverUrl,
-                  let url = URL(string: rawURL), url.host()?.lowercased() == "github.com" else { return nil }
-            let name = url.path(percentEncoded: false).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            return name.split(separator: "/").count == 2 ? name : nil
-        }
-
         func matches(_ remote: GitHubRunner) -> Bool {
             registration.agentId == remote.id && name == remote.name
         }
@@ -126,7 +120,7 @@ actor RunnerProvisioner {
             to repository: GitHubRepository, remote: [GitHubRunner],
             resolvedRepositories: [String: Result<GitHubRepository?, any Error>]
         ) throws -> Bool {
-            guard let fullName = repositoryFullName else { return false }
+            guard let fullName = registration.repositoryFullName else { return false }
             if fullName.caseInsensitiveCompare(repository.fullName) == .orderedSame { return true }
             guard remote.contains(where: matches), let resolved = resolvedRepositories[fullName.lowercased()] else { return false }
             return try resolved.get()?.id == repository.id
@@ -225,7 +219,7 @@ actor RunnerProvisioner {
         }
         var resolvedRepositories: [String: Result<GitHubRepository?, any Error>] = [:]
         for local in initialLocal {
-            guard let fullName = local.repositoryFullName, resolvedRepositories[fullName.lowercased()] == nil else { continue }
+            guard let fullName = local.registration.repositoryFullName, resolvedRepositories[fullName.lowercased()] == nil else { continue }
             let needsResolution = (repositories + unlinked).contains { repository in
                 guard fullName.caseInsensitiveCompare(repository.fullName) != .orderedSame,
                       let snapshot = snapshots[repository.id], case .success(let remote) = snapshot else { return false }
@@ -287,6 +281,7 @@ actor RunnerProvisioner {
 
         for repository in repositories {
             var knownRunners: [GitHubRunner] = []
+            var jobRunners: [GitHubRunner] = []
             var problems = initialScan.problems + labelProblems
             var hasItsLabels = false
             defer {
@@ -299,11 +294,18 @@ actor RunnerProvisioner {
                 guard let ownership = localOwnership[repository.id] else { throw CancellationError() }
                 var local = try ownership.get()
                 knownRunners = Self.managedRunners(local: local, remote: remote)
+                let jobNames = Set(try local.compactMap { try $0.folder.jobRunnerName() })
+                jobRunners = remote.filter { jobNames.contains($0.name) }
                 // Existing runners get the Mac's labels and lose those that left its list. Their other labels stay.
                 for runner in knownRunners {
                     let current = Self.customLabels(of: runner)
                     let next = current.subtracting(retiredLabels).union(macLabels)
                     guard next != current else { continue }
+                    if let folder = local.first(where: { $0.matches(runner) })?.folder, let name = try folder.jobRunnerName() {
+                        let systemLabels = Set(runner.labels.map { $0.name.lowercased() }).subtracting(current)
+                        // Update routing first so a partial failure is retried against the unchanged registration.
+                        try await client.updateJobScaleSet(name, labels: systemLabels.union(next).sorted(), in: repository, accessToken: token)
+                    }
                     try await client.setCustomLabels(next.sorted(), ofRunner: runner.id, in: repository, accessToken: token)
                 }
                 hasItsLabels = true
@@ -390,7 +392,7 @@ actor RunnerProvisioner {
                     authenticationError = error
                 }
             }
-            statuses.append(Self.status(repository: repository, capacity: capacity, runners: knownRunners, problems: problems))
+            statuses.append(Self.status(repository: repository, capacity: capacity, runners: knownRunners, jobs: jobRunners, problems: problems))
         }
         // Once every runner has the list, the labels that left it are on no runner. A runner that this call could
         // not compare can still have one: its registration could not be read, or its repository was not reconciled.
@@ -445,6 +447,12 @@ actor RunnerProvisioner {
                     }
                 }
                 for candidate in candidates {
+                    let jobName = try candidate.folder.jobRunnerName()
+                    if let jobName, remote.contains(where: { $0.name == jobName && $0.busy }) {
+                        remaining += 1
+                        busyCount += 1
+                        continue
+                    }
                     if let registered = candidate.registered {
                         // A busy runner is removed after its job, at a later synchronization.
                         guard !registered.busy else {
@@ -460,6 +468,7 @@ actor RunnerProvisioner {
                             continue
                         }
                         do {
+                            if let jobName { try await client.updateJobScaleSet(jobName, labels: nil, in: repository, accessToken: token) }
                             try await client.removeRunner(registered.id, from: repository, accessToken: token)
                         } catch GitHubError.response(status: 422, message: _) {
                             // GitHub refuses to remove a runner that started a job after the listing.
@@ -559,11 +568,11 @@ actor RunnerProvisioner {
     }
 
     private static func status(
-        repository: GitHubRepository, capacity: Int, runners: [GitHubRunner], problems: [RunnerProvisioningProblem]
+        repository: GitHubRepository, capacity: Int, runners: [GitHubRunner], jobs: [GitHubRunner] = [], problems: [RunnerProvisioningProblem]
     ) -> RepositoryRunnerStatus {
         RepositoryRunnerStatus(
             repository: repository, desiredCount: capacity, registeredCount: runners.count,
-            onlineCount: runners.count(where: { $0.status == "online" }), busyCount: runners.count(where: \.busy),
+            onlineCount: (runners + jobs).count(where: { $0.status == "online" }), busyCount: (runners + jobs).count(where: \.busy),
             excessCount: max(0, runners.count - capacity), problems: problems
         )
     }

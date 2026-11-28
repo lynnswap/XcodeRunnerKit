@@ -1,0 +1,364 @@
+import Foundation
+import Observation
+import XcodeRunnerKit
+import XcodeRunnerHostSupport
+
+package enum GitHubRunnerAccess: String, Codable, Sendable {
+    case connect
+    case checkConnection
+    case acceptJob
+}
+
+/// One repository runner's GitHub scale set. An offer remains on GitHub until the host acquires it.
+package struct GitHubRunnerScaleSet: Sendable {
+    package struct Grant: Codable, Sendable {
+        let repository: String
+        let registrationToken: String
+        let labels: [String]
+
+        package init(repository: String, registrationToken: String, labels: [String]) {
+            self.repository = repository
+            self.registrationToken = registrationToken
+            self.labels = labels
+        }
+    }
+
+    struct Session: Decodable, Sendable {
+        let sessionId: UUID
+        let messageQueueUrl: URL
+        let messageQueueAccessToken: String
+        let statistics: Statistics?
+    }
+
+    struct Statistics: Decodable, Sendable {
+        let totalAssignedJobs: Int
+    }
+
+    struct Offer: Decodable, Sendable {
+        let messageType: String
+        let runnerRequestId: Int64?
+    }
+
+    struct Message: Decodable, Sendable {
+        let messageId: Int
+        let body: String
+        let statistics: Statistics
+    }
+
+    private struct Label: Codable { let name: String; var type = "System" }
+    private struct ScaleSet: Decodable { let id: Int; let labels: [Label] }
+    private struct Listing<Value: Decodable>: Decodable { let value: [Value] }
+    private struct Credentials: Decodable { let url: URL; let token: String }
+    private struct Definition: Encodable {
+        let name: String
+        let labels: [Label]
+        let runnerGroupId = 1
+    }
+    private struct Runner: Decodable {
+        let id: Int
+        let runnerScaleSetId: Int
+    }
+    struct JIT: Decodable {
+        let encodedJITConfig: String
+        let runner: Reference
+        struct Reference: Decodable { let id: Int }
+    }
+    private let id: Int
+    let session: Session
+    private let endpoint: URL
+    private let adminToken: String
+    private let transport: GitHubClient.Transport
+
+    static func connect(
+        grant: Grant, name: String, owner: String,
+        transport: @escaping GitHubClient.Transport = { try await URLSession.shared.data(for: $0) }
+    ) async throws -> Self {
+        let credentials = try await credentials(repository: grant.repository, registrationToken: grant.registrationToken, transport: transport)
+        let sets = credentials.url.appending(path: "_apis/runtime/runnerscalesets")
+        let auth = "Bearer " + credentials.token
+        let existing = try await find(name, at: sets, authorization: auth, transport: transport)
+        let definition = Definition(name: name, labels: grant.labels.map { Label(name: $0) })
+        let id: Int
+        if let found = existing {
+            id = found.id
+            if Set(found.labels.map { $0.name.lowercased() }) != Set(grant.labels.map { $0.lowercased() }) {
+                let _: ScaleSet = try await json(versioned(sets.appending(path: String(id))), method: "PATCH",
+                    authorization: auth, body: JSONEncoder().encode(definition), transport: transport)
+            }
+        } else {
+            let created: ScaleSet = try await json(versioned(sets), method: "POST", authorization: auth,
+                body: JSONEncoder().encode(definition), transport: transport)
+            id = created.id
+        }
+        let endpoint = sets.appending(path: String(id))
+        let session: Session = try await json(versioned(endpoint.appending(path: "sessions")), method: "POST",
+            authorization: auth, body: JSONEncoder().encode(["ownerName": owner]), transport: transport)
+        return Self(id: id, session: session, endpoint: endpoint, adminToken: credentials.token, transport: transport)
+    }
+
+    private static func credentials(repository: String, registrationToken: String, transport: GitHubClient.Transport) async throws -> Credentials {
+        try await json(URL(string: "https://api.github.com/actions/runner-registration")!, method: "POST",
+            authorization: "RemoteAuth " + registrationToken,
+            body: JSONEncoder().encode(["url": "https://github.com/" + repository, "runner_event": "register"]), transport: transport)
+    }
+
+    private static func find(_ name: String, at sets: URL, authorization: String, transport: GitHubClient.Transport) async throws -> ScaleSet? {
+        let lookup = versioned(sets).appending(queryItems: [.init(name: "name", value: name), .init(name: "runnerGroupId", value: "1")])
+        let listing: Listing<ScaleSet> = try await json(lookup, authorization: authorization, transport: transport)
+        return listing.value.first
+    }
+
+    /// Updates a live scale set’s routing labels, or removes it when its repository is unlinked.
+    static func update(name: String, labels: [String]?, repository: String, registrationToken: String, transport: GitHubClient.Transport) async throws {
+        let credentials = try await credentials(repository: repository, registrationToken: registrationToken, transport: transport)
+        let sets = credentials.url.appending(path: "_apis/runtime/runnerscalesets")
+        if let set = try await find(name, at: sets, authorization: "Bearer " + credentials.token, transport: transport) {
+            let endpoint = versioned(sets.appending(path: String(set.id)))
+            if let labels {
+                let body = Definition(name: name, labels: labels.map { Label(name: $0) })
+                let _: ScaleSet = try await json(endpoint, method: "PATCH", authorization: "Bearer " + credentials.token,
+                    body: JSONEncoder().encode(body), transport: transport)
+            } else {
+                try await delete(endpoint, token: credentials.token, transport: transport)
+            }
+        }
+    }
+
+    /// Poll throughout the job, including while the Mac is full. GitHub can withdraw an offer before a runner starts.
+    @MainActor func listen(
+        pool: HostExecutionPool,
+        hasCapacity: @escaping @MainActor @Sendable () -> Bool,
+        whileAuthorized: @escaping @MainActor @Sendable (GitHubRunnerAccess) async throws -> Void,
+        holding: @escaping @MainActor @Sendable (Bool) -> Void,
+        run: @escaping @MainActor @Sendable (Int32) async throws -> Void
+    ) async throws {
+        let jobs = Jobs(pool: pool, set: self, authorize: { try await whileAuthorized(.acceptJob) }, holding: holding, run: run)
+        if let count = session.statistics?.totalAssignedJobs, count > 0 { jobs.recoverAssignment() }
+        try await withTaskCancellationHandler {
+            do {
+                var last: Int?
+                while true {
+                    try Task.checkCancellation()
+                    if let failure = jobs.failure { throw failure }
+                    let capacity = { @MainActor @Sendable in jobs.current != nil || hasCapacity() ? 1 : 0 }
+                    guard let message = try await next(after: last, capacity: capacity) else {
+                        try await whileAuthorized(.checkConnection)
+                        continue
+                    }
+                    let events = message.body.isEmpty ? [] : try JSONDecoder().decode([Offer].self, from: Data(message.body.utf8))
+                    for event in events { jobs.receive(event) }
+                    jobs.reconcile(assigned: message.statistics.totalAssignedJobs)
+                    try await acknowledge(message.messageId)
+                    last = message.messageId
+                }
+            } catch {
+                // A disconnected managing account stops admissions. A listener or network failure must not kill
+                // an accepted job while its runner still owns the checkout.
+                await jobs.drain(cancel: Task.isCancelled)
+                throw error
+            }
+        } onCancel: {
+            Task { @MainActor in await jobs.drain(cancel: true) }
+        }
+    }
+
+    @MainActor @Observable fileprivate final class Jobs {
+        let pool: HostExecutionPool
+        let set: GitHubRunnerScaleSet
+        let authorize: @MainActor @Sendable () async throws -> Void
+        let holding: @MainActor @Sendable (Bool) -> Void
+        let run: @MainActor @Sendable (Int32) async throws -> Void
+        var current: Task<Void, Never>?
+        var failure: (any Error)?
+        var holdsSlot = false
+        private struct OfferState {
+            let id: Int64
+            var assigned: Bool
+        }
+        private var offers: [OfferState] = []
+        private var finished: Int64?
+        private var request: Int64?
+        private var started = false
+        private var stopping = false
+
+        init(pool: HostExecutionPool, set: GitHubRunnerScaleSet, authorize: @escaping @MainActor @Sendable () async throws -> Void,
+             holding: @escaping @MainActor @Sendable (Bool) -> Void, run: @escaping @MainActor @Sendable (Int32) async throws -> Void) {
+            self.pool = pool
+            self.set = set
+            self.authorize = authorize
+            self.holding = holding
+            self.run = run
+        }
+
+        func receive(_ event: Offer) {
+            guard let id = event.runnerRequestId else { return }
+            switch event.messageType {
+            case "JobAvailable", "JobAssigned":
+                let assigned = event.messageType == "JobAssigned"
+                if request == nil, current != nil, assigned { request = id }
+                guard request != id, finished != id else { break }
+                if let index = offers.firstIndex(where: { $0.id == id }) {
+                    if assigned { offers[index].assigned = true }
+                } else {
+                    offers.append(OfferState(id: id, assigned: assigned))
+                }
+            case "JobStarted" where request == nil || request == id:
+                if current != nil { request = id; started = true }
+            case "JobCompleted":
+                offers.removeAll { $0.id == id }
+                if finished == id { finished = nil }
+                if current != nil, (request == id || request == nil), !started { current?.cancel() }
+            default: break
+            }
+        }
+
+        func recoverAssignment() { start(nil, assigned: true) }
+
+        func reconcile(assigned: Int) {
+            if current != nil { return }
+            if !offers.isEmpty { takeNext() }
+            else if assigned > 0, finished == nil { recoverAssignment() }
+        }
+
+        func drain(cancel: Bool) async {
+            stopping = true
+            if cancel || !holdsSlot { current?.cancel() }
+            await current?.value
+        }
+
+        private func takeNext() {
+            if !stopping, current == nil, failure == nil, !offers.isEmpty {
+                let offer = offers.removeFirst()
+                start(offer.id, assigned: offer.assigned)
+            }
+        }
+
+        private func start(_ id: Int64?, assigned: Bool) {
+            request = id
+            started = false
+            current = Task {
+                do {
+                    let ran = try await pool.withSlotDescriptor { slot in try await self.accept(id, assigned: assigned, slot: slot) }
+                    if ran { finished = request }
+                } catch {
+                    if !Task.isCancelled { failure = error }
+                }
+                request = nil
+                current = nil
+                takeNext()
+            }
+        }
+
+        private func accept(_ id: Int64?, assigned: Bool, slot: Int32) async throws -> Bool {
+            try await authorize()
+            try Task.checkCancellation()
+            holdsSlot = true
+            holding(true)
+            defer { holdsSlot = false; holding(false) }
+            if !assigned, let id, try await !set.acquire(id) { return false }
+            try await run(slot)
+            return true
+        }
+    }
+
+    @MainActor private func next(after last: Int?, capacity: @escaping @MainActor @Sendable () -> Int) async throws -> Message? {
+        let advertised = capacity()
+        return try await withThrowingTaskGroup(of: Message?.self) { group in
+            group.addTask { try await poll(after: last, capacity: advertised) }
+            group.addTask {
+                await Self.waitForCapacityChange(from: advertised, capacity: capacity)
+                return nil
+            }
+            defer { group.cancelAll() }
+            return try await group.next() ?? nil
+        }
+    }
+
+    @MainActor private static func waitForCapacityChange(from advertised: Int, capacity: @escaping @MainActor @Sendable () -> Int) async {
+        // Reissue the long poll when the host monitor sees a slot open or fill.
+        for await value in Observations({ capacity() }) where value != advertised { return }
+    }
+
+    private func poll(after last: Int?, capacity: Int) async throws -> Message? {
+        var url = session.messageQueueUrl
+        if let last { url = url.appending(queryItems: [.init(name: "lastMessageId", value: String(last))]) }
+        var request = URLRequest(url: url, timeoutInterval: 120)
+        request.setValue(String(capacity), forHTTPHeaderField: "X-ScaleSetMaxCapacity")
+        request.setValue("Bearer " + session.messageQueueAccessToken, forHTTPHeaderField: "Authorization")
+        request.setValue("application/json; api-version=6.0-preview", forHTTPHeaderField: "Accept")
+        let (data, response) = try await Self.send(request, transport: transport)
+        if response.statusCode == 202 { return nil }
+        return try JSONDecoder().decode(Message.self, from: data)
+    }
+
+    func acquire(_ job: Int64) async throws -> Bool {
+        let jobs: Listing<Int64> = try await Self.json(Self.versioned(endpoint.appending(path: "acquirejobs")),
+            method: "POST", authorization: "Bearer " + session.messageQueueAccessToken,
+            body: JSONEncoder().encode([job]), transport: transport)
+        return jobs.value.contains(job)
+    }
+
+    func configuration(name: String, workFolder: String) async throws -> JIT {
+        let url = Self.versioned(endpoint.appending(path: "generatejitconfig"))
+        let body = try JSONEncoder().encode(["name": name, "workFolder": workFolder])
+        do { return try await Self.json(url, method: "POST", authorization: "Bearer " + adminToken, body: body, transport: transport) }
+        catch GitHubError.response(status: 409, message: _) {
+            // The host's ownership lock outlives its helpers. A previous process can leave an unused JIT registration.
+            let list: Listing<Runner> = try await Self.json(Self.versioned(runnersURL).appending(queryItems: [.init(name: "agentName", value: name)]),
+                authorization: "Bearer " + adminToken, transport: transport)
+            guard let runner = list.value.first(where: { $0.runnerScaleSetId == id }) else {
+                throw HostSettingsError("Another runner already uses the GitHub job runner name \(name).")
+            }
+            try await removeRunner(runner.id)
+            return try await Self.json(url, method: "POST", authorization: "Bearer " + adminToken, body: body, transport: transport)
+        }
+    }
+
+    private var runnersURL: URL { endpoint.deletingLastPathComponent().deletingLastPathComponent().appending(path: "runners") }
+
+    func removeRunner(_ id: Int) async throws {
+        do { try await Self.delete(Self.versioned(runnersURL.appending(path: String(id))), token: adminToken, transport: transport) }
+        catch GitHubError.response(status: 404, message: _) { }
+    }
+
+    func acknowledge(_ message: Int) async throws {
+        try await Self.delete(session.messageQueueUrl.appending(path: String(message)), token: session.messageQueueAccessToken, transport: transport)
+    }
+
+    func close() async throws {
+        try await Self.delete(Self.versioned(endpoint.appending(path: "sessions/" + session.sessionId.uuidString)), token: adminToken, transport: transport)
+    }
+
+    private static func delete(_ url: URL, token: String, transport: GitHubClient.Transport) async throws {
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+        _ = try await Self.send(request, transport: transport)
+    }
+
+    private static func versioned(_ url: URL) -> URL {
+        url.appending(queryItems: [.init(name: "api-version", value: "6.0-preview")])
+    }
+
+    private static func json<Value: Decodable>(
+        _ url: URL, method: String = "GET", authorization: String, body: Data? = nil,
+        transport: GitHubClient.Transport
+    ) async throws -> Value {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(authorization, forHTTPHeaderField: "Authorization")
+        let (data, _) = try await send(request, transport: transport)
+        return try JSONDecoder().decode(Value.self, from: data)
+    }
+
+    private static func send(_ request: URLRequest, transport: GitHubClient.Transport) async throws -> (Data, HTTPURLResponse) {
+        let (data, response) = try await transport(request)
+        guard let response = response as? HTTPURLResponse else { throw GitHubError.invalidResponse }
+        guard (200..<300).contains(response.statusCode) else {
+            throw GitHubError.response(status: response.statusCode, message: HTTPURLResponse.localizedString(forStatusCode: response.statusCode))
+        }
+        return (data, response)
+    }
+}

@@ -25,6 +25,7 @@ struct HostOptions: ParsableCommand {
     @Option(help: .hidden) var serviceDirectory: String?
     @Option(help: .hidden) var parentProcessID: Int32?
     @Option(help: .hidden) var ownershipDescriptor: Int32?
+    @Option(help: .hidden) var jobSlotDescriptor: Int32?
 
     /// Sends the checkout through the dashboard's pairing, which belongs to the signed app.
     @Flag(help: .hidden) var runOnHost = false
@@ -82,6 +83,13 @@ public enum RunnerHostApplication {
     /// that reads or changes a host when launched with `--control`. Opened without them, the app starts the host that
     /// the installer set up on this Mac, or opens the dashboard for its paired host when this Mac has none.
     @MainActor public static func main() {
+        main(authorization: nil, transport: { try await URLSession.shared.data(for: $0) })
+    }
+
+    package typealias Authorization = @MainActor @Sendable (String, Int, GitHubRunnerAccess) async throws -> GitHubRunnerScaleSet.Grant?
+    package typealias Transport = @Sendable (URLRequest) async throws -> (Data, URLResponse)
+
+    @MainActor package static func main(authorization: Authorization?, transport: @escaping Transport) {
         do {
             let options = try HostOptions.parse(HostOptions.ownArguments(in: Array(CommandLine.arguments.dropFirst())))
             if let json = options.fetchPackage {
@@ -105,13 +113,13 @@ public enum RunnerHostApplication {
             }
             if let directory = options.serviceDirectory {
                 guard let parent = options.parentProcessID, let ownership = options.ownershipDescriptor,
-                      getpgrp() == getpid() else {
+                      let slot = options.jobSlotDescriptor, getpgrp() == getpid() else {
                     throw ValidationError("Service helpers require a parent PID, an ownership descriptor, and their own process group.")
                 }
                 guard fcntl(ownership, F_GETFD) >= 0 else {
                     throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
                 }
-                let service = RunnerService(directory: URL(filePath: directory), parent: parent, ownership: ownership)
+                let service = RunnerService(directory: URL(filePath: directory), parent: parent, ownership: ownership, slot: slot)
                 service.start()
                 withExtendedLifetime(service) { dispatchMain() }
             }
@@ -173,7 +181,7 @@ public enum RunnerHostApplication {
                 }
             }
             if options.settingsService, options.homeDirectory == nil { Dashboard.retireLoginItemForHost() }
-            let host = try RunnerHost(installation: installation, settingsService: options.settingsService)
+            let host = try RunnerHost(installation: installation, settingsService: options.settingsService, authorization: authorization, transport: transport)
             application.setActivationPolicy(.accessory)
             application.delegate = host
             withExtendedLifetime(host) { application.run() }
@@ -200,10 +208,12 @@ private func startInstalledHost(_ label: String) -> Bool {
 }
 
 private extension Subprocess.PlatformOptions {
-    mutating func inheritOwnership(_ descriptor: Int32) {
+    mutating func inheritOwnership(_ descriptors: Int32...) {
         preSpawnProcessConfigurator = { _, actions in
-            let code = posix_spawn_file_actions_addinherit_np(&actions, descriptor)
-            if code != 0 { throw NSError(domain: NSPOSIXErrorDomain, code: Int(code)) }
+            for descriptor in descriptors {
+                let code = posix_spawn_file_actions_addinherit_np(&actions, descriptor)
+                if code != 0 { throw NSError(domain: NSPOSIXErrorDomain, code: Int(code)) }
+            }
         }
     }
 }
@@ -213,14 +223,16 @@ private final class RunnerService {
     private let directory: URL
     private let parent: Int32
     private let ownership: Int32
+    private let slot: Int32
     private var task: Task<Void, Never>?
     private var parentExit: (any DispatchSourceProcess)?
     private var signals: [any DispatchSourceSignal] = []
 
-    init(directory: URL, parent: Int32, ownership: Int32) {
+    init(directory: URL, parent: Int32, ownership: Int32, slot: Int32) {
         self.directory = directory
         self.parent = parent
         self.ownership = ownership
+        self.slot = slot
     }
 
     func start() {
@@ -236,28 +248,35 @@ private final class RunnerService {
         source.resume()
         parentExit = source
         task = Task {
+            var status: Int32 = EXIT_FAILURE
             do {
                 try Task.checkCancellation()
                 var options = Subprocess.PlatformOptions()
-                options.inheritOwnership(ownership)
+                options.inheritOwnership(ownership, slot)
                 options.teardownSequence = [.gracefulShutDown(allowedDurationToNextStep: .seconds(35))]
+                var environment = Subprocess.Environment.inherit
+                do {
+                    let path = try String(contentsOf: directory.appending(path: ".path"), encoding: .utf8)
+                    environment = environment.updating(["PATH": path.trimmingCharacters(in: .newlines)])
+                } catch CocoaError.fileReadNoSuchFile { }
                 let result = try await Subprocess.run(
                     .path("/bin/bash"),
-                    arguments: .init([directory.appending(path: "runsvc.sh").path(percentEncoded: false)]),
-                    environment: .inherit.updating(["ACTIONS_RUNNER_SVC": "1"]),
+                    arguments: .init([directory.appending(path: "run.sh").path]),
+                    environment: environment,
                     workingDirectory: .init(directory.path(percentEncoded: false)),
                     platformOptions: options,
                     output: .currentStandardOutput,
                     error: .currentStandardError
                 )
+                if case .exited(let code) = result.terminationStatus { status = code }
                 print("Official runner service ended with \(result.terminationStatus).")
             } catch {
                 print("Official runner service ended: \(error)")
             }
-            // This helper owns its group; remove any descendants left by the service wrapper.
+            // The host reaps this helper and cleans its group. If the host died, this helper owns cleanup.
             fflush(nil)
-            kill(-getpgrp(), SIGKILL)
-            Darwin.exit(EXIT_FAILURE)
+            if getppid() != parent { kill(-getpgrp(), SIGKILL) }
+            Darwin.exit(status)
         }
         // Cover the interval between spawning this helper and registering the exit notification.
         if getppid() != parent { task?.cancel() }
@@ -275,14 +294,12 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private struct HostedRunner {
         let task: Task<Void, Never>
         var state: RunnerServiceState
-        /// The process group of the runner's service, once it started.
-        var processGroup: Int32?
-        /// Stops the service of a paused runner when the worker of its job ends.
-        var jobWatch: (worker: Int32, source: any DispatchSourceProcess)?
-        /// Whether the service was asked to stop when its job ended while the Mac was paused.
-        var stoppedAfterJob = false
+        var holdsJob = false
+        var problem: String?
     }
     private var runners: [URL: HostedRunner] = [:]
+    private let authorization: RunnerHostApplication.Authorization
+    private let transport: RunnerHostApplication.Transport
     private let settings: HostSettingsModel
     private var settingsServer: HostSettingsServer?
     private var statusItem: NSStatusItem?
@@ -303,13 +320,22 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private var stopped = false
     private var terminationReplyPending = false
 
-    init(installation: HostInstallation, settingsService: Bool) throws {
+    init(installation: HostInstallation, settingsService: Bool, authorization: RunnerHostApplication.Authorization?, transport: @escaping RunnerHostApplication.Transport) throws {
         let root = installation.runnersRoot
         let logs = installation.logsDirectory
         self.root = root.resolvingSymlinksInPath()
         self.logs = logs
         self.installation = installation
-        self.settings = HostSettingsModel(installation: installation)
+        let settings = HostSettingsModel(installation: installation)
+        self.settings = settings
+        self.transport = transport
+        self.authorization = authorization ?? { repository, id, access in
+            switch try await settings.github.runnerAdmission(repository: repository, id: id, access: access) {
+            case .runnerGrant(let grant): return grant
+            case .completed where access != .connect: return nil
+            default: throw HostLinkError.unexpectedReply
+            }
+        }
         dashboardPairing = PairedMacs(
             store: KeychainSecretStore.dashboardHost(hostRoot: installation.hostRoot), name: HostPane.macName, role: .dashboard
         )
@@ -557,23 +583,22 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     }
 
     private func reconcile() async throws {
-        // The services that run need no scan of the runner folders, so a folder that cannot be read does not keep a
-        // paused Mac taking jobs.
-        let finishing = try await stopServicesWhilePaused()
+        settings.refreshPause()
         let scan = try RunnerDirectory.scan(root)
         if let unreadable = scan.unreadable.first { throw unreadable.error }
-        // A runner marked while the services below stop keeps running until the next scan stops it.
         let removed = try scan.directories.filter { try $0.isRemoved() }
         let requested = try scan.directories.filter { try $0.isHosted() && $0.hasRegistration() && !removed.contains($0) }
         let requestedURLs = Set(requested.map(\.url))
-        for directory in runners.keys.filter({ !requestedURLs.contains($0) }) {
-            let task = runners.removeValue(forKey: directory)?.task
-            task?.cancel()
-            await task?.value
+        for (directory, runner) in runners where settings.isPaused || !requestedURLs.contains(directory) || runner.state == .stopped {
+            // A job includes checkout and post-job cleanup, even when Runner.Worker is not present yet.
+            if runner.holdsJob { continue }
+            runner.task.cancel()
+            await runner.task.value
+            runners[directory] = nil
         }
         try Task.checkCancellation()
         // The service of a removed runner stopped above, so its folder is no longer in use.
-        for directory in removed {
+        for directory in removed where runners[directory.url] == nil {
             try FileManager.default.removeItem(at: directory.url)
             print("Removed \(directory.name).")
         }
@@ -585,92 +610,19 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 if !isPaused { print("Skipped \(runner.name): uninstall its individual service before opting in.") }
                 individual.insert(runner.url)
             } else if !isPaused {
-                runners[runner.url] = HostedRunner(task: Task { await serve(runner.url) }, state: .starting)
+                runners[runner.url] = HostedRunner(task: Task { await listen(runner) }, state: .starting)
             }
         }
         settings.runnerScanError = nil
         settings.runners = requested.sorted { $0.name < $1.name }.map { runner in
-            let state: RunnerServiceState = if isPaused, finishing.contains(runner.url) {
+            let state: RunnerServiceState = if isPaused, runners[runner.url]?.holdsJob == true {
                 .finishing
             } else if let hosted = runners[runner.url] {
                 hosted.state
             } else {
                 individual.contains(runner.url) ? .individualService : .paused
             }
-            return RunnerSettingsRow.read(runner, state: state)
-        }
-    }
-
-    /// While the Mac is paused, stops the services of the runners that run no job.
-    ///
-    /// The official runner has no way to refuse jobs while it runs, so a job that it takes in the instant before
-    /// its service stops is cancelled, as when the host quits.
-    ///
-    /// - Returns: The runners that finish a job, whose services stop when it ends.
-    private func stopServicesWhilePaused() async throws -> Set<URL> {
-        // A service that stopped when its job ended is removed even if the Mac resumed since, so that it starts again.
-        for (directory, runner) in runners where runner.stoppedAfterJob {
-            runners[directory] = nil
-            await runner.task.value
-            print("Paused \(directory.lastPathComponent).")
-        }
-        settings.refreshPause()
-        guard settings.isPaused else { return [] }
-        var finishing: Set<URL> = []
-        var stopping: [(directory: URL, task: Task<Void, Never>)] = []
-        for (directory, runner) in runners {
-            // A service that just ended has no processes to list, and no job.
-            if runner.state == .running, let group = runner.processGroup,
-               let worker = (try? Self.jobWorker(inGroup: group)) ?? nil {
-                finishing.insert(directory)
-                if runner.jobWatch?.worker != worker {
-                    runner.jobWatch?.source.cancel()
-                    runners[directory]?.jobWatch = (worker, stopService(of: directory, after: worker))
-                }
-                continue
-            }
-            runner.jobWatch?.source.cancel()
-            runners[directory] = nil
-            // Every idle runner is asked to stop before any of them is waited for, so none takes a job meanwhile.
-            runner.task.cancel()
-            stopping.append((directory, runner.task))
-        }
-        for runner in stopping {
-            await runner.task.value
-            print("Paused \(runner.directory.lastPathComponent).")
-        }
-        try Task.checkCancellation()
-        return finishing
-    }
-
-    /// Stops a paused runner's service as soon as its job's worker ends. A runner whose repository has jobs waiting
-    /// takes the next one before the next scan of the runners.
-    private func stopService(of directory: URL, after worker: Int32) -> any DispatchSourceProcess {
-        let source = DispatchSource.makeProcessSource(identifier: worker, eventMask: .exit, queue: .main)
-        source.setEventHandler {
-            source.cancel()
-            guard let runner = self.runners[directory], runner.jobWatch?.worker == worker else { return }
-            self.runners[directory]?.jobWatch = nil
-            // The Mac can have resumed while the job ran. The next scan removes a service that stops here.
-            if self.settings.isPaused {
-                self.runners[directory]?.stoppedAfterJob = true
-                runner.task.cancel()
-            }
-        }
-        source.resume()
-        return source
-    }
-
-    /// The worker process that the official runner in a service's process group started for the job that it runs.
-    private nonisolated static func jobWorker(inGroup identifier: Int32) throws -> Int32? {
-        try groupMembers(identifier).first { member in
-            var info = proc_bsdshortinfo()
-            let size = Int32(MemoryLayout<proc_bsdshortinfo>.size)
-            // A worker that ended stays listed until the runner collects its status.
-            guard proc_pidinfo(member, PROC_PIDT_SHORTBSDINFO, 0, &info, size) == size, info.pbsi_status != UInt32(SZOMB) else {
-                return false
-            }
-            return withUnsafeBytes(of: info.pbsi_comm) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) } == "Runner.Worker"
+            return RunnerSettingsRow.read(runner, state: state, problem: runners[runner.url]?.problem)
         }
     }
 
@@ -735,53 +687,140 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         return Array(members.prefix(Int(count) / MemoryLayout<Int32>.stride))
     }
 
-    private func serve(_ directory: URL) async {
-        let name = directory.lastPathComponent
+    private func listen(_ directory: RunnerDirectory) async {
+        while !Task.isCancelled && !settings.isPaused {
+            do {
+                let registration = try directory.registration(as: RunnerFolder.Registration.self)
+                guard let repository = registration.repositoryFullName, let workFolder = registration.workFolder else {
+                    throw HostSettingsError("The registration for \(directory.name) must identify its GitHub repository and work folder.")
+                }
+                guard let grant = try await authorization(repository, registration.agentId, .connect) else {
+                    throw HostLinkError.unexpectedReply
+                }
+                let name = try directory.prepareJobRunnerName()
+                let set = try await GitHubRunnerScaleSet.connect(grant: grant, name: name, owner: name, transport: transport)
+                runners[directory.url]?.state = .listening
+                runners[directory.url]?.problem = nil
+                do {
+                    try await set.listen(pool: settings.pool, hasCapacity: {
+                        guard let status = self.settings.poolStatus, !self.settings.isPaused else { return false }
+                        return status.activeJobCount < status.configuration.maximumConcurrentJobs && status.waitingJobCount == 0
+                    }, whileAuthorized: { access in
+                        try Task.checkCancellation()
+                        guard !self.installation.isPaused(), try !directory.isRemoved(),
+                              try directory.unregisteringRepository() == nil else { throw CancellationError() }
+                        _ = try await self.authorization(grant.repository, registration.agentId, access)
+                        try Task.checkCancellation()
+                    }, holding: { holdsJob in
+                        self.runners[directory.url]?.holdsJob = holdsJob
+                        self.runners[directory.url]?.state = holdsJob ? .running : .listening
+                    }, run: { slot in
+                        let configuration = try await set.configuration(name: name, workFolder: workFolder)
+                        do { try await self.serve(directory.url, configuration: configuration.encodedJITConfig, slot: slot) }
+                        catch {
+                            let original = error
+                            do { try await Task { try await set.removeRunner(configuration.runner.id) }.value }
+                            catch { throw HostSettingsError("\(original.localizedDescription) Could not remove the GitHub job runner: \(error.localizedDescription)") }
+                            throw original
+                        }
+                        try await set.removeRunner(configuration.runner.id)
+                    })
+                } catch {
+                    let original = error
+                    do { try await Task { try await set.close() }.value }
+                    catch { print("Could not close the GitHub session for \(directory.name): \(error.localizedDescription)") }
+                    throw original
+                }
+                try await set.close()
+            } catch {
+                if Task.isCancelled || settings.isPaused { break }
+                if runners[directory.url]?.state != .failed {
+                    print("Could not take GitHub jobs for \(directory.name): \(error.localizedDescription)")
+                }
+                runners[directory.url]?.state = .failed
+                runners[directory.url]?.problem = error.localizedDescription
+                do { try await Task.sleep(for: .seconds(15)) } catch { break }
+            }
+        }
+        runners[directory.url]?.state = .stopped
+    }
+
+    private func serve(_ directory: URL, configuration: String, slot: Int32) async throws {
+        let runtime = try await Self.jobRuntime(in: directory)
+        try await launchJob(runtime, name: directory.lastPathComponent, configuration: configuration, slot: slot)
+    }
+
+    /// The official run script keeps its self-updates here. JIT credentials must never replace the registration
+    /// that the managing host uses to identify this work directory.
+    @concurrent private static func jobRuntime(in directory: URL) async throws -> URL {
+        let files = FileManager.default
+        let runtime = directory.appending(path: ".xcode-home-runner-job")
+        if !files.fileExists(atPath: runtime.path) {
+            let staging = directory.appending(path: ".xcode-home-runner-installing")
+            if files.fileExists(atPath: staging.path) { try files.removeItem(at: staging) }
+            try files.createDirectory(at: staging, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            do {
+                for component in ["bin", "externals", "run.sh", "run-helper.sh.template", "safe_sleep.sh"] {
+                    try Task.checkCancellation()
+                    let source = directory.appending(path: component).resolvingSymlinksInPath()
+                    try files.copyItem(at: source, to: staging.appending(path: component))
+                }
+                try files.moveItem(at: staging, to: runtime)
+            } catch {
+                let original = error
+                do { try files.removeItem(at: staging) }
+                catch { throw HostSettingsError("\(original.localizedDescription) Could not clean up the runner installation: \(error.localizedDescription)") }
+                throw original
+            }
+        }
+        for name in [".path", ".env"] {
+            let target = runtime.appending(path: name)
+            do { try Data(contentsOf: directory.appending(path: name)).write(to: target, options: .atomic) }
+            catch CocoaError.fileReadNoSuchFile {
+                do { try files.removeItem(at: target) } catch CocoaError.fileNoSuchFile { }
+            }
+        }
+        return runtime
+    }
+
+    private func launchJob(_ directory: URL, name: String, configuration: String, slot: Int32) async throws {
         let log = logs.appending(path: name + ".log")
         let descriptor = open(log.path(percentEncoded: false), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else {
             print("Could not open log for \(name): \(NSError(domain: NSPOSIXErrorDomain, code: Int(errno))).")
-            runners[directory]?.state = .failed
-            return
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
         defer { close(descriptor) }
         var options = Subprocess.PlatformOptions()
         // The official updater searches for its Node process by the service's process group.
         options.processGroupID = 0
         // Helpers retain this same open-file lock until their services finish shutting down.
-        options.inheritOwnership(lockDescriptor)
+        options.inheritOwnership(lockDescriptor, slot)
         options.teardownSequence = [.gracefulShutDown(allowedDurationToNextStep: .seconds(50))]
-        do {
-            print("Starting \(name); service log: \(log.path(percentEncoded: false)).")
-            _ = try await Subprocess.run(
-                .path(.init(executable.path(percentEncoded: false))),
-                arguments: .init([
-                    "--service-directory", directory.path(percentEncoded: false),
-                    "--parent-process-id", String(getpid()),
-                    "--ownership-descriptor", String(lockDescriptor),
-                ]),
-                environment: .inherit.updating(Dictionary(uniqueKeysWithValues: environment.map {
-                    (Subprocess.Environment.Key(stringLiteral: $0.key), Optional($0.value))
-                })),
-                workingDirectory: .init(directory.path(percentEncoded: false)),
-                platformOptions: options,
-                input: .none,
-                output: .fileDescriptor(.init(rawValue: descriptor), closeAfterSpawningProcess: false),
-                error: .fileDescriptor(.init(rawValue: descriptor), closeAfterSpawningProcess: false)
-            ) { execution in
-                self.runners[directory]?.state = .running
-                self.runners[directory]?.processGroup = execution.processIdentifier.value
-                try await Self.cleanUpServiceGroupAfterExit(execution.processIdentifier.value)
-            }
-            if Task.isCancelled {
-                print("\(name) service stopped.")
-            } else {
-                print("\(name) service stopped. Inspect its service log before restarting the host.")
-            }
-            runners[directory]?.state = .stopped
-        } catch {
-            print("\(name) service ended: \(error)")
-            runners[directory]?.state = .failed
+        var jobEnvironment = environment
+        jobEnvironment["ACTIONS_RUNNER_INPUT_JITCONFIG"] = configuration
+        jobEnvironment["XCODE_RUNNER_GITHUB_JOB_POOL"] = installation.poolDirectory.path
+        let result = try await Subprocess.run(
+            .path(.init(executable.path(percentEncoded: false))),
+            arguments: .init([
+                "--service-directory", directory.path(percentEncoded: false),
+                "--parent-process-id", String(getpid()),
+                "--ownership-descriptor", String(lockDescriptor),
+                "--job-slot-descriptor", String(slot),
+            ]),
+            environment: .inherit.updating(Dictionary(uniqueKeysWithValues: jobEnvironment.map {
+                (Subprocess.Environment.Key(stringLiteral: $0.key), Optional($0.value))
+            })),
+            workingDirectory: .init(directory.path(percentEncoded: false)),
+            platformOptions: options,
+            input: .none,
+            output: .fileDescriptor(.init(rawValue: descriptor), closeAfterSpawningProcess: false),
+            error: .fileDescriptor(.init(rawValue: descriptor), closeAfterSpawningProcess: false)
+        ) { execution in
+            try await Self.cleanUpServiceGroupAfterExit(execution.processIdentifier.value)
+        }
+        guard result.terminationStatus == .exited(0) else {
+            throw HostSettingsError("GitHub runner \(name) ended with \(result.terminationStatus). See \(log.path).")
         }
     }
 }

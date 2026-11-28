@@ -89,7 +89,7 @@ struct OverviewView: View {
                                 if let manager = github.managerName {
                                     Text("This signs out \(confirmedLogin). \(manager) will continue managing this Mac’s runners.")
                                 } else {
-                                    Text("This signs out \(confirmedLogin) and stops syncing runner registrations until you reconnect. Existing runners and jobs keep running.")
+                                    Text("Accepted jobs finish. New GitHub jobs stay queued until you reconnect \(confirmedLogin).")
                                 }
                             }
                     }

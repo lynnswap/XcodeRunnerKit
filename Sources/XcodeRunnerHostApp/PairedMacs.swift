@@ -552,6 +552,11 @@ final class PairedMacs: MacList {
         guard let owner = managingHost, owner.management.manager == nil, mac(pairing.id)?.pairing == pairing else {
             return try await reply(.refused("This Mac is no longer managed by this host."))
         }
+        if case let .runnerAdmission(repository, runnerID, access) = request {
+            do { try await reply(try await owner.github.authorizeRunner(repository: repository, id: runnerID, access: access)) }
+            catch { try await reply(.refused(error.localizedDescription)) }
+            return
+        }
         guard case .fetchPackage(let fetch) = request else {
             return try await reply(.refused("Runners can only fetch approved packages here."))
         }
@@ -1453,7 +1458,7 @@ extension HostLinkRequest {
         switch self {
         case .settings(.read), .github(.read):
             HostLink.requestTimeout
-        case .settings, .syncJobOptions, .syncPackageRepositories, .github, .packageAccess, .fetchPackage, .packageData, .packageEnd:
+        case .settings, .syncJobOptions, .syncPackageRepositories, .github, .packageAccess, .runnerAdmission, .fetchPackage, .packageData, .packageEnd:
             PairedMacs.changeTimeout
         case .macs(let request):
             // The host reads or changes one of its Macs before it answers, within its own time limits.

@@ -75,6 +75,11 @@ struct RunnerProvisionerTests {
             return remote[repository.id, default: []]
         }
 
+        private(set) var removedJobSets: [String] = []
+        func updateJobScaleSet(_ name: String, labels: [String]?, in repository: GitHubRepository, accessToken: String) throws {
+            if labels == nil { removedJobSets.append(name) }
+        }
+
         func removeRunner(_ id: Int, from repository: GitHubRepository, accessToken: String) throws {
             if failingRemoval == id { throw TestFailure("Runner removal failed.") }
             if jobStartedBeforeRemoval == id {
@@ -472,12 +477,14 @@ struct RunnerProvisionerTests {
         try await client.addRunner(repository: GitHubRepository(id: 3, fullName: "example/Manual"), identifier: 21, name: "manual")
         let runners = HostInstallation(homeDirectory: root).runnersRoot
 
+        let jobName = try RunnerDirectory(url: runners.appending(path: "idle")).prepareJobRunnerName()
         let statuses = try await provisioner.reconcile(
             repositories: [firstRepository], unlinked: [secondRepository], capacity: 1, token: "access-token"
         )
         #expect(await client.removals == [11])
         #expect(try RunnerDirectory(url: runners.appending(path: "idle")).isRemoved())
         #expect(try !RunnerDirectory(url: runners.appending(path: "busy")).isRemoved())
+        #expect(await client.removedJobSets == [jobName])
         let unlinked = try #require(statuses.first { $0.repository.id == secondRepository.id })
         #expect(unlinked.isUnlinked)
         #expect(unlinked.registeredCount == 1)

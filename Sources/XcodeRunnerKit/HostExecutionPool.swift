@@ -201,8 +201,15 @@ public struct HostExecutionPool: Sendable {
     public func withSlot<Result: Sendable>(
         operation: @Sendable () async throws -> Result
     ) async throws -> Result {
-        let outcome = await slotOutcome { () async -> Swift.Result<Result, any Error> in
-            do { return .success(try await operation()) }
+        try await withSlotDescriptor { _ in try await operation() }
+    }
+
+    /// Gives a job supervisor the live descriptor so a surviving child keeps the job's slot.
+    package func withSlotDescriptor<Result: Sendable>(
+        _ operation: @Sendable (Int32) async throws -> Result
+    ) async throws -> Result {
+        let outcome = await slotOutcomeWithDescriptor { descriptor async -> Swift.Result<Result, any Error> in
+            do { return .success(try await operation(descriptor)) }
             catch { return .failure(error) }
         }
         let operationResult = outcome.value.flatMap { $0 }
@@ -217,6 +224,12 @@ public struct HostExecutionPool: Sendable {
     /// The value is a failure only when the operation did not start.
     func slotOutcome<Value: Sendable>(
         operation: @Sendable () async -> Value
+    ) async -> CleanupOutcome<Value> {
+        await slotOutcomeWithDescriptor { _ in await operation() }
+    }
+
+    private func slotOutcomeWithDescriptor<Value: Sendable>(
+        operation: @Sendable (Int32) async -> Value
     ) async -> CleanupOutcome<Value> {
         let waiter: Waiter
         let ownership: FileHandle
@@ -236,7 +249,7 @@ public struct HostExecutionPool: Sendable {
     }
 
     private func runWaiting<Value: Sendable>(
-        _ waiter: Waiter, operation: @Sendable () async -> Value
+        _ waiter: Waiter, operation: @Sendable (Int32) async -> Value
     ) async -> CleanupOutcome<Value> {
         while true {
             let slot: FileHandle?
@@ -252,7 +265,7 @@ public struct HostExecutionPool: Sendable {
             if Task.isCancelled {
                 outcome = CleanupOutcome(value: .failure(CancellationError()))
             } else {
-                outcome = CleanupOutcome(value: .success(await operation()))
+                outcome = CleanupOutcome(value: .success(await operation(slot.fileDescriptor)))
             }
             do { try slot.close() } catch { outcome.cleanupErrors.append(error) }
             return outcome

@@ -23,6 +23,7 @@ struct RunnerServiceState: RawRepresentable, Codable, Hashable, Sendable {
     let rawValue: String
 
     static let starting = Self(rawValue: "Starting")
+    static let listening = Self(rawValue: "Listening for GitHub jobs")
     static let running = Self(rawValue: "Running")
     static let stopped = Self(rawValue: "Stopped")
     static let failed = Self(rawValue: "Needs attention")
@@ -41,14 +42,14 @@ struct RunnerSettingsRow: Codable, Equatable, Identifiable, Sendable {
 
     var id: URL { directory }
 
-    static func read(_ runner: RunnerDirectory, state: RunnerServiceState) -> Self {
+    static func read(_ runner: RunnerDirectory, state: RunnerServiceState, problem: String? = nil) -> Self {
         struct Registration: Decodable {
             var agentName: String?
         }
         do {
             return Self(
                 directory: runner.url, name: try runner.registration(as: Registration.self).agentName ?? runner.name, state: state,
-                configurationError: nil
+                configurationError: problem
             )
         } catch {
             return Self(

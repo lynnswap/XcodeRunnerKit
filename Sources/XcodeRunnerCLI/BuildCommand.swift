@@ -152,8 +152,12 @@ struct BuildOptions: ParsableArguments {
             developerDirectory: developerDirectory.map(Self.url) ?? (inheritsXcode ? nil : host?.developerDirectory)
         )
         runner.buildServiceExecutableURL = buildServicePath.map(Self.url) ?? host?.buildServiceExecutableURL
-        if let poolDirectory {
-            runner.executionPool = HostExecutionPool(directory: Self.url(poolDirectory))
+        let requestedPool = poolDirectory.map(Self.url)
+        if let host, ProcessInfo.processInfo.environment["XCODE_RUNNER_GITHUB_JOB_POOL"] == host.poolDirectory.path,
+           requestedPool == nil || requestedPool?.resolvingSymlinksInPath().standardizedFileURL == host.poolDirectory.resolvingSymlinksInPath().standardizedFileURL {
+            runner.simulatorPool = HostExecutionPool(directory: host.poolDirectory).simulatorPool
+        } else if let requestedPool {
+            runner.executionPool = HostExecutionPool(directory: requestedPool)
         } else if let host {
             let pool = HostExecutionPool(directory: host.poolDirectory)
             if let reservedSlot {

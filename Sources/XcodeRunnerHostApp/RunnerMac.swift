@@ -46,6 +46,14 @@ struct RunnerFolder: Codable, Sendable {
         let agentName: String?
         let gitHubUrl: String?
         let serverUrl: String?
+        var workFolder: String?
+
+        var repositoryFullName: String? {
+            guard let value = gitHubUrl ?? serverUrl, let url = URL(string: value),
+                  url.host()?.lowercased() == "github.com" else { return nil }
+            let name = url.path(percentEncoded: false).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            return name.split(separator: "/").count == 2 ? name : nil
+        }
     }
 
     /// A file's contents, or the description of the error that reading it threw.
@@ -76,8 +84,10 @@ struct RunnerFolder: Codable, Sendable {
     private let installationOwner: Reading<String?>
     /// `nil` when the folder has no registration settings or their presence could not be read.
     private let registrationSettings: Reading<Registration>?
+    private let jobName: Reading<String?>?
 
     init(reading directory: RunnerDirectory) {
+        jobName = Reading(directory.jobRunnerName)
         name = directory.name
         path = directory.url.path(percentEncoded: false)
         hosted = Reading(directory.isHosted)
@@ -101,6 +111,8 @@ struct RunnerFolder: Codable, Sendable {
     func isRemoved() throws -> Bool { try removed.get() }
     func unregisteringRepository() throws -> String? { try unregistering.get() }
     func incompleteInstallationOwner() throws -> String? { try installationOwner.get() }
+
+    func jobRunnerName() throws -> String? { try jobName?.get() }
 
     func registration() throws -> Registration {
         guard try registered.get(), let registrationSettings else {
