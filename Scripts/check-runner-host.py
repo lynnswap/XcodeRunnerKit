@@ -113,7 +113,7 @@ pending.write_text(json.dumps({'pid':os.getpid(), 'group':os.getpgrp(),
 pending.replace('pid.json')
 while True: time.sleep(1)
 ''')
-    (directory / 'runsvc.sh').write_text('''#!/bin/bash
+    (directory / 'fixture-job.sh').write_text('''#!/bin/bash
 trap 'kill -INT "$PID"' TERM INT
 python3 worker.py &
 PID=$!
@@ -123,13 +123,11 @@ wait "$PID"
 ''')
     (directory/'bin').mkdir()
     (directory/'externals').mkdir()
-    # The job listener represents the official runner. The fixture JIT configuration identifies its work fixture.
-    listener = directory/'bin/Runner.Listener'
-    listener.write_text('#!/bin/bash\ncd "$ACTIONS_RUNNER_INPUT_JITCONFIG" || exit 1\nexec /bin/bash ./runsvc.sh\n')
-    listener.chmod(0o755)
-    for script in ('run.sh', 'run-helper.sh.template', 'safe_sleep.sh'):
-        (directory/script).write_text('#!/bin/bash\nexec ./bin/Runner.Listener run\n')
-        (directory/script).chmod(0o755)
+    # The credential from the local Actions service identifies the fixture assigned to this runner.
+    service = '#!/bin/bash\nif [[ -n "${ACTIONS_RUNNER_INPUT_JITCONFIG:-}" ]]; then cd "$ACTIONS_RUNNER_INPUT_JITCONFIG" || exit 1; fi\nexec /bin/bash ./fixture-job.sh\n'
+    for script in [directory/'bin/runsvc.sh', directory/'runsvc.sh']:
+        script.write_text(service)
+        script.chmod(0o755)
     return directory
 
 
@@ -231,7 +229,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
             assert alive(first_pid) and alive(second_pid)
             (crashed/'.xcode-runner-host').unlink()
             instant = fixture(runners, 'instant-exit')
-            (instant/'runsvc.sh').write_text('#!/bin/bash\nexit 0\n')
+            (instant/'fixture-job.sh').write_text('#!/bin/bash\nexit 0\n')
             instant_log = host_root/'logs/runners/instant-exit.log'
             wait_for(lambda:instant_log.exists() and 'Official runner service ended' in instant_log.read_text(), 'Immediate service exit was not observed')
             (first/'.xcode-runner-host').unlink()
@@ -344,6 +342,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost admission ') as temporary:
     runners.mkdir(parents=True)
     job = fixture(runners, 'github')
     (job/'assigned').touch()
+    (job/'expire-credentials').touch()
     host_root = home/'Library/Application Support/XcodeRunnerKit'
     pool = host_root/'Pool'
     pool.mkdir(parents=True)
@@ -353,6 +352,8 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost admission ') as temporary:
         host = subprocess.Popen([executable, '--host', '--home-directory', str(home)], stdout=log, stderr=log)
         try:
             wait_for(lambda:list(pool.glob('waiter-*.lock')), 'The GitHub offer did not reach the occupied pool')
+            wait_for(lambda:(job/'capacity-after-offer').exists(), 'The host did not report capacity after the offer')
+            assert (job/'capacity-after-offer').read_text() == '0'
             assert not (job/'provisioned').exists()
             fcntl.flock(slot, fcntl.LOCK_UN)
             wait_for(lambda:(job/'pid.json').exists(), 'No job started after the slot opened')

@@ -54,6 +54,11 @@ package struct RunnerDirectory: Sendable, Hashable {
         return value
     }
 
+    package func clearUnregistering() throws {
+        do { try FileManager.default.removeItem(at: url.appending(path: ".xcode-runner-unregistering")) }
+        catch CocoaError.fileNoSuchFile { }
+    }
+
     /// Decodes the registration fields that `Fields` declares, leaving the others unchecked.
     package func registration<Fields: Decodable>(as fields: Fields.Type) throws -> Fields {
         try JSONDecoder().decode(Fields.self, from: Data(contentsOf: registrationFile))

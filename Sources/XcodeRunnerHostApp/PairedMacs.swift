@@ -318,9 +318,14 @@ struct PairedRunnerMac: RunnerMac {
         try await change(.install(request))
     }
 
-    func markUnregistering(_ runner: String, from repositoryID: Int) async throws {
-        try await change(.markUnregistering(runner: runner, repositoryID: repositoryID))
+    func markUnregistering(_ runner: String, from repositoryID: Int) async throws -> Bool {
+        switch try await macs.requestRunners(.markUnregistering(runner: runner, repositoryID: repositoryID), from: id) {
+        case .completed: true
+        case .finishingGitHubJob: false
+        default: throw HostLinkError.unexpectedReply
+        }
     }
+    func retainRegistration(_ runner: String) async throws { try await change(.retainRegistration(runner: runner)) }
 
     func markRemoved(_ runner: String) async throws { try await change(.markRemoved(runner: runner)) }
 

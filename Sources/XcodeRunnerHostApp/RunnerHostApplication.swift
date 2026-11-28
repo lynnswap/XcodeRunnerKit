@@ -254,15 +254,10 @@ private final class RunnerService {
                 var options = Subprocess.PlatformOptions()
                 options.inheritOwnership(ownership, slot)
                 options.teardownSequence = [.gracefulShutDown(allowedDurationToNextStep: .seconds(35))]
-                var environment = Subprocess.Environment.inherit
-                do {
-                    let path = try String(contentsOf: directory.appending(path: ".path"), encoding: .utf8)
-                    environment = environment.updating(["PATH": path.trimmingCharacters(in: .newlines)])
-                } catch CocoaError.fileReadNoSuchFile { }
                 let result = try await Subprocess.run(
                     .path("/bin/bash"),
-                    arguments: .init([directory.appending(path: "run.sh").path]),
-                    environment: environment,
+                    arguments: .init([directory.appending(path: "runsvc.sh").path]),
+                    environment: .inherit.updating(["ACTIONS_RUNNER_SVC": "1"]),
                     workingDirectory: .init(directory.path(percentEncoded: false)),
                     platformOptions: options,
                     output: .currentStandardOutput,
@@ -294,7 +289,6 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private struct HostedRunner {
         let task: Task<Void, Never>
         var state: RunnerServiceState
-        var holdsJob = false
         var problem: String?
     }
     private var runners: [URL: HostedRunner] = [:]
@@ -591,7 +585,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         let requestedURLs = Set(requested.map(\.url))
         for (directory, runner) in runners where settings.isPaused || !requestedURLs.contains(directory) || runner.state == .stopped {
             // A job includes checkout and post-job cleanup, even when Runner.Worker is not present yet.
-            if runner.holdsJob { continue }
+            if settings.github.reservations.contains(directory) { continue }
             runner.task.cancel()
             await runner.task.value
             runners[directory] = nil
@@ -615,7 +609,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         }
         settings.runnerScanError = nil
         settings.runners = requested.sorted { $0.name < $1.name }.map { runner in
-            let state: RunnerServiceState = if isPaused, runners[runner.url]?.holdsJob == true {
+            let state: RunnerServiceState = if isPaused, settings.github.reservations.contains(runner.url) {
                 .finishing
             } else if let hosted = runners[runner.url] {
                 hosted.state
@@ -694,11 +688,15 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 guard let repository = registration.repositoryFullName, let workFolder = registration.workFolder else {
                     throw HostSettingsError("The registration for \(directory.name) must identify its GitHub repository and work folder.")
                 }
-                guard let grant = try await authorization(repository, registration.agentId, .connect) else {
-                    throw HostLinkError.unexpectedReply
+                let renew: @MainActor @Sendable () async throws -> GitHubRunnerScaleSet.Grant = {
+                    guard let grant = try await self.authorization(repository, registration.agentId, .connect) else {
+                        throw HostLinkError.unexpectedReply
+                    }
+                    return grant
                 }
+                let grant = try await renew()
                 let name = try directory.prepareJobRunnerName()
-                let set = try await GitHubRunnerScaleSet.connect(grant: grant, name: name, owner: name, transport: transport)
+                let set = try await GitHubRunnerScaleSet.connect(grant: grant, name: name, owner: name, renewGrant: renew, transport: transport)
                 runners[directory.url]?.state = .listening
                 runners[directory.url]?.problem = nil
                 do {
@@ -711,9 +709,12 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                               try directory.unregisteringRepository() == nil else { throw CancellationError() }
                         _ = try await self.authorization(grant.repository, registration.agentId, access)
                         try Task.checkCancellation()
-                    }, holding: { holdsJob in
-                        self.runners[directory.url]?.holdsJob = holdsJob
-                        self.runners[directory.url]?.state = holdsJob ? .running : .listening
+                    }, begin: {
+                        try self.settings.github.reservations.begin(directory, installation: self.installation)
+                        self.runners[directory.url]?.state = .running
+                    }, finish: {
+                        self.settings.github.reservations.finish(directory.url)
+                        self.runners[directory.url]?.state = .listening
                     }, run: { slot in
                         let configuration = try await set.configuration(name: name, workFolder: workFolder)
                         do { try await self.serve(directory.url, configuration: configuration.encodedJITConfig, slot: slot) }
@@ -760,11 +761,12 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             if files.fileExists(atPath: staging.path) { try files.removeItem(at: staging) }
             try files.createDirectory(at: staging, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             do {
-                for component in ["bin", "externals", "run.sh", "run-helper.sh.template", "safe_sleep.sh"] {
+                for component in ["bin", "externals"] {
                     try Task.checkCancellation()
                     let source = directory.appending(path: component).resolvingSymlinksInPath()
                     try files.copyItem(at: source, to: staging.appending(path: component))
                 }
+                try files.copyItem(at: staging.appending(path: "bin/runsvc.sh"), to: staging.appending(path: "runsvc.sh"))
                 try files.moveItem(at: staging, to: runtime)
             } catch {
                 let original = error

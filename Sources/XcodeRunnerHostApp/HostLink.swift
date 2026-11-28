@@ -98,6 +98,7 @@ enum RunnerRequest: Codable, Sendable {
     case inventory
     case prepareArchive(GitHubRunnerDownload)
     case install(RunnerProvisioner.InstallationRequest)
+    case retainRegistration(runner: String)
     case markUnregistering(runner: String, repositoryID: Int)
     case markRemoved(runner: String)
     case markLabelsApplied([String])
@@ -179,6 +180,7 @@ enum RemoteOperationEvent: Codable, Sendable {
 enum HostLinkReply: Codable, Sendable {
     case runnerSlots(RunnerSlots)
     case runnerGrant(GitHubRunnerScaleSet.Grant)
+    case finishingGitHubJob
     case activity([RunnerMetricSample])
     case packageRepositories([String])
     case packageResponse(PackageFetch.Response)

@@ -143,6 +143,7 @@ actor RunnerProvisioner {
     init(
         installation: HostInstallation,
         installerURL: URL,
+        reservations: GitHubJobReservations = .init(),
         client: any RunnerProvisioningClient = GitHubClient(),
         hostName: @autoclosure @escaping @Sendable () -> String = ProcessInfo.processInfo.hostName,
         prepareArchive: (@Sendable (GitHubRunnerDownload) async throws -> URL)? = nil,
@@ -150,7 +151,7 @@ actor RunnerProvisioner {
     ) {
         self.init(
             mac: LocalRunnerMac(
-                installation: installation, resolveHostName: hostName,
+                installation: installation, reservations: reservations, resolveHostName: hostName,
                 prepare: prepareArchive ?? { download in try await Self.downloadArchive(download, installation: installation) },
                 installRunner: installRunner ?? { request in
                     try await Self.runInstaller(request, installerURL: installerURL, installation: installation)
@@ -294,6 +295,11 @@ actor RunnerProvisioner {
                 guard let ownership = localOwnership[repository.id] else { throw CancellationError() }
                 var local = try ownership.get()
                 knownRunners = Self.managedRunners(local: local, remote: remote)
+                for runner in local where knownRunners.contains(where: runner.matches) {
+                    if try runner.folder.unregisteringRepository() == String(repository.id) {
+                        try await mac.retainRegistration(runner.folder.name)
+                    }
+                }
                 let jobNames = Set(try local.compactMap { try $0.folder.jobRunnerName() })
                 jobRunners = remote.filter { jobNames.contains($0.name) }
                 // Existing runners get the Mac's labels and lose those that left its list. Their other labels stay.
@@ -461,7 +467,11 @@ actor RunnerProvisioner {
                             continue
                         }
                         do {
-                            try await mac.markUnregistering(candidate.folder.name, from: repository.id)
+                            guard try await mac.markUnregistering(candidate.folder.name, from: repository.id) else {
+                                remaining += 1
+                                busyCount += 1
+                                continue
+                            }
                         } catch {
                             remaining += 1
                             problems.append(.failed("Could not stop \(candidate.name): \(error.localizedDescription)"))

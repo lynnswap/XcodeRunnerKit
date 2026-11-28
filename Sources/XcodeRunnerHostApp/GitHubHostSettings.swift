@@ -65,6 +65,7 @@ final class GitHubHostSettings {
     private(set) var isLoadingRepositories = false
     private(set) var hasRestored = false
     private(set) var isSavingSelection = false
+    let reservations = GitHubJobReservations()
     private var isShuttingDown = false
     var storageIsReady = false
 
@@ -89,7 +90,7 @@ final class GitHubHostSettings {
         self.provisioner = provisioner ?? RunnerProvisioner(
             installation: installation,
             installerURL: Bundle.main.bundleURL.appending(path: "Contents/Resources/HostSetup/install-github-runner.sh"),
-            client: client
+            reservations: reservations, client: client
         )
         do {
             configuration = try GitHubHostConfiguration.load(from: record)
@@ -597,7 +598,7 @@ final class GitHubHostSettings {
     func answer(_ request: RunnerRequest) async -> HostLinkReply {
         switch request {
         case .hostName, .inventory, .markLabelsApplied: break
-        case .prepareArchive, .install, .markUnregistering, .markRemoved:
+        case .prepareArchive, .install, .markUnregistering, .retainRegistration, .markRemoved:
             guard storageIsReady, !isShuttingDown else {
                 return .refused("Runner changes wait until storage is ready and the runner host is running.")
             }
@@ -609,7 +610,9 @@ final class GitHubHostSettings {
                 case .inventory: return .runners(try await mac.runners())
                 case .prepareArchive(let download): return .archive(try await mac.prepareArchive(download))
                 case .install(let installation): try await mac.install(installation)
-                case let .markUnregistering(runner, repositoryID): try await mac.markUnregistering(runner, from: repositoryID)
+                case let .markUnregistering(runner, repositoryID):
+                    return try await mac.markUnregistering(runner, from: repositoryID) ? .completed : .finishingGitHubJob
+                case .retainRegistration(let runner): try await mac.retainRegistration(runner)
                 case .markRemoved(let runner): try await mac.markRemoved(runner)
                 case .markLabelsApplied(let labels): try await mac.markLabelsApplied(labels)
                 }

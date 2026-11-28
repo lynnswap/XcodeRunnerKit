@@ -47,7 +47,7 @@ package struct GitHubRunnerScaleSet: Sendable {
 
     private struct Label: Codable { let name: String; var type = "System" }
     private struct ScaleSet: Decodable { let id: Int; let labels: [Label] }
-    private struct Listing<Value: Decodable>: Decodable { let value: [Value] }
+    private struct Listing<Value: Decodable & Sendable>: Decodable, Sendable { let value: [Value] }
     private struct Credentials: Decodable { let url: URL; let token: String }
     private struct Definition: Encodable {
         let name: String
@@ -56,7 +56,7 @@ package struct GitHubRunnerScaleSet: Sendable {
     }
     private struct Runner: Decodable {
         let id: Int
-        let runnerScaleSetId: Int
+        let runnerScaleSetId: Int?
     }
     struct JIT: Decodable {
         let encodedJITConfig: String
@@ -66,11 +66,48 @@ package struct GitHubRunnerScaleSet: Sendable {
     private let id: Int
     let session: Session
     private let endpoint: URL
-    private let adminToken: String
+    private let runnersURL: URL
+    private let admin: Access<Credentials>
+    private let queue: Access<Session>
     private let transport: GitHubClient.Transport
 
+    /// The service and its message queue issue independent credentials. Concurrent 401s share one renewal.
+    private actor Access<Value: Sendable> {
+        private var value: Value
+        private var generation = 0
+        private var renewal: Task<Value, any Error>?
+        private let renew: @Sendable (Value) async throws -> Value
+
+        init(_ value: Value, renew: @escaping @Sendable (Value) async throws -> Value) {
+            self.value = value
+            self.renew = renew
+        }
+
+        func perform<Result: Sendable>(_ operation: @Sendable (Value) async throws -> Result) async throws -> Result {
+            let used = generation
+            do { return try await operation(value) }
+            catch GitHubError.response(status: 401, message: _) {
+                let refreshed = try await refresh(rejecting: used)
+                try Task.checkCancellation()
+                return try await operation(refreshed)
+            }
+        }
+
+        private func refresh(rejecting rejected: Int) async throws -> Value {
+            guard generation == rejected else { return value }
+            if let renewal { return try await renewal.value }
+            let previous = value
+            let task = Task { try await renew(previous) }
+            renewal = task
+            defer { renewal = nil }
+            value = try await task.value
+            generation += 1
+            return value
+        }
+    }
+
     static func connect(
-        grant: Grant, name: String, owner: String,
+        grant: Grant, name: String, owner: String, renewGrant: @escaping @Sendable () async throws -> Grant,
         transport: @escaping GitHubClient.Transport = { try await URLSession.shared.data(for: $0) }
     ) async throws -> Self {
         let credentials = try await credentials(repository: grant.repository, registrationToken: grant.registrationToken, transport: transport)
@@ -93,7 +130,19 @@ package struct GitHubRunnerScaleSet: Sendable {
         let endpoint = sets.appending(path: String(id))
         let session: Session = try await json(versioned(endpoint.appending(path: "sessions")), method: "POST",
             authorization: auth, body: JSONEncoder().encode(["ownerName": owner]), transport: transport)
-        return Self(id: id, session: session, endpoint: endpoint, adminToken: credentials.token, transport: transport)
+        let admin = Access(credentials) { _ in
+            let grant = try await renewGrant()
+            return try await Self.credentials(repository: grant.repository, registrationToken: grant.registrationToken, transport: transport)
+        }
+        let queue = Access(session) { old in
+            try await admin.perform { credentials in
+                try await json(versioned(endpoint.appending(path: "sessions/" + old.sessionId.uuidString)),
+                    method: "PATCH", authorization: "Bearer " + credentials.token, transport: transport)
+            }
+        }
+        return Self(id: id, session: session, endpoint: endpoint,
+                    runnersURL: credentials.url.appending(path: "_apis/distributedtask/pools/0/agents"),
+                    admin: admin, queue: queue, transport: transport)
     }
 
     private static func credentials(repository: String, registrationToken: String, transport: GitHubClient.Transport) async throws -> Credentials {
@@ -129,10 +178,10 @@ package struct GitHubRunnerScaleSet: Sendable {
         pool: HostExecutionPool,
         hasCapacity: @escaping @MainActor @Sendable () -> Bool,
         whileAuthorized: @escaping @MainActor @Sendable (GitHubRunnerAccess) async throws -> Void,
-        holding: @escaping @MainActor @Sendable (Bool) -> Void,
+        begin: @escaping @MainActor @Sendable () throws -> Void, finish: @escaping @MainActor @Sendable () -> Void,
         run: @escaping @MainActor @Sendable (Int32) async throws -> Void
     ) async throws {
-        let jobs = Jobs(pool: pool, set: self, authorize: { try await whileAuthorized(.acceptJob) }, holding: holding, run: run)
+        let jobs = Jobs(pool: pool, set: self, authorize: { try await whileAuthorized(.acceptJob) }, begin: begin, finish: finish, run: run)
         if let count = session.statistics?.totalAssignedJobs, count > 0 { jobs.recoverAssignment() }
         try await withTaskCancellationHandler {
             do {
@@ -140,7 +189,7 @@ package struct GitHubRunnerScaleSet: Sendable {
                 while true {
                     try Task.checkCancellation()
                     if let failure = jobs.failure { throw failure }
-                    let capacity = { @MainActor @Sendable in jobs.current != nil || hasCapacity() ? 1 : 0 }
+                    let capacity = { @MainActor @Sendable in jobs.holdsSlot || hasCapacity() ? 1 : 0 }
                     guard let message = try await next(after: last, capacity: capacity) else {
                         try await whileAuthorized(.checkConnection)
                         continue
@@ -166,7 +215,8 @@ package struct GitHubRunnerScaleSet: Sendable {
         let pool: HostExecutionPool
         let set: GitHubRunnerScaleSet
         let authorize: @MainActor @Sendable () async throws -> Void
-        let holding: @MainActor @Sendable (Bool) -> Void
+        let begin: @MainActor @Sendable () throws -> Void
+        let finish: @MainActor @Sendable () -> Void
         let run: @MainActor @Sendable (Int32) async throws -> Void
         var current: Task<Void, Never>?
         var failure: (any Error)?
@@ -182,11 +232,12 @@ package struct GitHubRunnerScaleSet: Sendable {
         private var stopping = false
 
         init(pool: HostExecutionPool, set: GitHubRunnerScaleSet, authorize: @escaping @MainActor @Sendable () async throws -> Void,
-             holding: @escaping @MainActor @Sendable (Bool) -> Void, run: @escaping @MainActor @Sendable (Int32) async throws -> Void) {
+             begin: @escaping @MainActor @Sendable () throws -> Void, finish: @escaping @MainActor @Sendable () -> Void, run: @escaping @MainActor @Sendable (Int32) async throws -> Void) {
             self.pool = pool
             self.set = set
             self.authorize = authorize
-            self.holding = holding
+            self.begin = begin
+            self.finish = finish
             self.run = run
         }
 
@@ -252,9 +303,9 @@ package struct GitHubRunnerScaleSet: Sendable {
         private func accept(_ id: Int64?, assigned: Bool, slot: Int32) async throws -> Bool {
             try await authorize()
             try Task.checkCancellation()
+            try begin()
             holdsSlot = true
-            holding(true)
-            defer { holdsSlot = false; holding(false) }
+            defer { holdsSlot = false; finish() }
             if !assigned, let id, try await !set.acquire(id) { return false }
             try await run(slot)
             return true
@@ -280,6 +331,10 @@ package struct GitHubRunnerScaleSet: Sendable {
     }
 
     private func poll(after last: Int?, capacity: Int) async throws -> Message? {
+        try await queue.perform { session in try await poll(session, after: last, capacity: capacity) }
+    }
+
+    private func poll(_ session: Session, after last: Int?, capacity: Int) async throws -> Message? {
         var url = session.messageQueueUrl
         if let last { url = url.appending(queryItems: [.init(name: "lastMessageId", value: String(last))]) }
         var request = URLRequest(url: url, timeoutInterval: 120)
@@ -292,41 +347,51 @@ package struct GitHubRunnerScaleSet: Sendable {
     }
 
     func acquire(_ job: Int64) async throws -> Bool {
-        let jobs: Listing<Int64> = try await Self.json(Self.versioned(endpoint.appending(path: "acquirejobs")),
-            method: "POST", authorization: "Bearer " + session.messageQueueAccessToken,
-            body: JSONEncoder().encode([job]), transport: transport)
+        let jobs: Listing<Int64> = try await queue.perform { session in
+            try await Self.json(Self.versioned(endpoint.appending(path: "acquirejobs")), method: "POST",
+                authorization: "Bearer " + session.messageQueueAccessToken,
+                body: JSONEncoder().encode([job]), transport: transport)
+        }
         return jobs.value.contains(job)
     }
 
     func configuration(name: String, workFolder: String) async throws -> JIT {
         let url = Self.versioned(endpoint.appending(path: "generatejitconfig"))
         let body = try JSONEncoder().encode(["name": name, "workFolder": workFolder])
-        do { return try await Self.json(url, method: "POST", authorization: "Bearer " + adminToken, body: body, transport: transport) }
+        do { return try await admin.perform { credentials in try await Self.json(url, method: "POST", authorization: "Bearer " + credentials.token, body: body, transport: transport) } }
         catch GitHubError.response(status: 409, message: _) {
             // The host's ownership lock outlives its helpers. A previous process can leave an unused JIT registration.
-            let list: Listing<Runner> = try await Self.json(Self.versioned(runnersURL).appending(queryItems: [.init(name: "agentName", value: name)]),
-                authorization: "Bearer " + adminToken, transport: transport)
+            let list: Listing<Runner> = try await admin.perform { credentials in
+                try await Self.json(Self.versioned(runnersURL).appending(queryItems: [.init(name: "agentName", value: name)]),
+                    authorization: "Bearer " + credentials.token, transport: transport)
+            }
             guard let runner = list.value.first(where: { $0.runnerScaleSetId == id }) else {
                 throw HostSettingsError("Another runner already uses the GitHub job runner name \(name).")
             }
             try await removeRunner(runner.id)
-            return try await Self.json(url, method: "POST", authorization: "Bearer " + adminToken, body: body, transport: transport)
+            return try await admin.perform { credentials in try await Self.json(url, method: "POST", authorization: "Bearer " + credentials.token, body: body, transport: transport) }
         }
     }
 
-    private var runnersURL: URL { endpoint.deletingLastPathComponent().deletingLastPathComponent().appending(path: "runners") }
-
     func removeRunner(_ id: Int) async throws {
-        do { try await Self.delete(Self.versioned(runnersURL.appending(path: String(id))), token: adminToken, transport: transport) }
+        do {
+            try await admin.perform { credentials in
+                try await Self.delete(Self.versioned(runnersURL.appending(path: String(id))), token: credentials.token, transport: transport)
+            }
+        }
         catch GitHubError.response(status: 404, message: _) { }
     }
 
     func acknowledge(_ message: Int) async throws {
-        try await Self.delete(session.messageQueueUrl.appending(path: String(message)), token: session.messageQueueAccessToken, transport: transport)
+        try await queue.perform { session in
+            try await Self.delete(session.messageQueueUrl.appending(path: String(message)), token: session.messageQueueAccessToken, transport: transport)
+        }
     }
 
     func close() async throws {
-        try await Self.delete(Self.versioned(endpoint.appending(path: "sessions/" + session.sessionId.uuidString)), token: adminToken, transport: transport)
+        try await admin.perform { credentials in
+            try await Self.delete(Self.versioned(endpoint.appending(path: "sessions/" + session.sessionId.uuidString)), token: credentials.token, transport: transport)
+        }
     }
 
     private static func delete(_ url: URL, token: String, transport: GitHubClient.Transport) async throws {

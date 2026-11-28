@@ -53,8 +53,18 @@ private actor Actions {
                 if let folder { try Data().write(to: folder.appending(path: "subscribed")) }
                 response = ["sessionId": UUID().uuidString, "messageQueueUrl": "https://fixture.invalid/\(id)/messages",
                             "messageQueueAccessToken": "queue", "statistics": ["totalAssignedJobs": 0]]
+            case ("PATCH", _) where parts.contains("sessions"):
+                response = ["sessionId": parts.last!, "messageQueueUrl": "https://fixture.invalid/\(id)/messages",
+                            "messageQueueAccessToken": "renewed-queue", "statistics": ["totalAssignedJobs": 0]]
             case ("GET", "messages"):
                 guard let folder else { throw CocoaError(.fileNoSuchFile) }
+                if FileManager.default.fileExists(atPath: folder.appending(path: "expire-credentials").path),
+                   request.value(forHTTPHeaderField: "Authorization") == "Bearer queue" {
+                    return (Data(), HTTPURLResponse(url: url, statusCode: 401, httpVersion: nil, headerFields: nil)!)
+                }
+                if delivered.contains(id), let capacity = request.value(forHTTPHeaderField: "X-ScaleSetMaxCapacity") {
+                    try Data(capacity.utf8).write(to: folder.appending(path: "capacity-after-offer"), options: .atomic)
+                }
                 if delivered.contains(id) || FileManager.default.fileExists(atPath: folder.appending(path: "no-work").path) {
                     try await Task.sleep(for: .milliseconds(100))
                     return (Data(), HTTPURLResponse(url: url, statusCode: 202, httpVersion: nil, headerFields: nil)!)
@@ -69,9 +79,17 @@ private actor Actions {
                 response = ["value": [id]]
             case ("POST", "generatejitconfig"):
                 guard let folder else { throw CocoaError(.fileNoSuchFile) }
+                let expiry = folder.appending(path: "expire-credentials")
+                if FileManager.default.fileExists(atPath: expiry.path) {
+                    try FileManager.default.removeItem(at: expiry)
+                    return (Data(), HTTPURLResponse(url: url, statusCode: 401, httpVersion: nil, headerFields: nil)!)
+                }
                 try Data().write(to: folder.appending(path: "provisioned"))
                 response = ["encodedJITConfig": folder.path, "runner": ["id": id]]
-            case ("DELETE", _): response = [:]; status = 204
+            case ("DELETE", _) where parts.contains("messages") || parts.contains("sessions")
+                || Array(parts.dropLast().suffix(5)) == ["_apis", "distributedtask", "pools", "0", "agents"]:
+                response = [:]
+                status = 204
             default: throw URLError(.unsupportedURL)
             }
         }

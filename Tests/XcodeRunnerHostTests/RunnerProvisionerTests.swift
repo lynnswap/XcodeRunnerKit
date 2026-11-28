@@ -233,12 +233,12 @@ struct RunnerProvisionerTests {
         var errorDescription: String? { message }
     }
 
-    private func fixture() throws -> (root: URL, client: Client, provisioner: RunnerProvisioner) {
+    private func fixture(reservations: GitHubJobReservations = .init()) throws -> (root: URL, client: Client, provisioner: RunnerProvisioner) {
         let root = URL.temporaryDirectory.appending(path: "Runner provisioning \(UUID().uuidString)")
         let installation = HostInstallation(homeDirectory: root)
         let client = Client(installation: installation)
         return (root, client, RunnerProvisioner(
-            installation: installation, installerURL: root.appending(path: "unused-installer.sh"), client: client,
+            installation: installation, installerURL: root.appending(path: "unused-installer.sh"), reservations: reservations, client: client,
             hostName: "CI Mac", prepareArchive: { await client.prepareArchive($0) },
             installRunner: { try await client.install($0) }
         ))
@@ -467,6 +467,23 @@ struct RunnerProvisionerTests {
         #expect(await client.archiveRequests == 0)
     }
 
+    @MainActor @Test func unlinkWaitsForAnAcceptedJobBeforeGitHubListsItsWorker() async throws {
+        let reservations = GitHubJobReservations()
+        let (root, client, provisioner) = try fixture(reservations: reservations)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await client.addRunner(repository: secondRepository, identifier: 11, name: "starting")
+        let installation = HostInstallation(homeDirectory: root)
+        let directory = RunnerDirectory(url: installation.runnersRoot.appending(path: "starting"))
+        let name = try directory.prepareJobRunnerName()
+        try reservations.begin(directory, installation: installation)
+        let statuses = try await provisioner.reconcile(repositories: [], unlinked: [secondRepository], capacity: 1, token: "access-token")
+        #expect(statuses.first?.busyCount == 1)
+        #expect(await client.removedJobSets.isEmpty)
+        reservations.finish(directory.url)
+        _ = try await provisioner.reconcile(repositories: [], unlinked: [secondRepository], capacity: 1, token: "access-token")
+        #expect(await client.removedJobSets == [name])
+    }
+
     @Test func unlinkedRepositoriesLoseIdleRunnersAndKeepBusyOnesUntilTheirJobsFinish() async throws {
         let (root, client, provisioner) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -562,6 +579,8 @@ struct RunnerProvisionerTests {
         #expect(statuses.first?.errorMessage == "Could not remove idle from GitHub: Runner removal failed.")
         #expect(try !directory.isRemoved())
 
+        _ = try await provisioner.reconcile(repositories: [secondRepository], capacity: 1, token: "access-token")
+        #expect(try directory.unregisteringRepository() == nil)
         await client.failRemoval(of: nil)
         let retried = try await provisioner.reconcile(
             repositories: [], unlinked: [secondRepository], capacity: 1, token: "access-token"

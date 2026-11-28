@@ -11,10 +11,26 @@ protocol RunnerMac: Sendable {
     /// - Returns: The archive's location on the Mac.
     func prepareArchive(_ download: GitHubRunnerDownload) async throws -> URL
     func install(_ request: RunnerProvisioner.InstallationRequest) async throws
-    func markUnregistering(_ runner: String, from repositoryID: Int) async throws
+    func markUnregistering(_ runner: String, from repositoryID: Int) async throws -> Bool
+    func retainRegistration(_ runner: String) async throws
     func markRemoved(_ runner: String) async throws
     /// Records the labels of the Mac's lists that its runners have, after the host put them on the runners.
     func markLabelsApplied(_ labels: [String]) async throws
+}
+
+/// Owned by the executing host. Admission and the decision to remove a registration run on the same actor.
+@MainActor final class GitHubJobReservations {
+    private var runners: Set<URL> = []
+
+    nonisolated init() {}
+
+    func contains(_ directory: URL) -> Bool { runners.contains(directory) }
+    func begin(_ directory: RunnerDirectory, installation: HostInstallation) throws {
+        guard !installation.isPaused(), try directory.isHosted(), try !directory.isRemoved(),
+              try directory.unregisteringRepository() == nil else { throw CancellationError() }
+        runners.insert(directory.url)
+    }
+    func finish(_ directory: URL) { runners.remove(directory) }
 }
 
 /// A Mac's runner folders, read at once so that a Mac can send them to its managing host.
@@ -125,6 +141,7 @@ struct RunnerFolder: Codable, Sendable {
 /// This Mac's runner folders, which the provisioner reads and changes directly.
 struct LocalRunnerMac: RunnerMac {
     let installation: HostInstallation
+    var reservations = GitHubJobReservations()
     let resolveHostName: @Sendable () -> String
     let prepare: @Sendable (GitHubRunnerDownload) async throws -> URL
     let installRunner: @Sendable (RunnerProvisioner.InstallationRequest) async throws -> Void
@@ -147,9 +164,13 @@ struct LocalRunnerMac: RunnerMac {
 
     func install(_ request: RunnerProvisioner.InstallationRequest) async throws { try await installRunner(request) }
 
-    func markUnregistering(_ runner: String, from repositoryID: Int) throws {
-        try directory(named: runner).markUnregistering(from: repositoryID)
+    @MainActor func markUnregistering(_ runner: String, from repositoryID: Int) throws -> Bool {
+        let folder = try directory(named: runner)
+        try folder.markUnregistering(from: repositoryID)
+        return !reservations.contains(folder.url)
     }
+
+    func retainRegistration(_ runner: String) throws { try directory(named: runner).clearUnregistering() }
 
     func markRemoved(_ runner: String) throws { try directory(named: runner).markRemoved() }
 
