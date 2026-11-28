@@ -225,6 +225,9 @@ package struct GitHubRunnerScaleSet: Sendable {
                         try await jobs.receive(events, statistics: message.statistics)
                         try await acknowledge(message.messageId)
                         last = message.messageId
+                        // The message has been handled. A separate demand read must not prevent delivery of
+                        // a later start or completion if the statistics endpoint is briefly unavailable.
+                        if message.statistics?.totalAssignedJobs == 0 { try await jobs.verifyPickup() }
                         retryUntil = nil
                     } catch {
                         try Task.checkCancellation()
@@ -307,10 +310,8 @@ package struct GitHubRunnerScaleSet: Sendable {
                 // A completion naming our worker also confirms it ran, even if its start event was truncated.
                 if let runnerID, events.contains(where: { $0.messageType == "JobCompleted" && $0.runnerId == runnerID }) { started = true }
                 if !started, let request, completed.contains(request) { current?.cancel() }
-                else if !started, statistics?.totalAssignedJobs == 0 {
-                    if holdsSlot { try await verifyPickup() }
-                    else if wasAssigned || statistics?.totalAvailableJobs == 0 { current?.cancel() }
-                }
+                else if !started, !holdsSlot, statistics?.totalAssignedJobs == 0,
+                        wasAssigned || statistics?.totalAvailableJobs == 0 { current?.cancel() }
                 return
             }
             if assigned != nil || (statistics?.totalAssignedJobs ?? 0) > 0 {

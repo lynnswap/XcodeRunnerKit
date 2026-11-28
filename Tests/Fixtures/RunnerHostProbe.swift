@@ -50,6 +50,14 @@ private actor Actions {
             switch (request.httpMethod, parts.last) {
             case ("GET", "runnerscalesets"): response = ["value": []]
             case ("GET", _) where parts.dropLast().last == "runnerscalesets":
+                if let folder, FileManager.default.fileExists(atPath: folder.appending(path: "sent-stale-demand").path) {
+                    let failed = folder.appending(path: "statistics-unavailable")
+                    if !FileManager.default.fileExists(atPath: failed.path) {
+                        try Data().write(to: failed)
+                        return (Data(), HTTPURLResponse(url: url, statusCode: 503, httpVersion: nil, headerFields: nil)!)
+                    }
+                    try Data().write(to: folder.appending(path: "verified-demand"))
+                }
                 let withdrawn = folder.map { FileManager.default.fileExists(atPath: $0.appending(path: "withdrawn").path) } ?? false
                 response = ["statistics": ["totalAssignedJobs": withdrawn ? 0 : 1, "totalAvailableJobs": withdrawn ? 1 : 0]]
             case ("POST", "runnerscalesets"): response = ["id": id, "labels": [["name": "fixture", "type": "System"]]]
@@ -94,8 +102,9 @@ private actor Actions {
                     try Data(capacity.utf8).write(to: folder.appending(path: "capacity-after-offer"), options: .atomic)
                 }
                 let stale = folder.appending(path: "stale-demand")
-                if FileManager.default.fileExists(atPath: stale.path), FileManager.default.fileExists(atPath: folder.appending(path: "provisioned").path) {
-                    try FileManager.default.moveItem(at: stale, to: folder.appending(path: "sent-stale-demand"))
+                if FileManager.default.fileExists(atPath: stale.path), FileManager.default.fileExists(atPath: folder.appending(path: "pid.json").path) {
+                    try FileManager.default.removeItem(at: stale)
+                    try FileManager.default.copyItem(at: folder.appending(path: "pid.json"), to: folder.appending(path: "sent-stale-demand"))
                     response = ["messageId": 3, "statistics": ["totalAssignedJobs": 0, "totalAvailableJobs": 1]]
                     break
                 }
@@ -104,7 +113,9 @@ private actor Actions {
                     break
                 }
                 if delivered.contains(id), FileManager.default.fileExists(atPath: folder.appending(path: "pid.json").path),
-                   !FileManager.default.fileExists(atPath: folder.appending(path: "unused-worker").path), started.insert(id).inserted {
+                   !FileManager.default.fileExists(atPath: folder.appending(path: "unused-worker").path),
+                   (!FileManager.default.fileExists(atPath: folder.appending(path: "sent-stale-demand").path) ||
+                    FileManager.default.fileExists(atPath: folder.appending(path: "verified-demand").path)), started.insert(id).inserted {
                     response = ["messageId": 2, "body": "[{\"messageType\":\"JobStarted\",\"runnerRequestId\":\(id)}]"]
                     break
                 }
@@ -129,6 +140,10 @@ private actor Actions {
                 }
                 try Data().write(to: folder.appending(path: "provisioned"))
                 response = ["encodedJITConfig": folder.path, "runner": ["id": id]]
+            case ("DELETE", "3") where parts.contains("messages"):
+                if let folder { try Data().write(to: folder.appending(path: "acknowledged-stale-demand")) }
+                response = [:]
+                status = 204
             case ("DELETE", "1") where parts.contains("messages"):
                 if let folder { try Data().write(to: folder.appending(path: "acknowledged")) }
                 response = [:]

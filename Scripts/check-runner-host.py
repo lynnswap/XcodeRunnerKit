@@ -371,8 +371,10 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost admission ') as temporary:
             fcntl.flock(slot, fcntl.LOCK_UN)
             wait_for(lambda:(job/'pid.json').exists(), 'No job started after the slot opened')
             wait_for(lambda:(job/'poll-recovered').exists(), 'The queue did not resume polling during worker startup')
-            wait_for(lambda:(job/'sent-stale-demand').exists(), 'The worker did not receive the older queue snapshot')
-            pid = json.loads((job/'pid.json').read_text())['pid']
+            wait_for(lambda:(job/'acknowledged-stale-demand').exists() and (job/'verified-demand').exists(),
+                     'The queue did not acknowledge the stale snapshot and recover current demand')
+            pid = json.loads((job/'sent-stale-demand').read_text())['pid']
+            assert json.loads((job/'pid.json').read_text())['pid'] == pid and alive(pid) and not (job/'stopping').exists()
             (job/'no-work').touch()
             (home/'disconnected').touch()
             second = fixture(runners, 'next')
