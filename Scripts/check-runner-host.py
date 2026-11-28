@@ -260,6 +260,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
     plist = root/'service.plist'
     plist.write_bytes(plistlib.dumps({
         'Label':label, 'ProgramArguments':arguments, 'RunAtLoad':True, 'ThrottleInterval':1,
+        'KeepAlive':{'SuccessfulExit':False},
         'StandardOutPath':str(root/'launchd.stdout'),
         'StandardErrorPath':str(root/'launchd.stderr'),
     }))
@@ -279,11 +280,10 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost test 日本語 ') as tempora
         failed_start = subprocess.run(arguments, capture_output=True, timeout=HANG_LIMIT)
         assert failed_start.returncode != 0 and b'Another runner host' in failed_start.stderr
         assert json.loads((launched/'pid.json').read_text())['pid'] == process['pid']
-        subprocess.run(['launchctl','kickstart',target],check=True)
         wait_for(lambda:not alive(process['pid']), 'Runner helper left a runner alive after host crash')
-        (launched/'pid.json').unlink()
-        subprocess.run(['launchctl','kickstart',target],check=True)
-        wait_for(lambda:(launched/'pid.json').exists(), 'LaunchAgent did not restart')
+        # The installed LaunchAgent retries while any old helper holds the shared ownership lock.
+        wait_for(lambda:json.loads((launched/'pid.json').read_text())['pid'] != process['pid'],
+                 'LaunchAgent did not restart')
         restarted = json.loads((launched/'pid.json').read_text())
         assert restarted['pid'] != process['pid']
     finally:
