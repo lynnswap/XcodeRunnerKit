@@ -222,7 +222,7 @@ package struct GitHubRunnerScaleSet: Sendable {
                         let body = message.body ?? ""
                         let events = body.isEmpty ? [] : try JSONDecoder().decode([Offer].self, from: Data(body.utf8))
                         if jobs.holdsSlot, !jobs.started, try workerIsRunning() { jobs.workerStarted() }
-                        if message.statistics?.totalAssignedJobs == 0 { jobs.checkPickup() }
+                        if let assigned = message.statistics?.totalAssignedJobs { jobs.observeDemand(assigned) }
                         try await jobs.receive(events, statistics: message.statistics)
                         try await acknowledge(message.messageId)
                         last = message.messageId
@@ -271,26 +271,49 @@ package struct GitHubRunnerScaleSet: Sendable {
         private(set) var started = false
         private var wasAssigned = false
         private var pickupRead: Task<Void, Never>?
+        private var needsPickupRead = false
+        private var assignmentRevision = 0
 
-        /// The queue and the statistics endpoint can fail independently. Keep polling and acknowledging
-        /// messages while confirming whether an acquisition that raced an older snapshot still has a job.
+        func observeDemand(_ assigned: Int) {
+            if assigned == 0 { checkPickup() }
+            else {
+                assignmentRevision += 1
+                needsPickupRead = false
+            }
+        }
+
+        /// Keep a withdrawal observed during acquisition or an outstanding read until it can be verified.
         func checkPickup() {
-            guard holdsSlot, wasAssigned, !started, !ended, pickupRead == nil else { return }
+            needsPickupRead = true
+            startPickupReadIfNeeded()
+        }
+
+        private func startPickupReadIfNeeded() {
+            guard needsPickupRead, holdsSlot, wasAssigned, !started, !ended, pickupRead == nil else { return }
             pickupRead = Task {
                 defer { pickupRead = nil }
-                let deadline = ContinuousClock.now.advanced(by: .seconds(60))
-                while !Task.isCancelled && holdsSlot && !started && !ended {
+                var deadline = ContinuousClock.now.advanced(by: .seconds(60))
+                while needsPickupRead && !Task.isCancelled && holdsSlot && !started && !ended {
+                    needsPickupRead = false
+                    let revision = assignmentRevision
                     do {
                         let demand = try await set.currentStatistics()
                         guard !Task.isCancelled, holdsSlot, !started, !ended else { return }
+                        deadline = .now.advanced(by: .seconds(60))
+                        guard assignmentRevision == revision else { continue }
                         if try workerIsRunning() { started = true }
-                        else if demand?.totalAssignedJobs == 0 { current?.cancel() }
-                        return
+                        else if demand?.totalAssignedJobs == 0 { current?.cancel(); return }
                     } catch {
                         guard !Task.isCancelled, holdsSlot, !started, !ended else { return }
+                        if assignmentRevision != revision {
+                            deadline = .now.advanced(by: .seconds(60))
+                            continue
+                        }
                         if (try? workerIsRunning()) == true { started = true; return }
                         if ContinuousClock.now >= deadline { current?.cancel(); return }
+                        needsPickupRead = true
                         do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                        if assignmentRevision != revision { deadline = .now.advanced(by: .seconds(60)) }
                     }
                 }
             }
@@ -372,6 +395,7 @@ package struct GitHubRunnerScaleSet: Sendable {
                 guard try await set.acquire(id) else { return }
                 wasAssigned = true
             }
+            startPickupReadIfNeeded()
             try await run(slot) { self.runnerID = $0 }
             if !started, !Task.isCancelled, let demand = try await set.currentStatistics(), demand.totalAssignedJobs > 0 {
                 throw HostSettingsError("The GitHub runner exited while a job was still awaiting pickup. See the runner log.")
