@@ -183,8 +183,8 @@ post-job steps. An idle registration uses no slot.
 Each managed registration has a GitHub runner scale set with its routing
 labels. The host starts a one-job runner for an accepted job. It uses the
 registration’s work folder and has a stable job runner name, recorded in
-`.xcode-home-runner-job.json` in that registration’s folder along with the repository ID and routing labels. The host keeps using the same folder if GitHub expires the offline bootstrap registration. A workflow
-that keys its own cache by `RUNNER_NAME` creates a new cache on its first run
+`.xcode-home-runner-job.json` along with the repository ID and routing labels. The host keeps using the same
+folder if GitHub expires the offline bootstrap registration. A workflow that keys its own cache by `RUNNER_NAME` creates a new cache on its first run
 after the upgrade.
 
 Lowering the limit lets running operations finish. Extra registrations may
@@ -201,7 +201,9 @@ accept queued jobs again.
 ## Pair other Macs
 
 To add execution capacity, install a runner on the additional Mac and pair it
-with the managing host.
+with the managing host. Upgrade the managing host first, then its runner Macs.
+An upgraded runner Mac waits for its manager to supply the repository and labels
+before it can take GitHub jobs. Direct submissions can continue during the upgrade.
 
 1. On the Mac to add, open **Settings…** and turn off **Host** under **Roles**.
    The Mac waits five minutes for a host.

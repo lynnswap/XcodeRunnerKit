@@ -29,6 +29,7 @@ package struct GitHubRunnerScaleSet: Sendable {
 
     struct Statistics: Decodable, Sendable {
         let totalAssignedJobs: Int
+        let totalAvailableJobs: Int?
     }
 
     struct Offer: Decodable, Sendable {
@@ -173,26 +174,24 @@ package struct GitHubRunnerScaleSet: Sendable {
         run: @escaping @MainActor @Sendable (Int32) async throws -> Void
     ) async throws {
         let jobs = Jobs(pool: pool, set: self, authorize: { try await whileAuthorized(.acceptJob) }, begin: begin, finish: finish, run: run)
-        if let count = session.statistics?.totalAssignedJobs, count > 0 { jobs.recoverAssignment() }
         try await withTaskCancellationHandler {
             do {
+                try await jobs.receive([], statistics: session.statistics, recovering: true)
                 var last: Int?
-                while true {
+                while !jobs.ended {
                     try Task.checkCancellation()
-                    if let failure = jobs.failure { throw failure }
                     let capacity = { @MainActor @Sendable in jobs.holdsSlot || hasCapacity() ? 1 : 0 }
-                    guard let message = try await next(after: last, capacity: capacity, failed: { jobs.failure != nil }) else {
-                        try await whileAuthorized(.checkConnection)
+                    guard let message = try await next(after: last, capacity: capacity, ended: { jobs.ended }) else {
+                        if !jobs.ended { try await whileAuthorized(.checkConnection) }
                         continue
                     }
                     let body = message.body ?? ""
                     let events = body.isEmpty ? [] : try JSONDecoder().decode([Offer].self, from: Data(body.utf8))
-                    for event in events { jobs.receive(event) }
-                    jobs.reconcile(assigned: message.statistics?.totalAssignedJobs ?? 0)
-                    try await jobs.waitForAcquisitions()
+                    try await jobs.receive(events, statistics: message.statistics)
                     try await acknowledge(message.messageId)
                     last = message.messageId
                 }
+                if let failure = jobs.failure { throw failure }
             } catch {
                 // A disconnected managing account stops admissions. A listener or network failure must not kill
                 // an accepted job while its runner still owns the checkout.
@@ -214,16 +213,10 @@ package struct GitHubRunnerScaleSet: Sendable {
         var current: Task<Void, Never>?
         var failure: (any Error)?
         var holdsSlot = false
-        private struct OfferState {
-            let id: Int64
-            var assigned: Bool
-        }
-        private var offers: [OfferState] = []
-        private var pendingAcquisitions = Set<Int64>()
-        private var finished: Int64?
+        var ended = false
         private var request: Int64?
         private var started = false
-        private var stopping = false
+        private var wasAssigned = false
 
         init(pool: HostExecutionPool, set: GitHubRunnerScaleSet, authorize: @escaping @MainActor @Sendable () async throws -> Void,
              begin: @escaping @MainActor @Sendable () throws -> Void, finish: @escaping @MainActor @Sendable () -> Void, run: @escaping @MainActor @Sendable (Int32) async throws -> Void) {
@@ -235,83 +228,55 @@ package struct GitHubRunnerScaleSet: Sendable {
             self.run = run
         }
 
-        func receive(_ event: Offer) {
-            guard let id = event.runnerRequestId else { return }
-            switch event.messageType {
-            case "JobAvailable", "JobAssigned":
-                let assigned = event.messageType == "JobAssigned"
-                if request == nil, current != nil, assigned { request = id }
-                guard request != id, finished != id else { break }
-                // This installation can run one worker. Other available jobs remain unassigned on GitHub.
-                if !assigned {
-                    guard current == nil, offers.isEmpty else { break }
-                    pendingAcquisitions.insert(id)
+        /// A session serves one worker. On exit a new session reads GitHub's current demand, even if
+        /// individual job messages were delayed, omitted, or delivered while the worker was shutting down.
+        func receive(_ events: [Offer], statistics: Statistics?, recovering: Bool = false) async throws {
+            let completed = Set(events.filter { $0.messageType == "JobCompleted" }.compactMap(\.runnerRequestId))
+            let assigned = events.first { $0.messageType == "JobAssigned" && $0.runnerRequestId.map { !completed.contains($0) } == true }
+            if current != nil {
+                if request == nil { request = assigned?.runnerRequestId }
+                if assigned != nil || (statistics?.totalAssignedJobs ?? 0) > 0 { wasAssigned = true }
+                for event in events where event.messageType == "JobStarted" && (request == nil || request == event.runnerRequestId) {
+                    request = event.runnerRequestId
+                    started = true
                 }
-                if let index = offers.firstIndex(where: { $0.id == id }) {
-                    if assigned { offers[index].assigned = true; pendingAcquisitions.remove(id) }
-                } else {
-                    offers.append(OfferState(id: id, assigned: assigned))
+                if !started, let request, completed.contains(request) { current?.cancel() }
+                else if !started, (!holdsSlot || wasAssigned), statistics?.totalAssignedJobs == 0, statistics?.totalAvailableJobs == 0 {
+                    current?.cancel()
                 }
-            case "JobStarted" where request == nil || request == id:
-                if current != nil { request = id; started = true }
-            case "JobCompleted":
-                pendingAcquisitions.remove(id)
-                offers.removeAll { $0.id == id }
-                if finished == id { finished = nil }
-                if current != nil, (request == id || request == nil), !started { current?.cancel() }
-            default: break
+                return
+            }
+            if assigned != nil || (statistics?.totalAssignedJobs ?? 0) > 0 {
+                start(assigned?.runnerRequestId, assigned: true)
+            } else if let offer = events.first(where: {
+                $0.messageType == "JobAvailable" && $0.runnerRequestId.map { !completed.contains($0) } == true
+            })?.runnerRequestId {
+                start(offer, assigned: false)
+            } else if (statistics?.totalAvailableJobs ?? 0) > 0 || (recovering && statistics == nil) {
+                // Acknowledging an availability notification does not acquire its job. GitHub keeps the
+                // outstanding offers here, including offers this host saw before a pause or restart.
+                if let offer = try await set.availableJob() { start(offer, assigned: false) }
             }
         }
 
-        /// GitHub redelivers the message if this host stops before it answers an availability offer.
-        func waitForAcquisitions() async throws {
-            guard !pendingAcquisitions.isEmpty else { return }
-            for await done in Observations({ self.pendingAcquisitions.isEmpty || self.failure != nil }) where done { break }
-            try Task.checkCancellation()
-            if let failure { throw failure }
-        }
-
-        func recoverAssignment() { start(nil, assigned: true) }
-
-        func reconcile(assigned: Int) {
-            if current != nil { return }
-            if !offers.isEmpty { takeNext() }
-            else if assigned > 0, finished == nil { recoverAssignment() }
-        }
-
         func drain(cancel: Bool) async {
-            stopping = true
             if cancel || !holdsSlot { current?.cancel() }
             await current?.value
         }
 
-        private func takeNext() {
-            if !stopping, current == nil, failure == nil, !offers.isEmpty {
-                let offer = offers.removeFirst()
-                start(offer.id, assigned: offer.assigned)
-            }
-        }
-
         private func start(_ id: Int64?, assigned: Bool) {
             request = id
-            started = false
+            wasAssigned = assigned
             current = Task {
                 do {
                     let ran = try await pool.withSlotDescriptor { slot in try await self.accept(id, assigned: assigned, slot: slot) }
-                    if ran {
-                        guard started else {
-                            // The official service can exit successfully even when its listener failed to start.
-                            // Reconnect to recover any assignment that GitHub still needs a runner for.
-                            throw HostSettingsError("The GitHub runner exited before GitHub confirmed the job started.")
-                        }
-                        finished = request
+                    if ran && !started && !Task.isCancelled {
+                        throw HostSettingsError("The GitHub runner exited before GitHub confirmed the job started.")
                     }
                 } catch {
                     if !Task.isCancelled { failure = error }
                 }
-                request = nil
-                current = nil
-                takeNext()
+                ended = true
             }
         }
 
@@ -321,23 +286,19 @@ package struct GitHubRunnerScaleSet: Sendable {
             try begin()
             holdsSlot = true
             defer { holdsSlot = false; finish() }
-            if !assigned, let id {
-                let acquired = try await set.acquire(id)
-                pendingAcquisitions.remove(id)
-                if !acquired { return false }
-            }
+            if !assigned, let id, try await !set.acquire(id) { return false }
             try await run(slot)
             return true
         }
     }
 
     @MainActor private func next(after last: Int?, capacity: @escaping @MainActor @Sendable () -> Int,
-                                 failed: @escaping @MainActor @Sendable () -> Bool) async throws -> Message? {
+                                 ended: @escaping @MainActor @Sendable () -> Bool) async throws -> Message? {
         let advertised = capacity()
         return try await withThrowingTaskGroup(of: Message?.self) { group in
             group.addTask { try await poll(after: last, capacity: advertised) }
             group.addTask {
-                await Self.waitForPollChange { capacity() != advertised || failed() }
+                await Self.waitForPollChange { capacity() != advertised || ended() }
                 return nil
             }
             defer { group.cancelAll() }
@@ -364,6 +325,15 @@ package struct GitHubRunnerScaleSet: Sendable {
         let (data, response) = try await Self.send(request, transport: transport)
         if response.statusCode == 202 { return nil }
         return try JSONDecoder().decode(Message.self, from: data)
+    }
+
+    private func availableJob() async throws -> Int64? {
+        struct Available: Decodable { let runnerRequestId: Int64 }
+        let available: Listing<Available> = try await admin.perform { credentials in
+            try await Self.json(Self.versioned(endpoint.appending(path: "acquirablejobs")),
+                                authorization: "Bearer " + credentials.token, transport: transport)
+        }
+        return available.value.first?.runnerRequestId
     }
 
     func acquire(_ job: Int64) async throws -> Bool {

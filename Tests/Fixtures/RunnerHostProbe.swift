@@ -54,9 +54,20 @@ private actor Actions {
                 delivered.remove(id)
                 started.remove(id)
                 emptyMessages.remove(id)
-                if let folder { try Data().write(to: folder.appending(path: "subscribed")) }
+                var available = 0
+                if let folder {
+                    try Data().write(to: folder.appending(path: "subscribed"))
+                    if FileManager.default.fileExists(atPath: folder.appending(path: "recover-offer").path),
+                       FileManager.default.fileExists(atPath: folder.appending(path: "acknowledged").path) {
+                        delivered.insert(id)
+                        available = 1
+                    }
+                }
                 response = ["sessionId": UUID().uuidString, "messageQueueUrl": "https://fixture.invalid/\(id)/messages",
-                            "messageQueueAccessToken": "queue", "statistics": ["totalAssignedJobs": 0]]
+                            "messageQueueAccessToken": "queue", "statistics": ["totalAssignedJobs": 0, "totalAvailableJobs": available]]
+            case ("GET", "acquirablejobs"):
+                if let folder { try Data().write(to: folder.appending(path: "recovered-offer")) }
+                response = ["value": [["runnerRequestId": id]]]
             case ("PATCH", _) where parts.contains("sessions"):
                 response = ["sessionId": parts.last!, "messageQueueUrl": "https://fixture.invalid/\(id)/messages",
                             "messageQueueAccessToken": "renewed-queue", "statistics": ["totalAssignedJobs": 0]]
@@ -99,6 +110,10 @@ private actor Actions {
                 }
                 try Data().write(to: folder.appending(path: "provisioned"))
                 response = ["encodedJITConfig": folder.path, "runner": ["id": id]]
+            case ("DELETE", "1") where parts.contains("messages"):
+                if let folder { try Data().write(to: folder.appending(path: "acknowledged")) }
+                response = [:]
+                status = 204
             case ("DELETE", _) where parts.contains("messages") || parts.contains("sessions")
                 || Array(parts.dropLast().suffix(5)) == ["_apis", "distributedtask", "pools", "0", "agents"]:
                 response = [:]

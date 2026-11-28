@@ -584,7 +584,11 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         let removed = try scan.directories.filter { try $0.isRemoved() }
         let requested = try scan.directories.filter { try $0.isHosted() && $0.hasRegistration() && !removed.contains($0) }
         var registrations: [URL: RunnerDirectory.JobRegistration] = [:]
-        for runner in requested { registrations[runner.url] = try runner.jobRegistration() }
+        var problems: [URL: String] = [:]
+        for runner in requested {
+            do { registrations[runner.url] = try runner.jobRegistration() }
+            catch { problems[runner.url] = error.localizedDescription }
+        }
         for (directory, runner) in runners where settings.isPaused || registrations[directory] != runner.registration || runner.state == .stopped {
             // A job includes checkout and post-job cleanup, even when Runner.Worker is not present yet.
             if settings.github.reservations.contains(directory) { continue }
@@ -613,12 +617,18 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         settings.runners = requested.sorted { $0.name < $1.name }.map { runner in
             let state: RunnerServiceState = if isPaused, settings.github.reservations.contains(runner.url) {
                 .finishing
+            } else if problems[runner.url] != nil {
+                .failed
             } else if let hosted = runners[runner.url] {
                 hosted.state
             } else {
                 individual.contains(runner.url) ? .individualService : (isPaused ? .paused : .starting)
             }
-            return RunnerSettingsRow.read(runner, state: state, problem: runners[runner.url]?.problem)
+            var problem = problems[runner.url] ?? runners[runner.url]?.problem
+            if state == .starting, registrations[runner.url] == nil, settings.management.manager != nil {
+                problem = "Waiting for GitHub runner configuration. Update the managing host to a version that supports job reservations."
+            }
+            return RunnerSettingsRow.read(runner, state: state, problem: problem)
         }
     }
 
@@ -697,7 +707,15 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 }
                 let grant = try await renew()
                 let name = registration.name
-                let set = try await GitHubRunnerScaleSet.connect(grant: grant, name: name, labels: registration.labels, owner: name, renewGrant: renew, transport: transport)
+                let set: GitHubRunnerScaleSet
+                do {
+                    // Unlinking must drain an in-flight creation before looking up and deleting its scale set.
+                    try Task.checkCancellation()
+                    try settings.github.reservations.begin(directory, installation: installation)
+                    defer { settings.github.reservations.finish(directory.url) }
+                    set = try await GitHubRunnerScaleSet.connect(grant: grant, name: name, labels: registration.labels,
+                                                               owner: name, renewGrant: renew, transport: transport)
+                }
                 runners[directory.url]?.state = .listening
                 runners[directory.url]?.problem = nil
                 do {

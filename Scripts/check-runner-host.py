@@ -343,7 +343,9 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost admission ') as temporary:
     runners = home/'Library/XcodeRunnerKit/runners'
     runners.mkdir(parents=True)
     job = fixture(runners, 'github')
-    (job/'assigned').touch()
+    (job/'recover-offer').touch()
+    malformed = fixture(runners, 'damaged')
+    (malformed/'.xcode-home-runner-job.json').write_text('{')
     (job/'expire-credentials').touch()
     host_root = home/'Library/Application Support/XcodeRunnerKit'
     pool = host_root/'Pool'
@@ -356,6 +358,11 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost admission ') as temporary:
             wait_for(lambda:list(pool.glob('waiter-*.lock')), 'The GitHub offer did not reach the occupied pool')
             wait_for(lambda:(job/'capacity-after-offer').exists(), 'The host did not report capacity after the offer')
             assert (job/'capacity-after-offer').read_text() == '0'
+            assert not (job/'provisioned').exists()
+            assert (job/'acknowledged').exists()
+            stop_host(host, runners)
+            host = subprocess.Popen([executable, '--host', '--home-directory', str(home)], stdout=log, stderr=log)
+            wait_for(lambda:(job/'recovered-offer').exists(), 'An acknowledged offer was lost when the host restarted')
             assert not (job/'provisioned').exists()
             fcntl.flock(slot, fcntl.LOCK_UN)
             wait_for(lambda:(job/'pid.json').exists(), 'No job started after the slot opened')
