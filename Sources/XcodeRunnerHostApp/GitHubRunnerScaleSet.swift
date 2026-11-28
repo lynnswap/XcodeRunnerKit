@@ -305,8 +305,10 @@ package struct GitHubRunnerScaleSet: Sendable {
                             deadline = .now.advanced(by: .seconds(60))
                             continue
                         }
-                        if try workerIsRunning() { started = true }
-                        else if demand?.totalAssignedJobs == 0 { current?.cancel(); return }
+                        if demand?.totalAssignedJobs == 0 {
+                            if try workerIsRunning() { started = true }
+                            else { current?.cancel(); return }
+                        }
                         deadline = .now.advanced(by: .seconds(60))
                     } catch {
                         guard !Task.isCancelled, holdsSlot, !started, !ended else { return }
@@ -357,7 +359,7 @@ package struct GitHubRunnerScaleSet: Sendable {
                         wasAssigned || statistics?.totalAvailableJobs == 0 { current?.cancel() }
                 return
             }
-            if assigned != nil || (statistics?.totalAssignedJobs ?? 0) > 0 {
+            if statistics.map({ $0.totalAssignedJobs > 0 }) ?? (assigned != nil) {
                 start(assigned?.runnerRequestId, assigned: true)
             } else if let offer = events.first(where: {
                 $0.messageType == "JobAvailable" && $0.runnerRequestId.map { !completed.contains($0) } == true
