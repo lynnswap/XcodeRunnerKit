@@ -50,7 +50,8 @@ private actor Actions {
             switch (request.httpMethod, parts.last) {
             case ("GET", "runnerscalesets"): response = ["value": []]
             case ("GET", _) where parts.dropLast().last == "runnerscalesets":
-                response = ["statistics": ["totalAssignedJobs": 1, "totalAvailableJobs": 0]]
+                let withdrawn = folder.map { FileManager.default.fileExists(atPath: $0.appending(path: "withdrawn").path) } ?? false
+                response = ["statistics": ["totalAssignedJobs": withdrawn ? 0 : 1, "totalAvailableJobs": 0]]
             case ("POST", "runnerscalesets"): response = ["id": id, "labels": [["name": "fixture", "type": "System"]]]
             case ("POST", "sessions"):
                 delivered.remove(id)
@@ -97,7 +98,7 @@ private actor Actions {
                     break
                 }
                 if delivered.contains(id), FileManager.default.fileExists(atPath: folder.appending(path: "pid.json").path),
-                   started.insert(id).inserted {
+                   !FileManager.default.fileExists(atPath: folder.appending(path: "unused-worker").path), started.insert(id).inserted {
                     response = ["messageId": 2, "body": "[{\"messageType\":\"JobStarted\",\"runnerRequestId\":\(id)}]"]
                     break
                 }

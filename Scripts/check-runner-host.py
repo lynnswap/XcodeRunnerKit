@@ -374,6 +374,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost admission ') as temporary:
             (job/'no-work').touch()
             (home/'disconnected').touch()
             second = fixture(runners, 'next')
+            (second/'unused-worker').touch()
             try:
                 fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -396,6 +397,11 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost admission ') as temporary:
             (home/'disconnected').unlink()
             fcntl.flock(slot, fcntl.LOCK_UN)
             wait_for(lambda:(second/'pid.json').exists(), 'GitHub intake did not resume after reconnecting')
+            unused_pid = json.loads((second/'pid.json').read_text())['pid']
+            (second/'no-work').touch()
+            (second/'withdrawn').touch()
+            wait_for(lambda:not alive(unused_pid), 'An unused worker kept its slot after GitHub withdrew the job')
+            wait_for(reclaim_slot, 'The withdrawn job left its host slot occupied')
         finally:
             stop_host(host, runners)
 
