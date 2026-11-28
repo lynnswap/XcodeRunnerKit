@@ -308,6 +308,8 @@ package struct GitHubRunnerScaleSet: Sendable {
                         if demand?.totalAssignedJobs == 0 {
                             if try workerIsRunning() { started = true }
                             else { current?.cancel(); return }
+                        } else if (try? workerIsRunning()) == true {
+                            started = true
                         }
                         deadline = .now.advanced(by: .seconds(60))
                     } catch {
