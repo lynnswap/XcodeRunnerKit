@@ -12,6 +12,7 @@ protocol RunnerMac: Sendable {
     func prepareArchive(_ download: GitHubRunnerDownload) async throws -> URL
     func install(_ request: RunnerProvisioner.InstallationRequest) async throws
     func markUnregistering(_ runner: String, from repositoryID: Int) async throws -> Bool
+    func configureJobRunner(_ runner: String, repositoryID: Int, labels: [String]) async throws
     func retainRegistration(_ runner: String) async throws
     func markRemoved(_ runner: String) async throws
     /// Records the labels of the Mac's lists that its runners have, after the host put them on the runners.
@@ -100,10 +101,10 @@ struct RunnerFolder: Codable, Sendable {
     private let installationOwner: Reading<String?>
     /// `nil` when the folder has no registration settings or their presence could not be read.
     private let registrationSettings: Reading<Registration>?
-    private let jobName: Reading<String?>?
+    private let jobSettings: Reading<RunnerDirectory.JobRegistration?>?
 
     init(reading directory: RunnerDirectory) {
-        jobName = Reading(directory.jobRunnerName)
+        jobSettings = Reading(directory.jobRegistration)
         name = directory.name
         path = directory.url.path(percentEncoded: false)
         hosted = Reading(directory.isHosted)
@@ -128,7 +129,8 @@ struct RunnerFolder: Codable, Sendable {
     func unregisteringRepository() throws -> String? { try unregistering.get() }
     func incompleteInstallationOwner() throws -> String? { try installationOwner.get() }
 
-    func jobRunnerName() throws -> String? { try jobName?.get() }
+    var supportsJobRegistration: Bool { jobSettings != nil }
+    func jobRegistration() throws -> RunnerDirectory.JobRegistration? { try jobSettings?.get() }
 
     func registration() throws -> Registration {
         guard try registered.get(), let registrationSettings else {
@@ -168,6 +170,10 @@ struct LocalRunnerMac: RunnerMac {
         let folder = try directory(named: runner)
         try folder.markUnregistering(from: repositoryID)
         return !reservations.contains(folder.url)
+    }
+
+    func configureJobRunner(_ runner: String, repositoryID: Int, labels: [String]) throws {
+        try directory(named: runner).configureJobRunner(repositoryID: repositoryID, labels: labels)
     }
 
     func retainRegistration(_ runner: String) throws { try directory(named: runner).clearUnregistering() }

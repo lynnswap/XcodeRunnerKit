@@ -325,6 +325,9 @@ struct PairedRunnerMac: RunnerMac {
         default: throw HostLinkError.unexpectedReply
         }
     }
+    func configureJobRunner(_ runner: String, repositoryID: Int, labels: [String]) async throws {
+        try await change(.configureJobRunner(runner: runner, repositoryID: repositoryID, labels: labels))
+    }
     func retainRegistration(_ runner: String) async throws { try await change(.retainRegistration(runner: runner)) }
 
     func markRemoved(_ runner: String) async throws { try await change(.markRemoved(runner: runner)) }
@@ -557,8 +560,8 @@ final class PairedMacs: MacList {
         guard let owner = managingHost, owner.management.manager == nil, mac(pairing.id)?.pairing == pairing else {
             return try await reply(.refused("This Mac is no longer managed by this host."))
         }
-        if case let .runnerAdmission(repository, runnerID, access) = request {
-            do { try await reply(try await owner.github.authorizeRunner(repository: repository, id: runnerID, access: access)) }
+        if case let .runnerAdmission(repositoryID, access) = request {
+            do { try await reply(try await owner.github.authorizeRunner(repositoryID: repositoryID, access: access)) }
             catch { try await reply(.refused(error.localizedDescription)) }
             return
         }

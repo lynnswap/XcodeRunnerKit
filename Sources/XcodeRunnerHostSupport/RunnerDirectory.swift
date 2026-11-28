@@ -43,14 +43,26 @@ package struct RunnerDirectory: Sendable, Hashable {
     /// The repository ID recorded while a managed installation is incomplete, or nil.
     package func incompleteInstallationOwner() throws -> String? { try text(of: ".xcode-runner-installation") }
 
-    /// The scale set and its single job runner share this installation's name on GitHub.
-    package func jobRunnerName() throws -> String? { try text(of: ".xcode-home-runner-job-name") }
+    /// The repository and routing labels survive GitHub's expiry of the offline bootstrap runner.
+    package struct JobRegistration: Codable, Equatable, Sendable {
+        package let name: String
+        package let repositoryID: Int
+        package let labels: [String]
+    }
 
-    package func prepareJobRunnerName() throws -> String {
-        if let existing = try jobRunnerName() { return existing }
+    package func jobRegistration() throws -> JobRegistration? {
+        do { return try JSONDecoder().decode(JobRegistration.self, from: Data(contentsOf: url.appending(path: ".xcode-home-runner-job.json"))) }
+        catch CocoaError.fileReadNoSuchFile { return nil }
+    }
+
+    @discardableResult package func configureJobRunner(repositoryID: Int, labels: [String]) throws -> JobRegistration {
+        let existing = try jobRegistration()
         let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(16)
-        let value = "\(name.prefix(42))-ci-\(suffix)"
-        try Data(value.utf8).write(to: url.appending(path: ".xcode-home-runner-job-name"), options: .atomic)
+        let value = JobRegistration(name: existing?.name ?? "\(name.prefix(42))-ci-\(suffix)",
+                                    repositoryID: repositoryID, labels: labels)
+        if value != existing {
+            try JSONEncoder().encode(value).write(to: url.appending(path: ".xcode-home-runner-job.json"), options: .atomic)
+        }
         return value
     }
 

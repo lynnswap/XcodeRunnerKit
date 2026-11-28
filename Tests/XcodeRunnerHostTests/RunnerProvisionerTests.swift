@@ -76,8 +76,8 @@ struct RunnerProvisionerTests {
         }
 
         private(set) var removedJobSets: [String] = []
-        func updateJobScaleSet(_ name: String, labels: [String]?, in repository: GitHubRepository, accessToken: String) throws {
-            if labels == nil { removedJobSets.append(name) }
+        func removeJobScaleSet(_ name: String, in repository: GitHubRepository, accessToken: String) throws {
+            removedJobSets.append(name)
         }
 
         func removeRunner(_ id: Int, from repository: GitHubRepository, accessToken: String) throws {
@@ -467,6 +467,23 @@ struct RunnerProvisionerTests {
         #expect(await client.archiveRequests == 0)
     }
 
+    @Test func expiringTheOfflineRegistrationKeepsTheScaleSetAndWorkFolder() async throws {
+        let (root, client, provisioner) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await client.addRunner(repository: firstRepository, identifier: 11, name: "existing")
+        _ = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "token")
+        let directory = RunnerDirectory(url: HostInstallation(homeDirectory: root).runnersRoot.appending(path: "existing"))
+        let job = try #require(directory.jobRegistration())
+        try await client.removeRunner(11, from: firstRepository, accessToken: "token")
+        let statuses = try await provisioner.reconcile(repositories: [firstRepository], capacity: 1, token: "token")
+        #expect(statuses.first?.registeredCount == 1)
+        #expect(await client.installations.isEmpty)
+        #expect(try directory.jobRegistration() == job)
+        _ = try await provisioner.reconcile(repositories: [], unlinked: [firstRepository], capacity: 1, token: "token")
+        #expect(await client.removedJobSets == [job.name])
+        #expect(try directory.isRemoved())
+    }
+
     @MainActor @Test func unlinkWaitsForAnAcceptedJobBeforeGitHubListsItsWorker() async throws {
         let reservations = GitHubJobReservations()
         let (root, client, provisioner) = try fixture(reservations: reservations)
@@ -474,7 +491,7 @@ struct RunnerProvisionerTests {
         try await client.addRunner(repository: secondRepository, identifier: 11, name: "starting")
         let installation = HostInstallation(homeDirectory: root)
         let directory = RunnerDirectory(url: installation.runnersRoot.appending(path: "starting"))
-        let name = try directory.prepareJobRunnerName()
+        let name = try directory.configureJobRunner(repositoryID: secondRepository.id, labels: []).name
         try reservations.begin(directory, installation: installation)
         let statuses = try await provisioner.reconcile(repositories: [], unlinked: [secondRepository], capacity: 1, token: "access-token")
         #expect(statuses.first?.busyCount == 1)
@@ -494,7 +511,7 @@ struct RunnerProvisionerTests {
         try await client.addRunner(repository: GitHubRepository(id: 3, fullName: "example/Manual"), identifier: 21, name: "manual")
         let runners = HostInstallation(homeDirectory: root).runnersRoot
 
-        let jobName = try RunnerDirectory(url: runners.appending(path: "idle")).prepareJobRunnerName()
+        let jobName = try RunnerDirectory(url: runners.appending(path: "idle")).configureJobRunner(repositoryID: secondRepository.id, labels: []).name
         let statuses = try await provisioner.reconcile(
             repositories: [firstRepository], unlinked: [secondRepository], capacity: 1, token: "access-token"
         )

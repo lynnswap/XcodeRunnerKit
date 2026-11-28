@@ -165,11 +165,11 @@ struct GitHubHostSettingsTests {
         #expect((status.errorMessage == nil) == isStillAccessible)
         #expect(await transport.requests.allSatisfy { $0.url?.path.hasPrefix("/repos/owner/Previous/") == false })
         if isStillAccessible {
-            let reply = try await model.authorizeRunner(repository: status.repository.fullName, id: 1, access: .checkConnection)
+            let reply = try await model.authorizeRunner(repositoryID: status.repository.id, access: .checkConnection)
             guard case .completed = reply else { Issue.record("The selected repository cannot take jobs after being renamed."); return }
             await model.signOut(confirmedLogin: "owner")
             do {
-                _ = try await model.authorizeRunner(repository: status.repository.fullName, id: 1, access: .checkConnection)
+                _ = try await model.authorizeRunner(repositoryID: status.repository.id, access: .checkConnection)
                 Issue.record("A disconnected host authorized a new job.")
             } catch GitHubError.notSignedIn { }
         }

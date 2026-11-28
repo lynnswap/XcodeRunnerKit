@@ -14,12 +14,9 @@ package struct GitHubRunnerScaleSet: Sendable {
     package struct Grant: Codable, Sendable {
         let repository: String
         let registrationToken: String
-        let labels: [String]
-
-        package init(repository: String, registrationToken: String, labels: [String]) {
+        package init(repository: String, registrationToken: String) {
             self.repository = repository
             self.registrationToken = registrationToken
-            self.labels = labels
         }
     }
 
@@ -41,8 +38,8 @@ package struct GitHubRunnerScaleSet: Sendable {
 
     struct Message: Decodable, Sendable {
         let messageId: Int
-        let body: String
-        let statistics: Statistics
+        let body: String?
+        let statistics: Statistics?
     }
 
     private struct Label: Codable { let name: String; var type = "System" }
@@ -107,18 +104,18 @@ package struct GitHubRunnerScaleSet: Sendable {
     }
 
     static func connect(
-        grant: Grant, name: String, owner: String, renewGrant: @escaping @Sendable () async throws -> Grant,
+        grant: Grant, name: String, labels: [String], owner: String, renewGrant: @escaping @Sendable () async throws -> Grant,
         transport: @escaping GitHubClient.Transport = { try await URLSession.shared.data(for: $0) }
     ) async throws -> Self {
         let credentials = try await credentials(repository: grant.repository, registrationToken: grant.registrationToken, transport: transport)
         let sets = credentials.url.appending(path: "_apis/runtime/runnerscalesets")
         let auth = "Bearer " + credentials.token
         let existing = try await find(name, at: sets, authorization: auth, transport: transport)
-        let definition = Definition(name: name, labels: grant.labels.map { Label(name: $0) })
+        let definition = Definition(name: name, labels: labels.map { Label(name: $0) })
         let id: Int
         if let found = existing {
             id = found.id
-            if Set(found.labels.map { $0.name.lowercased() }) != Set(grant.labels.map { $0.lowercased() }) {
+            if Set(found.labels.map { $0.name.lowercased() }) != Set(labels.map { $0.lowercased() }) {
                 let _: ScaleSet = try await json(versioned(sets.appending(path: String(id))), method: "PATCH",
                     authorization: auth, body: JSONEncoder().encode(definition), transport: transport)
             }
@@ -157,19 +154,13 @@ package struct GitHubRunnerScaleSet: Sendable {
         return listing.value.first
     }
 
-    /// Updates a live scale set’s routing labels, or removes it when its repository is unlinked.
-    static func update(name: String, labels: [String]?, repository: String, registrationToken: String, transport: GitHubClient.Transport) async throws {
+    /// Removes the scale set when its repository is unlinked.
+    static func remove(name: String, repository: String, registrationToken: String, transport: GitHubClient.Transport) async throws {
         let credentials = try await credentials(repository: repository, registrationToken: registrationToken, transport: transport)
         let sets = credentials.url.appending(path: "_apis/runtime/runnerscalesets")
         if let set = try await find(name, at: sets, authorization: "Bearer " + credentials.token, transport: transport) {
             let endpoint = versioned(sets.appending(path: String(set.id)))
-            if let labels {
-                let body = Definition(name: name, labels: labels.map { Label(name: $0) })
-                let _: ScaleSet = try await json(endpoint, method: "PATCH", authorization: "Bearer " + credentials.token,
-                    body: JSONEncoder().encode(body), transport: transport)
-            } else {
-                try await delete(endpoint, token: credentials.token, transport: transport)
-            }
+            try await delete(endpoint, token: credentials.token, transport: transport)
         }
     }
 
@@ -190,13 +181,15 @@ package struct GitHubRunnerScaleSet: Sendable {
                     try Task.checkCancellation()
                     if let failure = jobs.failure { throw failure }
                     let capacity = { @MainActor @Sendable in jobs.holdsSlot || hasCapacity() ? 1 : 0 }
-                    guard let message = try await next(after: last, capacity: capacity) else {
+                    guard let message = try await next(after: last, capacity: capacity, failed: { jobs.failure != nil }) else {
                         try await whileAuthorized(.checkConnection)
                         continue
                     }
-                    let events = message.body.isEmpty ? [] : try JSONDecoder().decode([Offer].self, from: Data(message.body.utf8))
+                    let body = message.body ?? ""
+                    let events = body.isEmpty ? [] : try JSONDecoder().decode([Offer].self, from: Data(body.utf8))
                     for event in events { jobs.receive(event) }
-                    jobs.reconcile(assigned: message.statistics.totalAssignedJobs)
+                    jobs.reconcile(assigned: message.statistics?.totalAssignedJobs ?? 0)
+                    try await jobs.waitForAcquisitions()
                     try await acknowledge(message.messageId)
                     last = message.messageId
                 }
@@ -226,6 +219,7 @@ package struct GitHubRunnerScaleSet: Sendable {
             var assigned: Bool
         }
         private var offers: [OfferState] = []
+        private var pendingAcquisitions = Set<Int64>()
         private var finished: Int64?
         private var request: Int64?
         private var started = false
@@ -248,19 +242,33 @@ package struct GitHubRunnerScaleSet: Sendable {
                 let assigned = event.messageType == "JobAssigned"
                 if request == nil, current != nil, assigned { request = id }
                 guard request != id, finished != id else { break }
+                // This installation can run one worker. Other available jobs remain unassigned on GitHub.
+                if !assigned {
+                    guard current == nil, offers.isEmpty else { break }
+                    pendingAcquisitions.insert(id)
+                }
                 if let index = offers.firstIndex(where: { $0.id == id }) {
-                    if assigned { offers[index].assigned = true }
+                    if assigned { offers[index].assigned = true; pendingAcquisitions.remove(id) }
                 } else {
                     offers.append(OfferState(id: id, assigned: assigned))
                 }
             case "JobStarted" where request == nil || request == id:
                 if current != nil { request = id; started = true }
             case "JobCompleted":
+                pendingAcquisitions.remove(id)
                 offers.removeAll { $0.id == id }
                 if finished == id { finished = nil }
                 if current != nil, (request == id || request == nil), !started { current?.cancel() }
             default: break
             }
+        }
+
+        /// GitHub redelivers the message if this host stops before it answers an availability offer.
+        func waitForAcquisitions() async throws {
+            guard !pendingAcquisitions.isEmpty else { return }
+            for await done in Observations({ self.pendingAcquisitions.isEmpty || self.failure != nil }) where done { break }
+            try Task.checkCancellation()
+            if let failure { throw failure }
         }
 
         func recoverAssignment() { start(nil, assigned: true) }
@@ -290,7 +298,14 @@ package struct GitHubRunnerScaleSet: Sendable {
             current = Task {
                 do {
                     let ran = try await pool.withSlotDescriptor { slot in try await self.accept(id, assigned: assigned, slot: slot) }
-                    if ran { finished = request }
+                    if ran {
+                        guard started else {
+                            // The official service can exit successfully even when its listener failed to start.
+                            // Reconnect to recover any assignment that GitHub still needs a runner for.
+                            throw HostSettingsError("The GitHub runner exited before GitHub confirmed the job started.")
+                        }
+                        finished = request
+                    }
                 } catch {
                     if !Task.isCancelled { failure = error }
                 }
@@ -306,18 +321,23 @@ package struct GitHubRunnerScaleSet: Sendable {
             try begin()
             holdsSlot = true
             defer { holdsSlot = false; finish() }
-            if !assigned, let id, try await !set.acquire(id) { return false }
+            if !assigned, let id {
+                let acquired = try await set.acquire(id)
+                pendingAcquisitions.remove(id)
+                if !acquired { return false }
+            }
             try await run(slot)
             return true
         }
     }
 
-    @MainActor private func next(after last: Int?, capacity: @escaping @MainActor @Sendable () -> Int) async throws -> Message? {
+    @MainActor private func next(after last: Int?, capacity: @escaping @MainActor @Sendable () -> Int,
+                                 failed: @escaping @MainActor @Sendable () -> Bool) async throws -> Message? {
         let advertised = capacity()
         return try await withThrowingTaskGroup(of: Message?.self) { group in
             group.addTask { try await poll(after: last, capacity: advertised) }
             group.addTask {
-                await Self.waitForCapacityChange(from: advertised, capacity: capacity)
+                await Self.waitForPollChange { capacity() != advertised || failed() }
                 return nil
             }
             defer { group.cancelAll() }
@@ -325,9 +345,9 @@ package struct GitHubRunnerScaleSet: Sendable {
         }
     }
 
-    @MainActor private static func waitForCapacityChange(from advertised: Int, capacity: @escaping @MainActor @Sendable () -> Int) async {
+    @MainActor private static func waitForPollChange(_ changed: @escaping @MainActor @Sendable () -> Bool) async {
         // Reissue the long poll when the host monitor sees a slot open or fill.
-        for await value in Observations({ capacity() }) where value != advertised { return }
+        for await value in Observations(changed) where value { return }
     }
 
     private func poll(after last: Int?, capacity: Int) async throws -> Message? {

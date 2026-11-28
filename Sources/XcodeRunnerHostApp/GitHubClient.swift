@@ -134,9 +134,9 @@ struct GitHubClient: Sendable {
         }
     }
 
-    func updateJobScaleSet(_ name: String, labels: [String]?, in repository: GitHubRepository, accessToken: String) async throws {
+    func removeJobScaleSet(_ name: String, in repository: GitHubRepository, accessToken: String) async throws {
         let token = try await registrationToken(repository: repository, accessToken: accessToken)
-        try await GitHubRunnerScaleSet.update(name: name, labels: labels, repository: repository.fullName, registrationToken: token, transport: transport)
+        try await GitHubRunnerScaleSet.remove(name: name, repository: repository.fullName, registrationToken: token, transport: transport)
     }
 
     func removeRunner(_ id: Int, from repository: GitHubRepository, accessToken: String) async throws {

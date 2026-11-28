@@ -28,7 +28,7 @@ struct HostPairing: Codable, Equatable, Identifiable, Sendable {
 enum HostLinkRequest: Codable, Sendable {
     case packageAccess(PackageAccessChange)
     case fetchPackage(PackageFetch)
-    case runnerAdmission(repository: String, runnerID: Int, access: GitHubRunnerAccess)
+    case runnerAdmission(repositoryID: Int, access: GitHubRunnerAccess)
     case packageData(Data)
     case packageEnd
     case runnerSlots
@@ -98,6 +98,7 @@ enum RunnerRequest: Codable, Sendable {
     case inventory
     case prepareArchive(GitHubRunnerDownload)
     case install(RunnerProvisioner.InstallationRequest)
+    case configureJobRunner(runner: String, repositoryID: Int, labels: [String])
     case retainRegistration(runner: String)
     case markUnregistering(runner: String, repositoryID: Int)
     case markRemoved(runner: String)

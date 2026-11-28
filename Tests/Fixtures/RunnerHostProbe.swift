@@ -13,12 +13,12 @@ struct RunnerHostProbe {
             home = .homeDirectory
         }
         let actions = Actions(home: home)
-        RunnerHostApplication.main(authorization: { repository, id, access in
+        RunnerHostApplication.main(authorization: { id, access in
             guard !FileManager.default.fileExists(atPath: home.appending(path: "disconnected").path) else {
                 try Data().write(to: home.appending(path: "denied-\(id)"))
                 throw CocoaError(.userCancelled)
             }
-            return access == .connect ? .init(repository: repository, registrationToken: String(id), labels: ["fixture"]) : nil
+            return access == .connect ? .init(repository: "fixture/Project", registrationToken: String(id)) : nil
         }, transport: { try await actions.send($0) })
     }
 }
@@ -26,6 +26,8 @@ struct RunnerHostProbe {
 private actor Actions {
     let home: URL
     private var delivered: Set<Int> = []
+    private var started: Set<Int> = []
+    private var emptyMessages: Set<Int> = []
 
     init(home: URL) { self.home = home }
 
@@ -50,6 +52,8 @@ private actor Actions {
             case ("POST", "runnerscalesets"): response = ["id": id, "labels": [["name": "fixture", "type": "System"]]]
             case ("POST", "sessions"):
                 delivered.remove(id)
+                started.remove(id)
+                emptyMessages.remove(id)
                 if let folder { try Data().write(to: folder.appending(path: "subscribed")) }
                 response = ["sessionId": UUID().uuidString, "messageQueueUrl": "https://fixture.invalid/\(id)/messages",
                             "messageQueueAccessToken": "queue", "statistics": ["totalAssignedJobs": 0]]
@@ -64,6 +68,15 @@ private actor Actions {
                 }
                 if delivered.contains(id), let capacity = request.value(forHTTPHeaderField: "X-ScaleSetMaxCapacity") {
                     try Data(capacity.utf8).write(to: folder.appending(path: "capacity-after-offer"), options: .atomic)
+                }
+                if emptyMessages.insert(id).inserted {
+                    response = ["messageId": 0]
+                    break
+                }
+                if delivered.contains(id), FileManager.default.fileExists(atPath: folder.appending(path: "pid.json").path),
+                   started.insert(id).inserted {
+                    response = ["messageId": 2, "body": "[{\"messageType\":\"JobStarted\",\"runnerRequestId\":\(id)}]"]
+                    break
                 }
                 if delivered.contains(id) || FileManager.default.fileExists(atPath: folder.appending(path: "no-work").path) {
                     try await Task.sleep(for: .milliseconds(100))

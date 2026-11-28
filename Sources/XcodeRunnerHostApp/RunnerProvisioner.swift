@@ -87,7 +87,7 @@ protocol RunnerProvisioningClient: Sendable {
     func listRunners(repository: GitHubRepository, accessToken: String) async throws -> [GitHubRunner]
     func registrationToken(repository: GitHubRepository, accessToken: String) async throws -> String
     func runnerDownload(accessToken: String) async throws -> GitHubRunnerDownload
-    func updateJobScaleSet(_ name: String, labels: [String]?, in repository: GitHubRepository, accessToken: String) async throws
+    func removeJobScaleSet(_ name: String, in repository: GitHubRepository, accessToken: String) async throws
     func removeRunner(_ id: Int, from repository: GitHubRepository, accessToken: String) async throws
     func setCustomLabels(_ labels: [String], ofRunner id: Int, in repository: GitHubRepository, accessToken: String) async throws
 }
@@ -109,6 +109,7 @@ actor RunnerProvisioner {
         let folder: RunnerFolder
         let name: String
         let registration: RunnerFolder.Registration
+        let job: RunnerDirectory.JobRegistration?
         let hasIndividualService: Bool
         let isHosted: Bool
 
@@ -120,6 +121,7 @@ actor RunnerProvisioner {
             to repository: GitHubRepository, remote: [GitHubRunner],
             resolvedRepositories: [String: Result<GitHubRepository?, any Error>]
         ) throws -> Bool {
+            if let job { return job.repositoryID == repository.id }
             guard let fullName = registration.repositoryFullName else { return false }
             if fullName.caseInsensitiveCompare(repository.fullName) == .orderedSame { return true }
             guard remote.contains(where: matches), let resolved = resolvedRepositories[fullName.lowercased()] else { return false }
@@ -220,7 +222,7 @@ actor RunnerProvisioner {
         }
         var resolvedRepositories: [String: Result<GitHubRepository?, any Error>] = [:]
         for local in initialLocal {
-            guard let fullName = local.registration.repositoryFullName, resolvedRepositories[fullName.lowercased()] == nil else { continue }
+            guard local.job == nil, let fullName = local.registration.repositoryFullName, resolvedRepositories[fullName.lowercased()] == nil else { continue }
             let needsResolution = (repositories + unlinked).contains { repository in
                 guard fullName.caseInsensitiveCompare(repository.fullName) != .orderedSame,
                       let snapshot = snapshots[repository.id], case .success(let remote) = snapshot else { return false }
@@ -300,19 +302,19 @@ actor RunnerProvisioner {
                         try await mac.retainRegistration(runner.folder.name)
                     }
                 }
-                let jobNames = Set(try local.compactMap { try $0.folder.jobRunnerName() })
+                let jobNames = Set(local.compactMap { $0.job?.name })
                 jobRunners = remote.filter { jobNames.contains($0.name) }
                 // Existing runners get the Mac's labels and lose those that left its list. Their other labels stay.
                 for runner in knownRunners {
                     let current = Self.customLabels(of: runner)
                     let next = current.subtracting(retiredLabels).union(macLabels)
-                    guard next != current else { continue }
-                    if let folder = local.first(where: { $0.matches(runner) })?.folder, let name = try folder.jobRunnerName() {
-                        let systemLabels = Set(runner.labels.map { $0.name.lowercased() }).subtracting(current)
-                        // Update routing first so a partial failure is retried against the unchanged registration.
-                        try await client.updateJobScaleSet(name, labels: systemLabels.union(next).sorted(), in: repository, accessToken: token)
+                    if next != current, remote.contains(where: { $0.id == runner.id }) {
+                        try await client.setCustomLabels(next.sorted(), ofRunner: runner.id, in: repository, accessToken: token)
                     }
-                    try await client.setCustomLabels(next.sorted(), ofRunner: runner.id, in: repository, accessToken: token)
+                    if let local = local.first(where: { $0.matches(runner) }) {
+                        let system = Set(runner.labels.map { $0.name.lowercased() }).subtracting(current)
+                        try await configureJobRunner(local, repository: repository, labels: system.union(next).sorted())
+                    }
                 }
                 hasItsLabels = true
                 runnersWithTheirLabels.formUnion(knownRunners.map(\.name))
@@ -391,6 +393,11 @@ actor RunnerProvisioner {
                         try $0.belongs(to: repository, remote: remote, resolvedRepositories: resolvedRepositories)
                     }
                     knownRunners = Self.managedRunners(local: local, remote: remote)
+                    for runner in local where runner.job == nil {
+                        if let registered = knownRunners.first(where: runner.matches) {
+                            try await configureJobRunner(runner, repository: repository, labels: registered.labels.map { $0.name.lowercased() }.sorted())
+                        }
+                    }
                 }
             } catch {
                 problems.append(.failed(error.localizedDescription))
@@ -426,7 +433,7 @@ actor RunnerProvisioner {
                     if let registered = remote.first(where: runner.matches),
                        try runner.belongs(to: repository, remote: remote, resolvedRepositories: resolvedRepositories) {
                         candidates.append((runner.folder, runner.name, registered))
-                    } else if try runner.folder.unregisteringRepository() == String(repository.id) {
+                    } else if try runner.job?.repositoryID == repository.id || runner.folder.unregisteringRepository() == String(repository.id) {
                         // GitHub removed the registration before the folder could be marked.
                         candidates.append((runner.folder, runner.name, nil))
                     }
@@ -453,15 +460,14 @@ actor RunnerProvisioner {
                     }
                 }
                 for candidate in candidates {
-                    let jobName = try candidate.folder.jobRunnerName()
+                    let jobName = try candidate.folder.jobRegistration()?.name
                     if let jobName, remote.contains(where: { $0.name == jobName && $0.busy }) {
                         remaining += 1
                         busyCount += 1
                         continue
                     }
-                    if let registered = candidate.registered {
-                        // A busy runner is removed after its job, at a later synchronization.
-                        guard !registered.busy else {
+                    if candidate.registered != nil || jobName != nil {
+                        guard candidate.registered?.busy != true else {
                             remaining += 1
                             busyCount += 1
                             continue
@@ -478,8 +484,10 @@ actor RunnerProvisioner {
                             continue
                         }
                         do {
-                            if let jobName { try await client.updateJobScaleSet(jobName, labels: nil, in: repository, accessToken: token) }
-                            try await client.removeRunner(registered.id, from: repository, accessToken: token)
+                            if let jobName { try await client.removeJobScaleSet(jobName, in: repository, accessToken: token) }
+                            if let registered = candidate.registered {
+                                try await client.removeRunner(registered.id, from: repository, accessToken: token)
+                            }
                         } catch GitHubError.response(status: 422, message: _) {
                             // GitHub refuses to remove a runner that started a job after the listing.
                             remaining += 1
@@ -517,6 +525,13 @@ actor RunnerProvisioner {
         return statuses
     }
 
+    private func configureJobRunner(_ runner: LocalRunner, repository: GitHubRepository, labels: [String]) async throws {
+        // Older paired Macs continue to run their original service until they upgrade.
+        if runner.folder.supportsJobRegistration, runner.job?.labels != labels {
+            try await mac.configureJobRunner(runner.folder.name, repositoryID: repository.id, labels: labels)
+        }
+    }
+
     private func canResumeInstallation(
         at runner: RunnerFolder, repository: GitHubRepository, remote: [GitHubRunner]
     ) throws -> Bool {
@@ -551,7 +566,7 @@ actor RunnerProvisioner {
                 let registration = try runner.registration()
                 runners.append(LocalRunner(
                     folder: runner, name: registration.agentName ?? runner.name, registration: registration,
-                    hasIndividualService: try runner.hasIndividualService(), isHosted: try runner.isHosted()
+                    job: try runner.jobRegistration(), hasIndividualService: try runner.hasIndividualService(), isHosted: try runner.isHosted()
                 ))
             } catch {
                 problems.append(.unreadableRegistration(path: runner.registrationFile, reason: error.localizedDescription))
@@ -562,7 +577,12 @@ actor RunnerProvisioner {
 
     private static func managedRunners(local: [LocalRunner], remote: [GitHubRunner]) -> [GitHubRunner] {
         let hosted = local.filter { $0.isHosted && !$0.hasIndividualService }
-        return remote.filter { runner in hosted.contains(where: { $0.matches(runner) }) }
+        return hosted.compactMap { local in
+            if let registered = remote.first(where: local.matches) { return registered }
+            guard let job = local.job else { return nil }
+            return GitHubRunner(id: local.registration.agentId, name: local.name, status: "offline", busy: false,
+                                labels: job.labels.map(GitHubRunnerLabel.init))
+        }
     }
 
     private static func commonCustomLabels(of runners: [GitHubRunner]) -> [String] {

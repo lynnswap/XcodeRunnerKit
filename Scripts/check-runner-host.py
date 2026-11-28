@@ -95,6 +95,8 @@ def fixture(root, name):
     work.mkdir(parents=True, exist_ok=True)
     (directory / '.runner').write_text(json.dumps({'agentId': zlib.crc32(name.encode()), 'agentName': name,
                                                         'gitHubUrl': 'https://github.com/fixture/Project', 'workFolder': str(work.resolve())}))
+    (directory / '.xcode-home-runner-job.json').write_text(json.dumps({
+        'name': name + '-ci-fixture', 'repositoryID': zlib.crc32(name.encode()), 'labels': ['fixture']}))
     (directory / '.xcode-runner-host').touch()
     (directory / 'worker.py').write_text('''import json, os, signal, time
 from pathlib import Path

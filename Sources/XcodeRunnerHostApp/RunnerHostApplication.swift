@@ -86,7 +86,7 @@ public enum RunnerHostApplication {
         main(authorization: nil, transport: { try await URLSession.shared.data(for: $0) })
     }
 
-    package typealias Authorization = @MainActor @Sendable (String, Int, GitHubRunnerAccess) async throws -> GitHubRunnerScaleSet.Grant?
+    package typealias Authorization = @MainActor @Sendable (Int, GitHubRunnerAccess) async throws -> GitHubRunnerScaleSet.Grant?
     package typealias Transport = @Sendable (URLRequest) async throws -> (Data, URLResponse)
 
     @MainActor package static func main(authorization: Authorization?, transport: @escaping Transport) {
@@ -288,6 +288,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private var environment: [String: String] = [:]
     private struct HostedRunner {
         let task: Task<Void, Never>
+        let registration: RunnerDirectory.JobRegistration
         var state: RunnerServiceState
         var problem: String?
     }
@@ -323,8 +324,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         let settings = HostSettingsModel(installation: installation)
         self.settings = settings
         self.transport = transport
-        self.authorization = authorization ?? { repository, id, access in
-            switch try await settings.github.runnerAdmission(repository: repository, id: id, access: access) {
+        self.authorization = authorization ?? { id, access in
+            switch try await settings.github.runnerAdmission(repositoryID: id, access: access) {
             case .runnerGrant(let grant): return grant
             case .completed where access != .connect: return nil
             default: throw HostLinkError.unexpectedReply
@@ -582,8 +583,9 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         if let unreadable = scan.unreadable.first { throw unreadable.error }
         let removed = try scan.directories.filter { try $0.isRemoved() }
         let requested = try scan.directories.filter { try $0.isHosted() && $0.hasRegistration() && !removed.contains($0) }
-        let requestedURLs = Set(requested.map(\.url))
-        for (directory, runner) in runners where settings.isPaused || !requestedURLs.contains(directory) || runner.state == .stopped {
+        var registrations: [URL: RunnerDirectory.JobRegistration] = [:]
+        for runner in requested { registrations[runner.url] = try runner.jobRegistration() }
+        for (directory, runner) in runners where settings.isPaused || registrations[directory] != runner.registration || runner.state == .stopped {
             // A job includes checkout and post-job cleanup, even when Runner.Worker is not present yet.
             if settings.github.reservations.contains(directory) { continue }
             runner.task.cancel()
@@ -603,8 +605,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             if try runner.hasIndividualService() {
                 if !isPaused { print("Skipped \(runner.name): uninstall its individual service before opting in.") }
                 individual.insert(runner.url)
-            } else if !isPaused {
-                runners[runner.url] = HostedRunner(task: Task { await listen(runner) }, state: .starting)
+            } else if !isPaused, let registration = registrations[runner.url] {
+                runners[runner.url] = HostedRunner(task: Task { await listen(runner, registration: registration) }, registration: registration, state: .starting)
             }
         }
         settings.runnerScanError = nil
@@ -614,7 +616,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             } else if let hosted = runners[runner.url] {
                 hosted.state
             } else {
-                individual.contains(runner.url) ? .individualService : .paused
+                individual.contains(runner.url) ? .individualService : (isPaused ? .paused : .starting)
             }
             return RunnerSettingsRow.read(runner, state: state, problem: runners[runner.url]?.problem)
         }
@@ -681,22 +683,22 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         return Array(members.prefix(Int(count) / MemoryLayout<Int32>.stride))
     }
 
-    private func listen(_ directory: RunnerDirectory) async {
+    private func listen(_ directory: RunnerDirectory, registration: RunnerDirectory.JobRegistration) async {
         while !Task.isCancelled && !settings.isPaused {
             do {
-                let registration = try directory.registration(as: RunnerFolder.Registration.self)
-                guard let repository = registration.repositoryFullName, let workFolder = registration.workFolder else {
-                    throw HostSettingsError("The registration for \(directory.name) must identify its GitHub repository and work folder.")
+                guard let work = try directory.registration(as: RunnerFolder.Registration.self).workFolder else {
+                    throw HostSettingsError("The registration for \(directory.name) must identify its work folder.")
                 }
+                let workFolder = URL(filePath: work, relativeTo: directory.url).standardizedFileURL.path(percentEncoded: false)
                 let renew: @MainActor @Sendable () async throws -> GitHubRunnerScaleSet.Grant = {
-                    guard let grant = try await self.authorization(repository, registration.agentId, .connect) else {
+                    guard let grant = try await self.authorization(registration.repositoryID, .connect) else {
                         throw HostLinkError.unexpectedReply
                     }
                     return grant
                 }
                 let grant = try await renew()
-                let name = try directory.prepareJobRunnerName()
-                let set = try await GitHubRunnerScaleSet.connect(grant: grant, name: name, owner: name, renewGrant: renew, transport: transport)
+                let name = registration.name
+                let set = try await GitHubRunnerScaleSet.connect(grant: grant, name: name, labels: registration.labels, owner: name, renewGrant: renew, transport: transport)
                 runners[directory.url]?.state = .listening
                 runners[directory.url]?.problem = nil
                 do {
@@ -707,9 +709,10 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                         try Task.checkCancellation()
                         guard !self.installation.isPaused(), try !directory.isRemoved(),
                               try directory.unregisteringRepository() == nil else { throw CancellationError() }
-                        _ = try await self.authorization(grant.repository, registration.agentId, access)
+                        _ = try await self.authorization(registration.repositoryID, access)
                         try Task.checkCancellation()
                     }, begin: {
+                        guard try directory.jobRegistration() == registration else { throw CancellationError() }
                         try self.settings.github.reservations.begin(directory, installation: self.installation)
                         self.runners[directory.url]?.state = .running
                     }, finish: {

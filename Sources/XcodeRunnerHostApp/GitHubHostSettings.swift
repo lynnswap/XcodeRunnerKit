@@ -598,7 +598,7 @@ final class GitHubHostSettings {
     func answer(_ request: RunnerRequest) async -> HostLinkReply {
         switch request {
         case .hostName, .inventory, .markLabelsApplied: break
-        case .prepareArchive, .install, .markUnregistering, .retainRegistration, .markRemoved:
+        case .prepareArchive, .install, .configureJobRunner, .markUnregistering, .retainRegistration, .markRemoved:
             guard storageIsReady, !isShuttingDown else {
                 return .refused("Runner changes wait until storage is ready and the runner host is running.")
             }
@@ -612,6 +612,8 @@ final class GitHubHostSettings {
                 case .install(let installation): try await mac.install(installation)
                 case let .markUnregistering(runner, repositoryID):
                     return try await mac.markUnregistering(runner, from: repositoryID) ? .completed : .finishingGitHubJob
+                case let .configureJobRunner(runner, repositoryID, labels):
+                    try await mac.configureJobRunner(runner, repositoryID: repositoryID, labels: labels)
                 case .retainRegistration(let runner): try await mac.retainRegistration(runner)
                 case .markRemoved(let runner): try await mac.markRemoved(runner)
                 case .markLabelsApplied(let labels): try await mac.markLabelsApplied(labels)
@@ -667,59 +669,40 @@ final class GitHubHostSettings {
 
 extension GitHubHostSettings {
     /// Only the managing host uses its account token. Its runner receives a short-lived registration token.
-    func runnerAdmission(repository: String, id: Int, access: GitHubRunnerAccess) async throws -> HostLinkReply {
+    func runnerAdmission(repositoryID: Int, access: GitHubRunnerAccess) async throws -> HostLinkReply {
         if let manager = management?.manager {
             let endpoint = NWEndpoint.service(name: PackageFetch.serviceName(manager.id), type: HostLink.managementService,
                                               domain: "local.", interface: nil)
-            let reply = try await HostLink.send(.runnerAdmission(repository: repository, runnerID: id, access: access),
+            let reply = try await HostLink.send(.runnerAdmission(repositoryID: repositoryID, access: access),
                 to: endpoint, key: manager.symmetricKey, identity: manager.id.uuidString, timeout: PairedMacs.changeTimeout)
             if case .refused(let reason) = reply { throw HostSettingsError(reason) }
             return reply
         }
-        return try await authorizeRunner(repository: repository, id: id, access: access)
+        return try await authorizeRunner(repositoryID: repositoryID, access: access)
     }
 
-    func authorizeRunner(repository name: String, id: Int, access: GitHubRunnerAccess) async throws -> HostLinkReply {
+    func authorizeRunner(repositoryID: Int, access: GitHubRunnerAccess) async throws -> HostLinkReply {
         guard management?.manager == nil, !isShuttingDown, let login = account?.login else { throw GitHubError.notSignedIn }
-        let currentID = repositories.first { $0.fullName.caseInsensitiveCompare(name) == .orderedSame }?.id
-        let selected = configuration.repositories.first { $0.id == currentID || $0.fullName.caseInsensitiveCompare(name) == .orderedSame }
-        if access != .connect {
-            guard let selected else { throw HostSettingsError("Select \(name) on the managing host to take GitHub jobs.") }
-            if access == .acceptJob {
-                try await authenticated { token in
-                    let current = repositories.first { $0.id == selected.id } ?? selected
-                    if current.isPrivate == nil {
-                        try await client.requireForkApproval(for: client.repository(fullName: name, accessToken: token), accessToken: token)
-                    } else {
-                        try await client.requireForkApproval(for: current, accessToken: token)
-                    }
-                }
-                guard account?.login == login, configuration.repositories.contains(where: { $0.id == selected.id }) else {
-                    throw GitHubError.authenticationChanged
-                }
-            }
-            return .completed
+        guard let selected = configuration.repositories.first(where: { $0.id == repositoryID }) else {
+            throw HostSettingsError("The repository is no longer selected on the managing host.")
         }
-        let (repository, grant) = try await authenticated { token in
-            // Registrations created before a rename still contain the old URL. GitHub resolves it to the repository ID.
-            let repository = try await client.repository(fullName: name, accessToken: token)
-            guard configuration.repositories.contains(where: { $0.id == repository.id }) else {
-                throw HostSettingsError("Select \(repository.fullName) on the managing host to take GitHub jobs.")
-            }
+        if access == .checkConnection { return .completed }
+        let reply: HostLinkReply = try await authenticated { token in
+            let listed = repositories.first { $0.id == repositoryID } ?? selected
+            let repository: GitHubRepository
+            if listed.isPrivate == nil {
+                repository = try await client.repository(fullName: listed.fullName, accessToken: token)
+                guard repository.id == repositoryID else { throw GitHubError.authenticationChanged }
+            } else { repository = listed }
             try await client.requireForkApproval(for: repository, accessToken: token)
-            let runners = try await client.listRunners(repository: repository, accessToken: token)
-            guard let runner = runners.first(where: { $0.id == id }) else {
-                throw HostSettingsError("GitHub no longer lists this runner in \(name).")
-            }
-            let grant = GitHubRunnerScaleSet.Grant(repository: repository.fullName,
-                registrationToken: try await client.registrationToken(repository: repository, accessToken: token),
-                labels: runner.labels.map(\.name))
-            return (repository, grant)
+            if access == .acceptJob { return .completed }
+            return .runnerGrant(.init(repository: repository.fullName,
+                registrationToken: try await client.registrationToken(repository: repository, accessToken: token)))
         }
-        guard account?.login == login, configuration.repositories.contains(where: { $0.id == repository.id }) else {
+        guard account?.login == login, configuration.repositories.contains(where: { $0.id == repositoryID }) else {
             throw GitHubError.authenticationChanged
         }
-        return .runnerGrant(grant)
+        return reply
     }
 
     /// Only a current managed runner can open this connection. The local relay rechecks the grant on each Git request.
