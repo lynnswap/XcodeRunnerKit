@@ -766,7 +766,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                     try settings.github.reservations.begin(directory, installation: installation)
                     defer { settings.github.reservations.finish(directory.url) }
                     set = try await GitHubRunnerScaleSet.connect(grant: grant, name: name, labels: registration.labels,
-                                                               owner: name, renewGrant: renew, transport: transport)
+                                                               owner: name, sessionFile: directory.url.appending(path: ".xcode-home-runner-session.json"),
+                                                               renewGrant: renew, transport: transport)
                 }
                 runners[directory.url]?.state = .listening
                 runners[directory.url]?.problem = nil
@@ -789,8 +790,9 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                     }, finish: {
                         self.settings.github.reservations.finish(directory.url)
                         self.runners[directory.url]?.state = .listening
-                    }, run: { slot in
+                    }, run: { slot, registered in
                         let configuration = try await set.configuration(name: name, workFolder: workFolder)
+                        registered(configuration.runner.id)
                         do { try await self.serve(directory.url, configuration: configuration.encodedJITConfig, slot: slot) }
                         catch {
                             let original = error

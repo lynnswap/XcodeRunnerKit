@@ -185,7 +185,9 @@ labels. The host starts a one-job runner for an accepted job. It uses the
 registration’s work folder and has a stable job runner name, recorded in
 `.xcode-home-runner-job.json` along with the repository ID and routing labels. The host keeps using the same
 folder if GitHub expires the offline bootstrap registration. A workflow that keys its own cache by `RUNNER_NAME` creates a new cache on its first run
-after the upgrade.
+after the upgrade. Run workflow steps with `"$XCODE_RUNNER_HOST_ROOT/bin/xcode-runner"`.
+A separately installed CLI from before job reservations requests a second slot
+and can wait for its own job on a one-slot Mac. Update that CLI before switching hosts.
 
 Lowering the limit lets running operations finish. Extra registrations may
 remain. Deselecting a repository removes its managed runners after active jobs
