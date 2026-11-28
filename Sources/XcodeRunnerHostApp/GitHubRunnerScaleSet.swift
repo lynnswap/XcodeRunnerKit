@@ -199,7 +199,7 @@ package struct GitHubRunnerScaleSet: Sendable {
         begin: @escaping @MainActor @Sendable () throws -> Void, finish: @escaping @MainActor @Sendable () -> Void,
         run: @escaping @MainActor @Sendable (Int32, @MainActor @Sendable (Int) -> Void) async throws -> Void
     ) async throws {
-        let jobs = Jobs(pool: pool, set: self, authorize: { try await whileAuthorized(.acceptJob) }, begin: begin, finish: finish, run: run)
+        let jobs = Jobs(pool: pool, set: self, workerIsRunning: workerIsRunning, authorize: { try await whileAuthorized(.acceptJob) }, begin: begin, finish: finish, run: run)
         try await withTaskCancellationHandler {
             do {
                 try await jobs.receive([], statistics: session.statistics, recovering: true)
@@ -213,7 +213,7 @@ package struct GitHubRunnerScaleSet: Sendable {
                             if !jobs.ended {
                                 if jobs.holdsSlot {
                                     if !jobs.started, try workerIsRunning() { jobs.workerStarted() }
-                                    if jobs.awaitsPickup { try await jobs.receive([], statistics: currentStatistics()) }
+                                    try await jobs.verifyPickup()
                                 } else { try await whileAuthorized(.checkConnection) }
                             }
                             retryUntil = nil
@@ -256,6 +256,7 @@ package struct GitHubRunnerScaleSet: Sendable {
     @MainActor @Observable fileprivate final class Jobs {
         let pool: HostExecutionPool
         let set: GitHubRunnerScaleSet
+        let workerIsRunning: @MainActor @Sendable () throws -> Bool
         let authorize: @MainActor @Sendable () async throws -> Void
         let begin: @MainActor @Sendable () throws -> Void
         let finish: @MainActor @Sendable () -> Void
@@ -268,13 +269,23 @@ package struct GitHubRunnerScaleSet: Sendable {
         private var runnerID: Int?
         private(set) var started = false
         private var wasAssigned = false
-        var awaitsPickup: Bool { holdsSlot && wasAssigned && !started }
+        /// Queue snapshots can precede a concurrent acquisition. Read current demand before retiring its worker.
+        func verifyPickup() async throws {
+            guard holdsSlot, wasAssigned, !started, !ended else { return }
+            if try await set.currentStatistics()?.totalAssignedJobs == 0, !ended {
+                if try workerIsRunning() { started = true }
+                if !started { current?.cancel() }
+            }
+        }
+
         func workerStarted() { started = true }
 
-        init(pool: HostExecutionPool, set: GitHubRunnerScaleSet, authorize: @escaping @MainActor @Sendable () async throws -> Void,
+        init(pool: HostExecutionPool, set: GitHubRunnerScaleSet, workerIsRunning: @escaping @MainActor @Sendable () throws -> Bool,
+             authorize: @escaping @MainActor @Sendable () async throws -> Void,
              begin: @escaping @MainActor @Sendable () throws -> Void, finish: @escaping @MainActor @Sendable () -> Void, run: @escaping @MainActor @Sendable (Int32, @MainActor @Sendable (Int) -> Void) async throws -> Void) {
             self.pool = pool
             self.set = set
+            self.workerIsRunning = workerIsRunning
             self.authorize = authorize
             self.begin = begin
             self.finish = finish
@@ -296,8 +307,9 @@ package struct GitHubRunnerScaleSet: Sendable {
                 // A completion naming our worker also confirms it ran, even if its start event was truncated.
                 if let runnerID, events.contains(where: { $0.messageType == "JobCompleted" && $0.runnerId == runnerID }) { started = true }
                 if !started, let request, completed.contains(request) { current?.cancel() }
-                else if !started, statistics?.totalAssignedJobs == 0, wasAssigned || (!holdsSlot && statistics?.totalAvailableJobs == 0) {
-                    current?.cancel()
+                else if !started, statistics?.totalAssignedJobs == 0 {
+                    if holdsSlot { try await verifyPickup() }
+                    else if wasAssigned || statistics?.totalAvailableJobs == 0 { current?.cancel() }
                 }
                 return
             }

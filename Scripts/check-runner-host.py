@@ -350,6 +350,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost admission ') as temporary:
     (malformed/'.xcode-home-runner-job.json').write_text('{')
     (job/'expire-credentials').touch()
     (job/'retry-poll').touch()
+    (job/'stale-demand').touch()
     host_root = home/'Library/Application Support/XcodeRunnerKit'
     pool = host_root/'Pool'
     pool.mkdir(parents=True)
@@ -370,6 +371,7 @@ with tempfile.TemporaryDirectory(prefix='RunnerHost admission ') as temporary:
             fcntl.flock(slot, fcntl.LOCK_UN)
             wait_for(lambda:(job/'pid.json').exists(), 'No job started after the slot opened')
             wait_for(lambda:(job/'poll-recovered').exists(), 'The queue did not resume polling during worker startup')
+            wait_for(lambda:(job/'sent-stale-demand').exists(), 'The worker did not receive the older queue snapshot')
             pid = json.loads((job/'pid.json').read_text())['pid']
             (job/'no-work').touch()
             (home/'disconnected').touch()

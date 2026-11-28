@@ -93,6 +93,12 @@ private actor Actions {
                 if delivered.contains(id), let capacity = request.value(forHTTPHeaderField: "X-ScaleSetMaxCapacity") {
                     try Data(capacity.utf8).write(to: folder.appending(path: "capacity-after-offer"), options: .atomic)
                 }
+                let stale = folder.appending(path: "stale-demand")
+                if FileManager.default.fileExists(atPath: stale.path), FileManager.default.fileExists(atPath: folder.appending(path: "provisioned").path) {
+                    try FileManager.default.moveItem(at: stale, to: folder.appending(path: "sent-stale-demand"))
+                    response = ["messageId": 3, "statistics": ["totalAssignedJobs": 0, "totalAvailableJobs": 1]]
+                    break
+                }
                 if emptyMessages.insert(id).inserted {
                     response = ["messageId": 0]
                     break
