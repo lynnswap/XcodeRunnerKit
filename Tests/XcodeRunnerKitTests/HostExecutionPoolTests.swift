@@ -81,15 +81,19 @@ struct HostExecutionPoolTests {
         try await pool.configure(maximumConcurrentJobs: 1)
         let previous = try await pool.withSlotDescriptor { slot in
             try await HostExecutionPool.withGitHubJob(slot: slot) { token in
-                #expect(try pool.hasGitHubJob(token))
+                let isActive = try pool.hasGitHubJob(token)
+                #expect(isActive)
                 return token
             }
         }
         try await pool.withSlotDescriptor { slot in
-            #expect(try !pool.hasGitHubJob(previous))
+            let previousIsActive = try pool.hasGitHubJob(previous)
+            #expect(!previousIsActive)
             try await HostExecutionPool.withGitHubJob(slot: slot) { token in
-                #expect(try !pool.hasGitHubJob(previous))
-                #expect(try pool.hasGitHubJob(token))
+                let previousIsActive = try pool.hasGitHubJob(previous)
+                #expect(!previousIsActive)
+                let isActive = try pool.hasGitHubJob(token)
+                #expect(isActive)
             }
         }
     }
