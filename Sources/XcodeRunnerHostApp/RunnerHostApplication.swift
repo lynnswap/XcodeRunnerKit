@@ -686,9 +686,8 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
     private func listen(_ directory: RunnerDirectory, registration: RunnerDirectory.JobRegistration) async {
         while !Task.isCancelled && !settings.isPaused {
             do {
-                guard let work = try directory.registration(as: RunnerFolder.Registration.self).workFolder else {
-                    throw HostSettingsError("The registration for \(directory.name) must identify its work folder.")
-                }
+                struct WorkSettings: Decodable { let workFolder: String }
+                let work = try directory.registration(as: WorkSettings.self).workFolder
                 let workFolder = URL(filePath: work, relativeTo: directory.url).standardizedFileURL.path(percentEncoded: false)
                 let renew: @MainActor @Sendable () async throws -> GitHubRunnerScaleSet.Grant = {
                     guard let grant = try await self.authorization(registration.repositoryID, .connect) else {

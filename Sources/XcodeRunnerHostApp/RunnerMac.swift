@@ -21,17 +21,17 @@ protocol RunnerMac: Sendable {
 
 /// Owned by the executing host. Admission and the decision to remove a registration run on the same actor.
 @MainActor final class GitHubJobReservations {
-    private var runners: Set<URL> = []
+    private var runners: Set<String> = []
 
     nonisolated init() {}
 
-    func contains(_ directory: URL) -> Bool { runners.contains(directory) }
+    func contains(_ directory: URL) -> Bool { runners.contains(directory.lastPathComponent) }
     func begin(_ directory: RunnerDirectory, installation: HostInstallation) throws {
         guard !installation.isPaused(), try directory.isHosted(), try !directory.isRemoved(),
               try directory.unregisteringRepository() == nil else { throw CancellationError() }
-        runners.insert(directory.url)
+        runners.insert(directory.name)
     }
-    func finish(_ directory: URL) { runners.remove(directory) }
+    func finish(_ directory: URL) { runners.remove(directory.lastPathComponent) }
 }
 
 /// A Mac's runner folders, read at once so that a Mac can send them to its managing host.
@@ -63,7 +63,6 @@ struct RunnerFolder: Codable, Sendable {
         let agentName: String?
         let gitHubUrl: String?
         let serverUrl: String?
-        var workFolder: String?
 
         var repositoryFullName: String? {
             guard let value = gitHubUrl ?? serverUrl, let url = URL(string: value),
