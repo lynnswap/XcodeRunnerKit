@@ -255,17 +255,21 @@ private final class RunnerService {
                 var options = Subprocess.PlatformOptions()
                 options.inheritOwnership(ownership, slot)
                 options.teardownSequence = [.gracefulShutDown(allowedDurationToNextStep: .seconds(35))]
-                let result = try await Subprocess.run(
-                    .path("/bin/bash"),
-                    arguments: .init([directory.appending(path: "runsvc.sh").path]),
-                    environment: .inherit.updating(["ACTIONS_RUNNER_SVC": "1"]),
-                    workingDirectory: .init(directory.path(percentEncoded: false)),
-                    platformOptions: options,
-                    output: .currentStandardOutput,
-                    error: .currentStandardError
-                )
-                if case .exited(let code) = result.terminationStatus { status = code }
-                print("Official runner service ended with \(result.terminationStatus).")
+                let serviceOptions = options
+                let directory = self.directory
+                let result = try await HostExecutionPool.withGitHubJob(slot: slot) { job in
+                    try await Subprocess.run(
+                        .path("/bin/bash"),
+                        arguments: .init([directory.appending(path: "runsvc.sh").path]),
+                        environment: .inherit.updating(["ACTIONS_RUNNER_SVC": "1", "XCODE_RUNNER_GITHUB_JOB": .init(job)]),
+                        workingDirectory: .init(directory.path(percentEncoded: false)),
+                        platformOptions: serviceOptions,
+                        output: .currentStandardOutput,
+                        error: .currentStandardError
+                    ).terminationStatus
+                }
+                if case .exited(let code) = result { status = code }
+                print("Official runner service ended with \(result).")
             } catch {
                 print("Official runner service ended: \(error)")
             }
@@ -317,6 +321,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         var problem: String?
     }
     private var runners: [URL: HostedRunner] = [:]
+    private var serviceGroups: [String: Int32] = [:]
     private let githubCapacity = GitHubJobCapacity()
     private let authorization: RunnerHostApplication.Authorization
     private let transport: RunnerHostApplication.Transport
@@ -666,6 +671,19 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// The worker process that the official runner in a service's process group started for the job that it runs.
+    private nonisolated static func jobWorker(inGroup identifier: Int32) throws -> Int32? {
+        try groupMembers(identifier).first { member in
+            var info = proc_bsdshortinfo()
+            let size = Int32(MemoryLayout<proc_bsdshortinfo>.size)
+            // A worker that ended stays listed until the runner collects its status.
+            guard proc_pidinfo(member, PROC_PIDT_SHORTBSDINFO, 0, &info, size) == size, info.pbsi_status != UInt32(SZOMB) else {
+                return false
+            }
+            return withUnsafeBytes(of: info.pbsi_comm) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) } == "Runner.Worker"
+        }
+    }
+
     private nonisolated static func cleanUpServiceGroupAfterExit(_ identifier: Int32) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
             let source = DispatchSource.makeProcessSource(identifier: identifier, eventMask: .exit, queue: .global())
@@ -755,6 +773,9 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
                 do {
                     try await set.listen(pool: settings.pool, hasCapacity: {
                         self.githubCapacity.offered.contains(name)
+                    }, workerIsRunning: {
+                        guard let group = self.serviceGroups[directory.name] else { return false }
+                        return try Self.jobWorker(inGroup: group) != nil
                     }, whileAuthorized: { access in
                         try Task.checkCancellation()
                         guard !self.installation.isPaused(), try !directory.isRemoved(),
@@ -854,7 +875,7 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
         options.teardownSequence = [.gracefulShutDown(allowedDurationToNextStep: .seconds(50))]
         var jobEnvironment = environment
         jobEnvironment["ACTIONS_RUNNER_INPUT_JITCONFIG"] = configuration
-        jobEnvironment["XCODE_RUNNER_GITHUB_JOB_POOL"] = installation.poolDirectory.path
+        defer { serviceGroups[name] = nil }
         let result = try await Subprocess.run(
             .path(.init(executable.path(percentEncoded: false))),
             arguments: .init([
@@ -872,7 +893,9 @@ private final class RunnerHost: NSObject, NSApplicationDelegate {
             output: .fileDescriptor(.init(rawValue: descriptor), closeAfterSpawningProcess: false),
             error: .fileDescriptor(.init(rawValue: descriptor), closeAfterSpawningProcess: false)
         ) { execution in
-            try await Self.cleanUpServiceGroupAfterExit(execution.processIdentifier.value)
+            let group = execution.processIdentifier.value
+            self.serviceGroups[name] = group
+            try await Self.cleanUpServiceGroupAfterExit(group)
         }
         guard result.terminationStatus == .exited(0) else {
             throw HostSettingsError("GitHub runner \(name) ended with \(result.terminationStatus). See \(log.path).")

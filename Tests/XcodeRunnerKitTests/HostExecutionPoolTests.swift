@@ -74,6 +74,26 @@ struct HostExecutionPoolTests {
         #expect(!FileManager.default.fileExists(atPath: root.appending(path: "simulator-idle-retention-minutes").path))
     }
 
+    @Test func onlyTheCurrentGitHubJobCanReuseItsSlot() async throws {
+        let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pool = HostExecutionPool(directory: root)
+        try await pool.configure(maximumConcurrentJobs: 1)
+        let previous = try await pool.withSlotDescriptor { slot in
+            try await HostExecutionPool.withGitHubJob(slot: slot) { token in
+                #expect(try pool.hasGitHubJob(token))
+                return token
+            }
+        }
+        try await pool.withSlotDescriptor { slot in
+            #expect(try !pool.hasGitHubJob(previous))
+            try await HostExecutionPool.withGitHubJob(slot: slot) { token in
+                #expect(try !pool.hasGitHubJob(previous))
+                #expect(try pool.hasGitHubJob(token))
+            }
+        }
+    }
+
     @Test func invalidUpdatesPreserveTheSavedConfiguration() async throws {
         let root = URL.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

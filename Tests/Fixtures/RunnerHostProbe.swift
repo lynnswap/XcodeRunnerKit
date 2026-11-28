@@ -78,6 +78,15 @@ private actor Actions {
                    request.value(forHTTPHeaderField: "Authorization") == "Bearer queue" {
                     return (Data(), HTTPURLResponse(url: url, statusCode: 401, httpVersion: nil, headerFields: nil)!)
                 }
+                let interrupted = folder.appending(path: "interrupted-poll")
+                let retry = folder.appending(path: "retry-poll")
+                if FileManager.default.fileExists(atPath: retry.path), FileManager.default.fileExists(atPath: folder.appending(path: "provisioned").path) {
+                    try FileManager.default.moveItem(at: retry, to: interrupted)
+                    return (Data(), HTTPURLResponse(url: url, statusCode: 503, httpVersion: nil, headerFields: nil)!)
+                }
+                if FileManager.default.fileExists(atPath: interrupted.path) {
+                    try FileManager.default.moveItem(at: interrupted, to: folder.appending(path: "poll-recovered"))
+                }
                 if delivered.contains(id), let capacity = request.value(forHTTPHeaderField: "X-ScaleSetMaxCapacity") {
                     try Data(capacity.utf8).write(to: folder.appending(path: "capacity-after-offer"), options: .atomic)
                 }

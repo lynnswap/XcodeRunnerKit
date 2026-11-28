@@ -298,7 +298,7 @@ actor RunnerProvisioner {
                 var local = try ownership.get()
                 knownRunners = Self.managedRunners(local: local, remote: remote)
                 for runner in local where knownRunners.contains(where: runner.matches) {
-                    if try runner.folder.unregisteringRepository() == String(repository.id) {
+                    if try runner.folder.supportsJobRegistration && runner.folder.unregisteringRepository() == String(repository.id) {
                         try await mac.retainRegistration(runner.folder.name)
                     }
                 }

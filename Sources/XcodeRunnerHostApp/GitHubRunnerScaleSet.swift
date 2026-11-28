@@ -171,6 +171,7 @@ package struct GitHubRunnerScaleSet: Sendable {
     @MainActor func listen(
         pool: HostExecutionPool,
         hasCapacity: @escaping @MainActor @Sendable () -> Bool,
+        workerIsRunning: @escaping @MainActor @Sendable () throws -> Bool,
         whileAuthorized: @escaping @MainActor @Sendable (GitHubRunnerAccess) async throws -> Void,
         begin: @escaping @MainActor @Sendable () throws -> Void, finish: @escaping @MainActor @Sendable () -> Void,
         run: @escaping @MainActor @Sendable (Int32) async throws -> Void
@@ -180,18 +181,36 @@ package struct GitHubRunnerScaleSet: Sendable {
             do {
                 try await jobs.receive([], statistics: session.statistics, recovering: true)
                 var last: Int?
+                var retryUntil: ContinuousClock.Instant?
                 while !jobs.ended {
                     try Task.checkCancellation()
-                    let capacity = { @MainActor @Sendable in jobs.holdsSlot || hasCapacity() ? 1 : 0 }
-                    guard let message = try await next(after: last, capacity: capacity, ended: { jobs.ended }) else {
-                        if !jobs.ended { try await whileAuthorized(.checkConnection) }
-                        continue
+                    do {
+                        let capacity = { @MainActor @Sendable in jobs.holdsSlot || hasCapacity() ? 1 : 0 }
+                        guard let message = try await next(after: last, capacity: capacity, ended: { jobs.ended }) else {
+                            if !jobs.ended && !jobs.holdsSlot { try await whileAuthorized(.checkConnection) }
+                            retryUntil = nil
+                            continue
+                        }
+                        let body = message.body ?? ""
+                        let events = body.isEmpty ? [] : try JSONDecoder().decode([Offer].self, from: Data(body.utf8))
+                        try await jobs.receive(events, statistics: message.statistics)
+                        try await acknowledge(message.messageId)
+                        last = message.messageId
+                        retryUntil = nil
+                    } catch {
+                        try Task.checkCancellation()
+                        guard jobs.holdsSlot, !jobs.ended else { throw error }
+                        if jobs.started || (try? workerIsRunning()) == true { throw error }
+                        // Keep reading withdrawals while a JIT runner is starting. If the queue stays
+                        // unreachable for a minute, retire the unused worker and reconnect.
+                        let deadline = retryUntil ?? ContinuousClock.now.advanced(by: .seconds(60))
+                        retryUntil = deadline
+                        if ContinuousClock.now >= deadline {
+                            await jobs.drain(cancel: true)
+                            throw error
+                        }
+                        try await Task.sleep(for: .seconds(2))
                     }
-                    let body = message.body ?? ""
-                    let events = body.isEmpty ? [] : try JSONDecoder().decode([Offer].self, from: Data(body.utf8))
-                    try await jobs.receive(events, statistics: message.statistics)
-                    try await acknowledge(message.messageId)
-                    last = message.messageId
                 }
                 if let failure = jobs.failure { throw failure }
             } catch {
@@ -217,7 +236,7 @@ package struct GitHubRunnerScaleSet: Sendable {
         var holdsSlot = false
         var ended = false
         private var request: Int64?
-        private var started = false
+        private(set) var started = false
         private var wasAssigned = false
 
         init(pool: HostExecutionPool, set: GitHubRunnerScaleSet, authorize: @escaping @MainActor @Sendable () async throws -> Void,
@@ -273,10 +292,7 @@ package struct GitHubRunnerScaleSet: Sendable {
             wasAssigned = assigned
             current = Task {
                 do {
-                    let ran = try await pool.withSlotDescriptor { slot in try await self.accept(id, assigned: assigned, slot: slot) }
-                    if ran && !started && !Task.isCancelled {
-                        throw HostSettingsError("The GitHub runner exited before GitHub confirmed the job started.")
-                    }
+                    try await pool.withSlotDescriptor { slot in try await self.accept(id, assigned: assigned, slot: slot) }
                 } catch {
                     if !Task.isCancelled { failure = error }
                 }
@@ -284,15 +300,14 @@ package struct GitHubRunnerScaleSet: Sendable {
             }
         }
 
-        private func accept(_ id: Int64?, assigned: Bool, slot: Int32) async throws -> Bool {
+        private func accept(_ id: Int64?, assigned: Bool, slot: Int32) async throws {
             try await authorize()
             try Task.checkCancellation()
             try begin()
             holdsSlot = true
             defer { holdsSlot = false; finish() }
-            if !assigned, let id, try await !set.acquire(id) { return false }
+            if !assigned, let id, try await !set.acquire(id) { return }
             try await run(slot)
-            return true
         }
     }
 
