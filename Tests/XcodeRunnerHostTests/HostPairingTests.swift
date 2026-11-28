@@ -656,6 +656,12 @@ struct HostPairingTests {
             return .init(path: "/repos/owner/Project/actions/runners", body: #"{"runners":[\#(listed.joined(separator: ","))]}"#)
         }
         let bothRunners = runners([(1, "existing"), (2, newRunner)])
+        // Neither runner has opened its first scale-set session yet.
+        let scaleSetLookup: [GitHubTestTransport.Reply] = [
+            .init(path: "/repos/owner/Project/actions/runners/registration-token", body: #"{"token":"registration-token"}"#),
+            .init(path: "/actions/runner-registration", body: #"{"url":"https://actions.invalid/","token":"service-token"}"#),
+            .init(path: "/_apis/runtime/runnerscalesets", body: #"{"value":[]}"#),
+        ]
         let transport = GitHubTestTransport(listing + [
             // Selecting the repository leaves this Mac's runner and registers one on the managed Mac.
         ] + listing + [
@@ -669,10 +675,13 @@ struct HostPairingTests {
             bothRunners,
         ] + listing + [
             // Unlinking removes this Mac's runner while the managed Mac does not answer.
-            bothRunners, bothRunners, .init(path: "/repos/owner/Project/actions/runners/1", body: "", status: 204),
+            bothRunners, bothRunners,
+        ] + scaleSetLookup + [
+            .init(path: "/repos/owner/Project/actions/runners/1", body: "", status: 204),
         ] + listing + [
             // The next synchronization reads the managed Mac again and removes its runner.
             runners([(2, newRunner)]), runners([(2, newRunner)]), runners([(2, newRunner)]), runners([(2, newRunner)]),
+        ] + scaleSetLookup + [
             .init(path: "/repos/owner/Project/actions/runners/2", body: "", status: 204),
         ])
         let managerClient = await transport.client
@@ -724,7 +733,7 @@ struct HostPairingTests {
         #expect(try RunnerDirectory(url: newRunnerFolder).isRemoved())
         #expect(manager.github.runnerStatuses.isEmpty)
         #expect(try GitHubHostConfiguration.load(from: record).unlinkedRepositories.isEmpty)
-        #expect(await transport.requests.count == 24)
+        #expect(await transport.requests.count == 24 + 2 * scaleSetLookup.count)
 
         await managed.management.shutDown()
         await macs.shutDown()
