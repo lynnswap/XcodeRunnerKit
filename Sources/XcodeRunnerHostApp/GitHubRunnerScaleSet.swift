@@ -275,6 +275,8 @@ package struct GitHubRunnerScaleSet: Sendable {
         private var assignmentRevision = 0
 
         func observeDemand(_ assigned: Int) {
+            // The JobAvailable message that starts this task describes demand before acquisition.
+            guard current != nil, holdsSlot || wasAssigned else { return }
             if assigned == 0 { checkPickup() }
             else {
                 assignmentRevision += 1
@@ -299,10 +301,13 @@ package struct GitHubRunnerScaleSet: Sendable {
                     do {
                         let demand = try await set.currentStatistics()
                         guard !Task.isCancelled, holdsSlot, !started, !ended else { return }
-                        deadline = .now.advanced(by: .seconds(60))
-                        guard assignmentRevision == revision else { continue }
+                        guard assignmentRevision == revision else {
+                            deadline = .now.advanced(by: .seconds(60))
+                            continue
+                        }
                         if try workerIsRunning() { started = true }
                         else if demand?.totalAssignedJobs == 0 { current?.cancel(); return }
+                        deadline = .now.advanced(by: .seconds(60))
                     } catch {
                         guard !Task.isCancelled, holdsSlot, !started, !ended else { return }
                         if assignmentRevision != revision {
